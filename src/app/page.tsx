@@ -65,7 +65,7 @@ export default function Home() {
             () => dispatch({type: "order"})
         webApp?.MainButton.setParams({
             text_color: '#fff',
-            color: '#31b545'
+            color: '#0A84FF'
         }).onClick(callback)
         webApp?.BackButton.onClick(() => dispatch({type: "storefront"}))
         return () => {
@@ -81,9 +81,9 @@ export default function Home() {
             webApp?.BackButton.show()
 
         if (state.mode === "order")
-            webApp?.MainButton.setText("CHECKOUT")
+            webApp?.MainButton.setText("بررسی نهایی")
         else
-            webApp?.MainButton.setText("VIEW ORDER")
+            webApp?.MainButton.setText("مشاهده سفارش")
     }, [state.mode])
 
     useEffect(() => {

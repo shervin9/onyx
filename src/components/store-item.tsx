@@ -33,7 +33,7 @@ export default function StoreItem({product}: { product: Product }) {
                 <button className="store-product-incr-button"
                         onClick={() => dispatch({type: "inc", product})}
                 >
-                    <span className="button-item-label">Add</span>
+                    <span className="button-item-label">افزودن</span>
                 </button>
             </div>
         </div>
