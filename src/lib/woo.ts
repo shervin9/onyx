@@ -53,8 +53,8 @@ async function createOrder(line_items: any[], customer_note: string, address: st
             country: "address",
         },
         billing: {
-            first_name: userName,
-            last_name: userName,
+            first_name: "userName",
+            last_name: "userName",
             email: "qwe@qwe.qwe",
             phone: "09321323321",
             address_1: address,
