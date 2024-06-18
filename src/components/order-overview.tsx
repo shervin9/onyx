@@ -12,9 +12,9 @@ export default function OrderOverview() {
         <section className="order-overview" dir="rtl">
             <div className="order-block">
                 <div className="order-header-wrap">
-                    <h2 className="order-header">Your Order</h2>
+                    <h2 className="order-header">سفارش شما</h2>
                     <span className="order-edit"
-                          onClick={() => dispatch({type: "storefront"})}>Edit</span>
+                          onClick={() => dispatch({type: "storefront"})}>ویرایش</span>
                 </div>
                 <div className="order-items">
                     {items}
@@ -24,13 +24,21 @@ export default function OrderOverview() {
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
-                        placeholder="Add comment…"
+                        placeholder="نام"
                         onChange={(e) =>
-                            dispatch({type: "comment", comment: e.currentTarget.value})
+                            dispatch({type: "address", address: e.currentTarget.value})
+                        }
+                    ></textarea>
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="نام خانوادگی"
+                        onChange={(e) =>
+                            dispatch({type: "address", address: e.currentTarget.value})
                         }
                     ></textarea>
                 <div className="order-text-field-hint">
-                    Any special requests, details, final wishes etc.
+                    مشخصات مشتری
                 </div>
             </div>
             <div className="order-text-field-wrap">
@@ -44,6 +52,19 @@ export default function OrderOverview() {
                     ></textarea>
                 <div className="order-text-field-hint">
                     Shipping Address
+                </div>
+            </div>
+            <div className="order-text-field-wrap">
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="توضیحات …"
+                        onChange={(e) =>
+                            dispatch({type: "comment", comment: e.currentTarget.value})
+                        }
+                    ></textarea>
+                <div className="order-text-field-hint">
+                    توضیحات، جزییات و یا درخواست های شما...
                 </div>
             </div>
         </section>
