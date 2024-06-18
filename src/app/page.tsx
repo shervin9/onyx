@@ -58,7 +58,7 @@ export default function Home() {
         }
 
 
-    }, [webApp, state.cart, state.comment, state.shippingZone])
+    }, [webApp, state.cart, state.comment, state.address, state.shippingZone])
 
     useEffect(() => {
         const callback = state.mode === "order" ? handleCheckout :
