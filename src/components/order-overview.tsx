@@ -12,9 +12,9 @@ export default function OrderOverview() {
         <section className="order-overview">
             <div className="order-block">
                 <div className="order-header-wrap">
-                    <h2 className="order-header">سفارش شما</h2>
+                    <h2 className="order-header">Your Order</h2>
                     <span className="order-edit"
-                          onClick={() => dispatch({type: "storefront"})}>ویرایش سفارش</span>
+                          onClick={() => dispatch({type: "storefront"})}>Edit</span>
                 </div>
                 <div className="order-items">
                     {items}
@@ -24,26 +24,26 @@ export default function OrderOverview() {
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
-                        placeholder="افزودن توضیحات"
+                        placeholder="Add comment…"
                         onChange={(e) =>
                             dispatch({type: "comment", comment: e.currentTarget.value})
                         }
                     ></textarea>
                 <div className="order-text-field-hint">
-                    مثلا قبل ارسال تماس گرفته شود....
+                    Any special requests, details, final wishes etc.
                 </div>
             </div>
             <div className="order-text-field-wrap">
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
-                        placeholder="آدرس شما"
+                        placeholder="Your Address…"
                         onChange={(e) =>
                             dispatch({type: "address", address: e.currentTarget.value})
                         }
                     ></textarea>
                 <div className="order-text-field-hint">
-                     آدرس جهت ارسال کالا
+                    Shipping Address
                 </div>
             </div>
         </section>
