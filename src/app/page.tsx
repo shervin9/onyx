@@ -20,6 +20,7 @@ export default function Home() {
         }))
         const body = JSON.stringify({
             userId: user?.id,
+            username: user?.username,
             chatId: webApp?.initDataUnsafe.chat?.id,
             invoiceSupported,
             comment: state.comment,
