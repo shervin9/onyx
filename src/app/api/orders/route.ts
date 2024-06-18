@@ -14,7 +14,7 @@ export async function POST(request: NextRequest) {
         }
     });
 
-    const order = await woo.createOrder(line_items, body.comment, body.address, body.userName)
+    const order = await woo.createOrder(line_items, body.comment, body.address, body.username)
 
     // @ts-ignore
     const telegramCurrency = telegramCurrencies[order.currency]
