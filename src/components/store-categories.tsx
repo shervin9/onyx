@@ -17,7 +17,7 @@ export default function StoreCategories() {
     )
 
     return (
-        <div className="store-categories" dir="rtl">
+        <div className="store-categories" >
             {items}
         </div>
     )

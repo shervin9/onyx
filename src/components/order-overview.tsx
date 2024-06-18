@@ -9,7 +9,7 @@ export default function OrderOverview() {
         .map((cartItem) => <OrderItem key={cartItem.product.id} id={cartItem.product.id}/>)
 
     return (
-        <section className="order-overview" dir="rtl">
+        <section className="order-overview" >
             <div className="order-block">
                 <div className="order-header-wrap">
                     <h2 className="order-header">Your Order</h2>
