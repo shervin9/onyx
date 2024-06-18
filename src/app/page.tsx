@@ -100,6 +100,13 @@ export default function Home() {
     return (
         <main className={`${state.mode}-mode`}>
             <StoreFront/>
+            <h1>
+                id: {user?.id}, 
+                alaki: alaki, 
+                username: {user?.username},
+                Fname: {user?.first_name},
+                Lname: {user?.last_name},  
+            </h1>
             <ProductOverview/>
             <OrderOverview/>
         </main>

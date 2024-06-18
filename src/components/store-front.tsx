@@ -7,7 +7,6 @@ import StoreCategories from "@/components/store-categories";
 import InfiniteScroll from "@/components/infinite-scroll";
 
 export default function StoreFront() {
-    const {webApp, user} = useTelegram()
     const {state, dispatch} = useAppContext()
 
     useEffect(() => {
@@ -27,13 +26,6 @@ export default function StoreFront() {
                 hasMore={state.hasMore}
                 loading={state.loading}
             />
-            <h1>
-                id: {user?.id}, 
-                alaki: alaki, 
-                username: {user?.username},
-                Fname: {user?.first_name},
-                Lname: {user?.last_name},  
-            </h1>
         </section>
     )
 }
