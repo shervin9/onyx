@@ -1,9 +1,12 @@
 "use client"
 import {useAppContext} from "@/providers/context-provider";
 import OrderItem from "@/components/order-item";
+import { useState } from 'react'
 
 export default function OrderOverview() {
     const {state, dispatch} = useAppContext()
+    const [isPaymentOnline, setIsPaymentOnline] = useState("onlinePay")
+
 
     const items = Array.from(state.cart.values())
         .map((cartItem) => <OrderItem key={cartItem.product.id} id={cartItem.product.id}/>)
@@ -105,20 +108,22 @@ export default function OrderOverview() {
             <td>
               <input
                 type="radio"
-                name="site_name"
-                // value={result.SITE_NAME}
-                // checked={this.state.site === result.SITE_NAME}
-                // onChange={this.onSiteChanged}
+                name="onlinePay"
+                value={"onlinePay"}
+                checked={isPaymentOnline === "onlinePay"}
+                disabled={false}  
+                onChange={(e) => setIsPaymentOnline(e.target.value)}
               />
               پرداخت اینترنتی
             </td>
             <td>
               <input
                 type="radio"
-                name="address"
-                // value={result.ADDRESS}
-                // checked={this.state.address === result.ADDRESS}
-                // onChange={this.onAddressChanged}
+                name="offlinePay"
+                value={"offlinePay"}
+                checked={isPaymentOnline === "offlinePay"}
+                disabled={false}  
+                onChange={(e) => setIsPaymentOnline(e.target.value)}
               />
               پرداخت در محل
             </td>
