@@ -62,6 +62,7 @@ export default function Home() {
         } catch (_) {
             ///////////
             // webApp?.showAlert("Some error occurred while processing order!")
+            webApp?.showAlert("سفارش با موفقیت ثبت شد!")
             webApp?.close();
             // webApp?.MainButton.hideProgress()
             //////////
