@@ -41,24 +41,26 @@ export default function Home() {
         try {
             const res = await fetch("api/orders", {method: "POST", body})
             const result = await res.json()
-
-            if (invoiceSupported) {
-                webApp?.openInvoice(result.invoice_link, function (status) {
-                    webApp?.MainButton.hideProgress()
-                    if (status == 'paid') {
-                        console.log("[paid] InvoiceStatus " + result);
-                        webApp?.close();
-                    } else if (status == 'failed') {
-                        console.log("[failed] InvoiceStatus " + result);
-                        webApp?.HapticFeedback.notificationOccurred('error');
-                    } else {
-                        console.log("[unknown] InvoiceStatus" + result);
-                        webApp?.HapticFeedback.notificationOccurred('warning');
-                    }
-                });
-            } else {
-                webApp?.showAlert("Some features not available. Please update your telegram app!")
+            if(result.id != null) {
+                // send to payment here!
             }
+            // if (invoiceSupported) {
+            //     webApp?.openInvoice(result.invoice_link, function (status) {
+            //         webApp?.MainButton.hideProgress()
+            //         if (status == 'paid') {
+            //             console.log("[paid] InvoiceStatus " + result);
+            //             webApp?.close();
+            //         } else if (status == 'failed') {
+            //             console.log("[failed] InvoiceStatus " + result);
+            //             webApp?.HapticFeedback.notificationOccurred('error');
+            //         } else {
+            //             console.log("[unknown] InvoiceStatus" + result);
+            //             webApp?.HapticFeedback.notificationOccurred('warning');
+            //         }
+            //     });
+            // } else {
+            //     webApp?.showAlert("Some features not available. Please update your telegram app!")
+            // }
         } catch (_) {
             ///////////
             // webApp?.showAlert("Some error occurred while processing order!")
