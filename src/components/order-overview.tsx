@@ -29,7 +29,6 @@ export default function OrderOverview() {
                             dispatch({type: "address", address: e.currentTarget.value})
                         }
                     ></textarea>
-                    <hr></hr>
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
@@ -93,14 +92,30 @@ export default function OrderOverview() {
                 </div>
             </div>
             <div className="order-text-field-wrap">
-                    <textarea
-                        className="order-text-field order-block"
-                        rows={1}
-                        placeholder="توضیحات …"
-                        onChange={(e) =>
-                            dispatch({type: "comment", comment: e.currentTarget.value})
-                        }
-                    ></textarea>
+            <tbody>
+          <tr>
+            <td>
+              <input
+                type="radio"
+                name="site_name"
+                // value={result.SITE_NAME}
+                // checked={this.state.site === result.SITE_NAME}
+                // onChange={this.onSiteChanged}
+              />
+              پرداخت اینترنتی
+            </td>
+            <td>
+              <input
+                type="radio"
+                name="address"
+                // value={result.ADDRESS}
+                // checked={this.state.address === result.ADDRESS}
+                // onChange={this.onAddressChanged}
+              />
+              پرداخت در محل
+            </td>
+          </tr>
+        </tbody>
                 <div className="order-text-field-hint">
                     روش پرداخت
                 </div>
