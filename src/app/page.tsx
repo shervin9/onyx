@@ -24,6 +24,12 @@ export default function Home() {
             chatId: webApp?.initDataUnsafe.chat?.id,
             invoiceSupported,
             comment: state.comment,
+            postcode: state.postcode,
+            name: state.name,
+            lName: state.lName,
+            phone: state.phone,
+            province: state.province,
+            city: state.city,
             address: state.address,
             shippingZone: state.shippingZone,
             items
@@ -59,7 +65,7 @@ export default function Home() {
         }
 
 
-    }, [webApp, state.cart, state.comment, state.address, state.shippingZone])
+    }, [webApp, state.cart, state.comment, state.name, state.lName, state.phone, state.province, state.city, state.address, state.postcode, state.shippingZone])
 
     useEffect(() => {
         const callback = state.mode === "order" ? handleCheckout :

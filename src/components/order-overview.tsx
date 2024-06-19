@@ -26,7 +26,7 @@ export default function OrderOverview() {
                         rows={1}
                         placeholder="نام …"
                         onChange={(e) =>
-                            dispatch({type: "address", address: e.currentTarget.value})
+                            dispatch({type: "name", name: e.currentTarget.value})
                         }
                     ></textarea>
                     <textarea
@@ -34,7 +34,7 @@ export default function OrderOverview() {
                         rows={1}
                         placeholder="نام خانوادگی …"
                         onChange={(e) =>
-                            dispatch({type: "address", address: e.currentTarget.value})
+                            dispatch({type: "lName", lName: e.currentTarget.value})
                         }
                     ></textarea>
                     <textarea
@@ -42,7 +42,7 @@ export default function OrderOverview() {
                         rows={1}
                         placeholder="شماره تماس …"
                         onChange={(e) =>
-                            dispatch({type: "address", address: e.currentTarget.value})
+                            dispatch({type: "phone", phone: e.currentTarget.value})
                         }
                     ></textarea>
                 <div className="order-text-field-hint">
@@ -55,7 +55,7 @@ export default function OrderOverview() {
                         rows={1}
                         placeholder="استان…"
                         onChange={(e) =>
-                            dispatch({type: "address", address: e.currentTarget.value})
+                            dispatch({type: "province", province: e.currentTarget.value})
                         }
                     ></textarea>
                     <textarea
@@ -63,7 +63,7 @@ export default function OrderOverview() {
                         rows={1}
                         placeholder="شهر …"
                         onChange={(e) =>
-                            dispatch({type: "address", address: e.currentTarget.value})
+                            dispatch({type: "city", city: e.currentTarget.value})
                         }
                     ></textarea>
                     <textarea
@@ -72,6 +72,14 @@ export default function OrderOverview() {
                         placeholder="آدرس شما …"
                         onChange={(e) =>
                             dispatch({type: "address", address: e.currentTarget.value})
+                        }
+                    ></textarea>
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="کد پستی …"
+                        onChange={(e) =>
+                            dispatch({type: "postcode", postcode: e.currentTarget.value})
                         }
                     ></textarea>
                 <div className="order-text-field-hint">

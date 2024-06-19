@@ -14,6 +14,12 @@ type Action =
     | { type: "inc", product: Product }
     | { type: "dec", product: Product }
     | { type: "comment", comment: string }
+    | { type: "postcode", postcode: string }
+    | { type: "name", name: string }
+    | { type: "lName", lName: string }
+    | { type: "phone", phone: string }
+    | { type: "province", province: string }
+    | { type: "city", city: string }
     | { type: "address", address: string }
 
 type Dispatch = (action: Action) => void
@@ -54,6 +60,12 @@ type State = {
     selectedProduct?: Product
     cart: Map<number, CartItem>
     comment?: string,
+    postcode?: string,
+    name?: string,
+    lName?: string,
+    phone?: string,
+    province?: string,
+    city?: string,
     address?: string,
     shippingZone: number,
 }
@@ -120,6 +132,30 @@ function contextReducer(state: State, action: Action) {
         }
         case 'comment': {
             state.comment = action.comment
+            break
+        }
+        case 'postcode': {
+            state.postcode = action.postcode
+            break
+        }
+        case 'name': {
+            state.name = action.name
+            break
+        }
+        case 'lName': {
+            state.lName = action.lName
+            break
+        }
+        case 'phone': {
+            state.phone = action.phone
+            break
+        }
+        case 'province': {
+            state.province = action.province
+            break
+        }
+        case 'city': {
+            state.city = action.city
             break
         }
         case 'address': {

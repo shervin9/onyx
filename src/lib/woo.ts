@@ -37,37 +37,37 @@ function call(method: string, api: string, query?: URLSearchParams, body?: any) 
     return fetch(url, init);
 }
 
-async function createOrder(line_items: any[], customer_note: string, address: string, userName: string) {
+async function createOrder(line_items: any[], customer_note: string, address: string, userName: string, name: string, lName: string, phone: string, province: string, city: string, postcode: string) {
     const body = {
         "set_paid": true,
         line_items,
         customer_note,
         shipping: {
-            first_name: userName,
-            last_name: userName,
+            first_name: name,
+            last_name: lName,
             address_1: address,
-            address_2: address,
-            city: "address",
-            state: "address",
-            postcode: "address",
-            country: "address",
+            address_2: "",
+            city: city,
+            state: province,
+            postcode: postcode,
+            country: "Iran",
         },
         billing: {
-            first_name: userName,
-            last_name: userName,
-            email: "qwe@qwe.qwe",
-            phone: "09321323321",
+            first_name: name,
+            last_name: lName,
+            email: "TelegramCustomer@Onyx.com",
+            phone: phone,
             address_1: address,
-            address_2: address,
-            city: "address",
-            state: "address",
-            postcode: "address",
-            country: "address",
+            address_2: "",
+            city: city,
+            state: province,
+            postcode: postcode,
+            country: "Iran",
         }
     }
-    console.log("-------------");
-    console.log(body);
-    console.log("-------------");
+    /////
+    //// we should call create customer here too! 
+    ////
     const res = await post("orders", body)
     return await res.json()
 }
