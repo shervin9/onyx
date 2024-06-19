@@ -24,7 +24,16 @@ export default function OrderOverview() {
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
-                        placeholder="نام"
+                        placeholder="نام …"
+                        onChange={(e) =>
+                            dispatch({type: "address", address: e.currentTarget.value})
+                        }
+                    ></textarea>
+                    <hr></hr>
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="نام خانوادگی …"
                         onChange={(e) =>
                             dispatch({type: "address", address: e.currentTarget.value})
                         }
@@ -32,7 +41,7 @@ export default function OrderOverview() {
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
-                        placeholder="نام خانوادگی"
+                        placeholder="شماره تماس …"
                         onChange={(e) =>
                             dispatch({type: "address", address: e.currentTarget.value})
                         }
@@ -45,13 +54,29 @@ export default function OrderOverview() {
                     <textarea
                         className="order-text-field order-block"
                         rows={1}
-                        placeholder="Your Address…"
+                        placeholder="استان…"
+                        onChange={(e) =>
+                            dispatch({type: "address", address: e.currentTarget.value})
+                        }
+                    ></textarea>
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="شهر …"
+                        onChange={(e) =>
+                            dispatch({type: "address", address: e.currentTarget.value})
+                        }
+                    ></textarea>
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="آدرس شما …"
                         onChange={(e) =>
                             dispatch({type: "address", address: e.currentTarget.value})
                         }
                     ></textarea>
                 <div className="order-text-field-hint">
-                    Shipping Address
+                    آدرس کامل گیرنده
                 </div>
             </div>
             <div className="order-text-field-wrap">
@@ -65,6 +90,19 @@ export default function OrderOverview() {
                     ></textarea>
                 <div className="order-text-field-hint">
                     توضیحات، جزییات و یا درخواست های شما...
+                </div>
+            </div>
+            <div className="order-text-field-wrap">
+                    <textarea
+                        className="order-text-field order-block"
+                        rows={1}
+                        placeholder="توضیحات …"
+                        onChange={(e) =>
+                            dispatch({type: "comment", comment: e.currentTarget.value})
+                        }
+                    ></textarea>
+                <div className="order-text-field-hint">
+                    روش پرداخت
                 </div>
             </div>
         </section>
