@@ -4,165 +4,82 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Onyx — Stable remote shell for unreliable networks</title>
-  <meta name="description" content="QUIC when available. SSH when it's not. A stable remote shell built for AI workflows and DevOps.">
-  <meta property="og:title" content="Onyx — Stable remote shell for unreliable networks">
-  <meta property="og:description" content="QUIC when available. SSH when it's not.">
-  <meta property="og:type" content="website">
-  <meta name="theme-color" content="#070707">
+  <meta name="description" content="QUIC when available. SSH when it's not. Built for AI workflows and DevOps.">
+  <meta name="theme-color" content="#090909">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<div class="glow-top" aria-hidden="true"></div>
-
-<!-- ── NAV ─────────────────────────────────────────────────────── -->
-<nav role="navigation" aria-label="Main">
-  <div class="container nav-inner">
-    <a href="/" class="wordmark" aria-label="Onyx home">onyx</a>
-    <div class="nav-links">
-      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a>
-      <a href="https://github.com/shervin9/onyx/blob/main/README.md" target="_blank" rel="noopener noreferrer">Docs</a>
-      <a href="#install" class="nav-cta">Install</a>
-    </div>
-  </div>
+<nav>
+  <a href="/" class="logo">onyx</a>
+  <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
 </nav>
 
-<!-- ── HERO ─────────────────────────────────────────────────────── -->
-<section class="hero" aria-labelledby="hero-heading">
-  <div class="container hero-inner">
+<main>
 
-    <div class="hero-copy">
-      <div class="badge" aria-label="Open source project">Open source</div>
-      <h1 id="hero-heading">Stable remote shell for unreliable networks.</h1>
-      <p>QUIC when available. SSH when it's not.<br>Built for AI workflows and DevOps.</p>
-      <div class="cta-row">
-        <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-solid">
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-          </svg>
-          View on GitHub
-        </a>
-        <a href="#install" class="btn btn-ghost">Install →</a>
-      </div>
+  <!-- Hero -->
+  <section class="hero">
+    <div class="badge">Open source</div>
+    <h1>Stable remote shell<br>for unreliable networks.</h1>
+    <p class="sub">QUIC when available. SSH when it's not.<br>Built for AI workflows and DevOps.</p>
+    <div class="actions">
+      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
+      <a href="#install" class="btn btn-ghost">Install</a>
     </div>
-
-    <div class="hero-term" aria-hidden="true">
-      <div class="terminal">
-        <div class="term-bar">
-          <span class="dot r"></span>
-          <span class="dot y"></span>
-          <span class="dot g"></span>
-          <span class="term-title">onyx — my-server</span>
-        </div>
-        <div class="term-body" id="term-body"></div>
-      </div>
+    <div class="term-line" aria-hidden="true">
+      <span class="dollar">$</span>
+      <span id="typed"></span><span class="caret"></span>
     </div>
+  </section>
 
-  </div>
-</section>
+  <!-- Features -->
+  <section class="features">
+    <ul>
+      <li>
+        <strong>QUIC + SSH fallback</strong>
+        <span>Fast UDP transport by default. Falls back to SSH silently if UDP is blocked.</span>
+      </li>
+      <li>
+        <strong>Session persistence</strong>
+        <span>Network drops, laptop sleeps, Wi-Fi switches — your session waits on the remote.</span>
+      </li>
+      <li>
+        <strong>tmux-powered</strong>
+        <span>Full scrollback, copy mode, and pane support. GPU jobs keep running.</span>
+      </li>
+      <li>
+        <strong>AI-friendly</strong>
+        <span>Built for long-running workflows where a dropped connection costs hours.</span>
+      </li>
+    </ul>
+  </section>
 
-<!-- ── TRUST STRIP ───────────────────────────────────────────────── -->
-<div class="trust" role="list" aria-label="Key features">
-  <div class="container trust-inner">
-    <span role="listitem">Open source</span>
-    <span class="sep" aria-hidden="true">·</span>
-    <span role="listitem">Session persistence</span>
-    <span class="sep" aria-hidden="true">·</span>
-    <span role="listitem">SSH fallback</span>
-    <span class="sep" aria-hidden="true">·</span>
-    <span role="listitem">AI-friendly</span>
-    <span class="sep" aria-hidden="true">·</span>
-    <span role="listitem">Works on unstable networks</span>
-  </div>
-</div>
-
-<!-- ── FEATURES ──────────────────────────────────────────────────── -->
-<section class="section reveal" id="features" aria-labelledby="features-heading">
-  <div class="container">
-    <h2 id="features-heading">Built for real conditions.</h2>
-    <div class="cards" role="list">
-
-      <div class="card" role="listitem">
-        <div class="card-icon" aria-hidden="true">↺</div>
-        <h3>Reconnects automatically</h3>
-        <p>Survives sleep, Wi-Fi switches, and mobile roaming. Your session waits on the remote.</p>
-      </div>
-
-      <div class="card" role="listitem">
-        <div class="card-icon" aria-hidden="true">⚡</div>
-        <h3>QUIC + SSH fallback</h3>
-        <p>Connects over QUIC/UDP by default. Falls back to SSH silently if UDP is blocked.</p>
-      </div>
-
-      <div class="card" role="listitem">
-        <div class="card-icon" aria-hidden="true">⊞</div>
-        <h3>tmux-powered sessions</h3>
-        <p>Every session lives in tmux. Disconnect, come back, continue. GPU jobs keep running.</p>
-      </div>
-
-      <div class="card" role="listitem">
-        <div class="card-icon" aria-hidden="true">◈</div>
-        <h3>Live metrics bar</h3>
-        <p>CPU, RAM, GPU%, and VRAM in your status bar. Essential for long training runs.</p>
-      </div>
-
+  <!-- Install -->
+  <section class="install" id="install">
+    <h2>Get started</h2>
+    <div class="code-wrap">
+      <code id="install-cmd">curl -sSL https://useonyx.dev/install.sh | bash</code>
+      <button id="copy-btn" onclick="copyCmd()">Copy</button>
     </div>
-  </div>
-</section>
-
-<!-- ── HOW IT WORKS ───────────────────────────────────────────────── -->
-<section class="section how reveal" id="how" aria-labelledby="how-heading">
-  <div class="container">
-    <h2 id="how-heading">How it works.</h2>
-    <div class="steps">
-
-      <div class="step">
-        <div class="step-n" aria-hidden="true">01</div>
-        <h3>Bootstrap once</h3>
-        <p>Run <code>onyx user@host</code>. On first connect, Onyx builds and starts the server binary over SSH. Nothing to configure manually.</p>
-      </div>
-
-      <div class="step">
-        <div class="step-n" aria-hidden="true">02</div>
-        <h3>Connect over QUIC</h3>
-        <p>Subsequent connects go over QUIC/UDP — fast handshakes, built-in multiplexing, transparent reconnect on network drop.</p>
-      </div>
-
-      <div class="step">
-        <div class="step-n" aria-hidden="true">03</div>
-        <h3>Fall back silently</h3>
-        <p>UDP blocked by a cloud firewall? Onyx falls back to plain SSH automatically. No flags. No intervention required.</p>
-      </div>
-
+    <div class="usage-line">
+      <code>$ onyx user@server</code>
     </div>
-  </div>
-</section>
+  </section>
 
-<!-- ── INSTALL ────────────────────────────────────────────────────── -->
-<section class="section install reveal" id="install" aria-labelledby="install-heading">
-  <div class="container install-inner">
-    <h2 id="install-heading">Get started in seconds.</h2>
-    <div class="cmd-wrap">
-      <code id="install-cmd">curl -fsSL https://useonyx.dev/install.sh | sh</code>
-      <button class="copy-btn" id="copy-btn" onclick="copyCmd()" aria-label="Copy install command">Copy</button>
-    </div>
-    <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-solid">
-      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
-      </svg>
-      View on GitHub
-    </a>
-    <p class="fine">Open source · MIT License · No tracking · No accounts required</p>
-  </div>
-</section>
+  <!-- OSS -->
+  <section class="oss">
+    <p>Open source. Inspect the code, self-host it,<br>and contribute on GitHub.</p>
+    <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
+  </section>
 
-<!-- ── FOOTER ─────────────────────────────────────────────────────── -->
-<footer role="contentinfo">
-  <div class="container footer-inner">
-    <span class="wordmark">onyx</span>
-    <span>MIT License · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a></span>
-  </div>
+</main>
+
+<footer>
+  <span class="logo">onyx</span>
+  <span>MIT License · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a></span>
 </footer>
 
 <script src="script.js"></script>
