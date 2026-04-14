@@ -8,6 +8,7 @@ use rustls::{
 use shared::{Message, DEFAULT_PORT};
 use std::{io::Write, net::SocketAddr, os::unix::process::CommandExt, sync::{Arc, Mutex}, time::{Duration, Instant}};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 // ---------------------------------------------------------------------------
 // Source files embedded at compile time for remote bootstrap.
@@ -295,12 +296,13 @@ struct OnyxTarget {
     ssh_mode: bool,
 }
 
-/// Parse CLI arguments; return (raw_target, identity_file, no_fallback).
-fn parse_args() -> (String, Option<String>, bool) {
+/// Parse CLI arguments; return (raw_target, identity_file, no_fallback, forwards).
+fn parse_args() -> (String, Option<String>, bool, Vec<(u16, u16)>) {
     let mut args = std::env::args().skip(1).peekable();
     let mut identity: Option<String> = None;
     let mut target: Option<String> = None;
     let mut no_fallback = false;
+    let mut forwards: Vec<(u16, u16)> = Vec::new();
 
     while let Some(a) = args.next() {
         if a == "-i" {
@@ -310,6 +312,23 @@ fn parse_args() -> (String, Option<String>, bool) {
             });
         } else if a == "--no-fallback" {
             no_fallback = true;
+        } else if a == "--forward" || a == "-L" {
+            let spec = args.next().unwrap_or_else(|| {
+                eprintln!("onyx: --forward requires local_port:remote_port");
+                std::process::exit(1);
+            });
+            let mut parts = spec.splitn(2, ':');
+            let lp = parts.next().and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or_else(|| {
+                    eprintln!("onyx: --forward: invalid spec '{spec}' (expected local:remote)");
+                    std::process::exit(1);
+                });
+            let rp = parts.next().and_then(|s| s.parse::<u16>().ok())
+                .unwrap_or_else(|| {
+                    eprintln!("onyx: --forward: invalid spec '{spec}' (expected local:remote)");
+                    std::process::exit(1);
+                });
+            forwards.push((lp, rp));
         } else if target.is_none() {
             target = Some(a);
         } else {
@@ -319,15 +338,16 @@ fn parse_args() -> (String, Option<String>, bool) {
     }
 
     let target = target.unwrap_or_else(|| {
-        eprintln!("Usage: onyx [--no-fallback] [-i identity_file] [user@]<host>[:<quic-port>]");
-        eprintln!("  hetzner-dev                   SSH alias → bootstrap + QUIC");
+        eprintln!("Usage: onyx [--no-fallback] [-i identity_file] [--forward local:remote] [user@]<host>[:<quic-port>]");
+        eprintln!("  my-server                     SSH alias → bootstrap + QUIC");
         eprintln!("  user@host[:port]              SSH bootstrap + QUIC");
         eprintln!("  128.140.63.67[:port]          direct QUIC (no SSH)");
+        eprintln!("  --forward 8888:8888           tunnel localhost:8888 → remote:8888 (repeatable)");
         eprintln!("  --no-fallback                 exit on QUIC failure instead of falling back to SSH");
         std::process::exit(1);
     });
 
-    (target, identity, no_fallback)
+    (target, identity, no_fallback, forwards)
 }
 
 /// Use `ssh -G <ssh_target>` to resolve the canonical hostname and user.
@@ -709,6 +729,64 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
 }
 
 // ---------------------------------------------------------------------------
+// Port forwarding — TCP-over-QUIC
+// ---------------------------------------------------------------------------
+
+/// Binds a TCP listener on localhost:local_port.  For every accepted TCP
+/// connection a new QUIC bidirectional stream is opened on `conn` and data
+/// flows in both directions until either side closes.
+/// The task runs until aborted (by try_once cleanup) or until the bind fails.
+async fn run_forward_listener(conn: quinn::Connection, local_port: u16, remote_port: u16) {
+    let listener = match TcpListener::bind(
+        std::net::SocketAddr::from(([127, 0, 0, 1], local_port))
+    ).await {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[forward] cannot bind localhost:{local_port}: {e}");
+            return;
+        }
+    };
+    eprintln!("[forward] localhost:{local_port} → remote:{remote_port}");
+    loop {
+        let (tcp, _addr) = match listener.accept().await {
+            Ok(x) => x,
+            Err(_) => break,
+        };
+        let c = conn.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_forward_conn(c, tcp, remote_port).await {
+                eprintln!("[forward] :{local_port}→:{remote_port}: {e:#}");
+            }
+        });
+    }
+}
+
+/// Opens a QUIC stream, performs the ForwardConnect handshake, then copies
+/// bytes between the TCP socket and the QUIC stream until both sides close.
+async fn handle_forward_conn(
+    conn:        quinn::Connection,
+    tcp:         tokio::net::TcpStream,
+    remote_port: u16,
+) -> Result<()> {
+    let (mut qs, mut qr) = conn.open_bi().await.context("open forward stream")?;
+    send_msg(&mut qs, &Message::ForwardConnect { remote_port }).await?;
+    match recv_msg(&mut qr).await? {
+        Message::ForwardAck => {}
+        Message::ForwardError { reason } =>
+            anyhow::bail!("server refused :{remote_port}: {reason}"),
+        other => anyhow::bail!("unexpected forward response: {other:?}"),
+    }
+    let (mut tcp_r, mut tcp_w) = tcp.into_split();
+    // Drive both directions concurrently; finish when both complete (proper
+    // half-close: EOF from one side propagates to the other via copy's shutdown).
+    let _ = tokio::join!(
+        tokio::io::copy(&mut qr, &mut tcp_w),
+        tokio::io::copy(&mut tcp_r, &mut qs),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Single connection attempt + I/O loop
 // ---------------------------------------------------------------------------
 
@@ -718,6 +796,7 @@ async fn try_once(
     session:     &mut Option<(String, String)>,
     host_port:   &str,
     capture:     &FpCapture,
+    forwards:    &[(u16, u16)],
 ) -> Result<bool> {
     // Clear any fingerprint left over from a previous attempt.
     *capture.lock().unwrap() = None;
@@ -773,6 +852,13 @@ async fn try_once(
     } else {
         eprintln!("[mode] QUIC  (session {session_id})");
     }
+
+    // Spawn one TCP listener per --forward spec.  Each listener opens new QUIC
+    // streams on this connection for individual TCP connections.  All handles
+    // are aborted when this function returns (connection dropped or shell exit).
+    let forward_handles: Vec<tokio::task::JoinHandle<()>> = forwards.iter()
+        .map(|&(lp, rp)| tokio::spawn(run_forward_listener(conn.clone(), lp, rp)))
+        .collect();
 
     let (cols, rows) = get_terminal_size();
     send_msg(&mut send, &Message::Resize { cols, rows }).await?;
@@ -845,6 +931,7 @@ async fn try_once(
         r = &mut output_jh  => { stdin_jh.abort();  r.unwrap_or(false) }
     };
 
+    for jh in &forward_handles { jh.abort(); }
     conn.close(0u32.into(), b"bye");
     Ok(shell_exited)
 }
@@ -894,7 +981,7 @@ fn clear_banner() {
 async fn main() -> Result<()> {
     rustls::crypto::ring::default_provider().install_default().ok();
 
-    let (raw_target, identity_file, no_fallback) = parse_args();
+    let (raw_target, identity_file, no_fallback, forwards) = parse_args();
 
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
@@ -962,7 +1049,7 @@ async fn main() -> Result<()> {
             }
         }
 
-        match try_once(server_addr, &endpoint, &mut session, &host_port, &capture).await {
+        match try_once(server_addr, &endpoint, &mut session, &host_port, &capture, &forwards).await {
             // Shell exited cleanly — just exit.
             Ok(true) => break,
 

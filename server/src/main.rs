@@ -228,6 +228,54 @@ async fn pty_task(
 }
 
 // ---------------------------------------------------------------------------
+// Port forwarding — one task per individual TCP connection
+// ---------------------------------------------------------------------------
+
+/// Connects to localhost:remote_port on the server, sends ForwardAck, then
+/// pipes bytes between the QUIC stream and the TCP connection until either
+/// side closes.
+async fn run_forward(
+    mut send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    remote_port: u16,
+) -> Result<()> {
+    let tcp = match tokio::net::TcpStream::connect(
+        std::net::SocketAddr::from(([127, 0, 0, 1], remote_port))
+    ).await {
+        Ok(s) => {
+            send_msg(&mut send, &Message::ForwardAck).await?;
+            s
+        }
+        Err(e) => {
+            send_msg(&mut send, &Message::ForwardError { reason: e.to_string() }).await.ok();
+            return Ok(());
+        }
+    };
+    let (mut tcp_r, mut tcp_w) = tcp.into_split();
+    let _ = tokio::join!(
+        tokio::io::copy(&mut recv, &mut tcp_w),
+        tokio::io::copy(&mut tcp_r, &mut send),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stream dispatcher — reads first message and routes to PTY or forward handler
+// ---------------------------------------------------------------------------
+
+async fn handle_stream(
+    send: quinn::SendStream,
+    mut recv: quinn::RecvStream,
+    sessions: Sessions,
+) -> Result<()> {
+    let first = recv_msg(&mut recv).await.context("reading first message")?;
+    match first {
+        Message::ForwardConnect { remote_port } => run_forward(send, recv, remote_port).await,
+        msg => run_session(send, recv, sessions, msg).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Connection stream handler — one per QUIC stream (Hello or Resume)
 // ---------------------------------------------------------------------------
 
@@ -235,8 +283,8 @@ async fn run_session(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     sessions: Sessions,
+    msg: Message,
 ) -> Result<()> {
-    let msg = recv_msg(&mut recv).await.context("reading first message")?;
 
     let session_id: String = match msg {
         // ── New session ──────────────────────────────────────────────────────
@@ -463,8 +511,8 @@ async fn handle_connection(incoming: quinn::Incoming, sessions: Sessions) -> Res
             Ok((send, recv)) => {
                 let s = sessions.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = run_session(send, recv, s).await {
-                        eprintln!("[server] session error: {e:#}");
+                    if let Err(e) = handle_stream(send, recv, s).await {
+                        eprintln!("[server] stream error: {e:#}");
                     }
                 });
             }

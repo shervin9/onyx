@@ -33,6 +33,12 @@ pub enum Message {
     Resize { cols: u16, rows: u16 },
     /// Either direction: graceful shutdown.
     Close { reason: String },
+    /// Client → Server: open a TCP tunnel to remote_port on the server host.
+    ForwardConnect { remote_port: u16 },
+    /// Server → Client: tunnel accepted, remote TCP connection established.
+    ForwardAck,
+    /// Server → Client: tunnel rejected (port unreachable, refused, etc.).
+    ForwardError { reason: String },
 }
 
 /// Serialize a message to bytes (length-prefix framing is caller's job).
