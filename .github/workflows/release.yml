@@ -17,18 +17,24 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-22.04
-            artifact: onyx-linux-x86_64
+            client_artifact: onyx-linux-x86_64
+            server_artifact: onyx-server-linux-x86_64
             use_cross: false
+            build_server: true
 
           - target: aarch64-unknown-linux-musl
             os: ubuntu-22.04
-            artifact: onyx-linux-arm64
+            client_artifact: onyx-linux-arm64
+            server_artifact: onyx-server-linux-arm64
             use_cross: true
+            build_server: true
 
           - target: aarch64-apple-darwin
             os: macos-14
-            artifact: onyx-macos-arm64
+            client_artifact: onyx-macos-arm64
+            server_artifact: ""
             use_cross: false
+            build_server: false
 
     steps:
       - uses: actions/checkout@v4
@@ -48,22 +54,45 @@ jobs:
 
       - name: Build (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }} -p client
+        run: |
+          if [ "${{ matrix.build_server }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p client -p server
+          else
+            cross build --release --target ${{ matrix.target }} -p client
+          fi
 
       - name: Build (cargo)
         if: "!matrix.use_cross"
-        run: cargo build --release --target ${{ matrix.target }} -p client
-
-      - name: Stage binary
         run: |
-          cp target/${{ matrix.target }}/release/onyx ${{ matrix.artifact }}
-          chmod +x ${{ matrix.artifact }}
+          if [ "${{ matrix.build_server }}" = "true" ]; then
+            cargo build --release --target ${{ matrix.target }} -p client -p server
+          else
+            cargo build --release --target ${{ matrix.target }} -p client
+          fi
 
-      - name: Upload artifact
+      - name: Stage client binary
+        run: |
+          cp target/${{ matrix.target }}/release/onyx ${{ matrix.client_artifact }}
+          chmod +x ${{ matrix.client_artifact }}
+
+      - name: Stage server binary
+        if: matrix.server_artifact != ''
+        run: |
+          cp target/${{ matrix.target }}/release/onyx-server ${{ matrix.server_artifact }}
+          chmod +x ${{ matrix.server_artifact }}
+
+      - name: Upload client artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.client_artifact }}
+          path: ${{ matrix.client_artifact }}
+
+      - name: Upload server artifact
+        if: matrix.server_artifact != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.server_artifact }}
+          path: ${{ matrix.server_artifact }}
 
   release:
     name: Publish release

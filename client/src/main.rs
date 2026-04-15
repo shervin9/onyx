@@ -7,9 +7,11 @@ use rustls::{
 };
 use shared::{Message, DEFAULT_PORT};
 use std::{
+    fs,
     io::Write,
     net::SocketAddr,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -236,13 +238,96 @@ struct RemotePaths {
     conf_dir: String,
 }
 
+fn normalize_remote_dir(candidate: &str, home: &str) -> String {
+    if let Some(rest) = candidate.strip_prefix("~/") {
+        format!("{home}/{rest}")
+    } else if candidate == "~" {
+        home.to_string()
+    } else if candidate.starts_with('/') {
+        candidate.to_string()
+    } else {
+        format!("{home}/{candidate}")
+    }
+}
+
+fn ssh_capture_full(
+    target: &str,
+    identity: Option<&str>,
+    cmd: &str,
+) -> Result<std::process::Output> {
+    ssh_cmd(target, identity).arg(cmd).output().context("ssh")
+}
+
+fn check_remote_dir_writable(
+    target: &str,
+    identity: Option<&str>,
+    dir: &str,
+) -> Result<(), String> {
+    let marker = format!("{dir}/.onyx-write-test-{}", std::process::id());
+    let cmd = format!(
+        "mkdir -p {dir} && : > {marker} && rm -f {marker}",
+        dir = shell_quote(dir),
+        marker = shell_quote(&marker),
+    );
+    let out = ssh_capture_full(target, identity, &cmd).map_err(|e| e.to_string())?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(format!(
+        "exit {}: {}",
+        out.status.code().unwrap_or(-1),
+        if stderr.is_empty() {
+            "<empty stderr>"
+        } else {
+            &stderr
+        }
+    ))
+}
+
 fn resolve_remote_paths(target: &str, identity: Option<&str>) -> Result<RemotePaths> {
     let home =
         ssh_capture(target, identity, "printf %s \"$HOME\"").context("resolving remote HOME")?;
     anyhow::ensure!(!home.is_empty(), "remote HOME is empty");
+
+    let mut remote_candidates = Vec::new();
+    if let Ok(custom) = std::env::var("ONYX_REMOTE_DIR") {
+        let custom = custom.trim();
+        if !custom.is_empty() {
+            remote_candidates.push(normalize_remote_dir(custom, &home));
+        }
+    }
+    remote_candidates.push(format!("{home}/.local/share/onyx"));
+    remote_candidates.push("/tmp/onyx".to_string());
+    remote_candidates.dedup();
+
+    let mut remote_failures = Vec::new();
+    let mut remote_dir = None;
+    for candidate in &remote_candidates {
+        match check_remote_dir_writable(target, identity, candidate) {
+            Ok(()) => {
+                remote_dir = Some(candidate.clone());
+                break;
+            }
+            Err(reason) => remote_failures.push(format!("  {candidate}: {reason}")),
+        }
+    }
+    let remote_dir = remote_dir.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no writable remote install directory found\n{}\nnext steps:\n  set ONYX_REMOTE_DIR to a writable absolute path\n  or install onyx-server manually and use --no-bootstrap",
+            remote_failures.join("\n")
+        )
+    })?;
+
+    let conf_default = format!("{home}/.config/onyx");
+    let conf_dir = match check_remote_dir_writable(target, identity, &conf_default) {
+        Ok(()) => conf_default,
+        Err(_) => format!("{remote_dir}/config"),
+    };
+
     Ok(RemotePaths {
-        remote_dir: format!("{home}/.local/share/onyx"),
-        conf_dir: format!("{home}/.config/onyx"),
+        remote_dir,
+        conf_dir,
     })
 }
 
@@ -440,6 +525,7 @@ enum CliMode {
         raw_target: String,
         identity_file: Option<String>,
         no_fallback: bool,
+        no_bootstrap: bool,
         low_bandwidth: bool,
         forwards: Vec<(u16, u16)>,
     },
@@ -478,6 +564,7 @@ fn parse_args() -> CliMode {
     let mut identity: Option<String> = None;
     let mut target: Option<String> = None;
     let mut no_fallback = false;
+    let mut no_bootstrap = false;
     let mut low_bandwidth = false;
     let mut forwards: Vec<(u16, u16)> = Vec::new();
 
@@ -489,6 +576,8 @@ fn parse_args() -> CliMode {
             });
         } else if a == "--no-fallback" {
             no_fallback = true;
+        } else if a == "--no-bootstrap" {
+            no_bootstrap = true;
         } else if a == "--low-bandwidth" {
             low_bandwidth = true;
         } else if a == "--forward" || a == "-L" {
@@ -521,13 +610,14 @@ fn parse_args() -> CliMode {
     }
 
     let target = target.unwrap_or_else(|| {
-        eprintln!("Usage: onyx [--no-fallback] [--low-bandwidth] [-i identity_file] [--forward local:remote] [user@]<host>[:<quic-port>]");
+        eprintln!("Usage: onyx [--no-fallback] [--no-bootstrap] [--low-bandwidth] [-i identity_file] [--forward local:remote] [user@]<host>[:<quic-port>]");
         eprintln!("       onyx proxy <host> <port>");
         eprintln!("  my-server                     SSH alias → bootstrap + QUIC");
         eprintln!("  user@host[:port]              SSH bootstrap + QUIC");
         eprintln!("  128.140.63.67[:port]          direct QUIC (no SSH)");
         eprintln!("  --forward 8888:8888           tunnel localhost:8888 → remote:8888 (repeatable)");
         eprintln!("  --low-bandwidth               smoother batching on poor links");
+        eprintln!("  --no-bootstrap                skip remote install/start checks");
         eprintln!("  --no-fallback                 exit on QUIC failure instead of falling back to SSH");
         eprintln!("  proxy <host> <port>           transparent TCP proxy for SSH ProxyCommand");
         std::process::exit(1);
@@ -537,6 +627,7 @@ fn parse_args() -> CliMode {
         raw_target: target,
         identity_file: identity,
         no_fallback,
+        no_bootstrap,
         low_bandwidth,
         forwards,
     }
@@ -792,6 +883,7 @@ struct RemoteStatus {
     own_pid: bool,   // server.pid still points to an onyx-server process
     has_cargo: bool, // ~/.cargo/bin/cargo exists
     conf_ok: bool,   // tmux config + status script are current
+    arch: String,    // uname -m on the remote host
 }
 
 /// Single SSH round-trip: verifies auth and gathers all bootstrap pre-conditions.
@@ -819,8 +911,9 @@ fn remote_status(
            ready=yes; \
          fi; \
          c=no; [ -f ~/.cargo/bin/cargo ] && c=yes; \
+         arch=$(uname -m 2>/dev/null || echo unknown); \
          cv=$(cat {conf_dir}/.conf-hash 2>/dev/null); \
-         echo \"h=$h r=$r own=$own ready=$ready c=$c cv=$cv\"",
+         echo \"h=$h r=$r own=$own ready=$ready c=$c arch=$arch cv=$cv\"",
         server_log = shell_quote(&format!("{}/server.log", paths.remote_dir)),
         remote_dir = shell_quote(&paths.remote_dir),
         conf_dir = shell_quote(&paths.conf_dir),
@@ -861,6 +954,7 @@ fn remote_status(
         own_pid: get("own") == "yes",
         has_cargo: get("c") == "yes",
         conf_ok: get("cv") == conf_hash,
+        arch: get("arch"),
     })
 }
 
@@ -925,6 +1019,62 @@ fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn server_artifact_name(remote_arch: &str) -> Option<&'static str> {
+    match remote_arch {
+        "x86_64" | "amd64" => Some("onyx-server-linux-x86_64"),
+        "aarch64" | "arm64" => Some("onyx-server-linux-arm64"),
+        _ => None,
+    }
+}
+
+fn prebuilt_server_candidates(remote_arch: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Some(name) = server_artifact_name(remote_arch) else {
+        return out;
+    };
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join(name));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd.join(name));
+        out.push(cwd.join("target").join("release").join("onyx-server"));
+        match remote_arch {
+            "x86_64" | "amd64" => out.push(
+                cwd.join("target")
+                    .join("x86_64-unknown-linux-musl")
+                    .join("release")
+                    .join("onyx-server"),
+            ),
+            "aarch64" | "arm64" => out.push(
+                cwd.join("target")
+                    .join("aarch64-unknown-linux-musl")
+                    .join("release")
+                    .join("onyx-server"),
+            ),
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn find_local_prebuilt_server(remote_arch: &str) -> Option<PathBuf> {
+    prebuilt_server_candidates(remote_arch)
+        .into_iter()
+        .find(|path| path.is_file())
+}
+
+fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}\nnext steps:\n  set ONYX_REMOTE_DIR to a writable absolute path on the remote host\n  or install/start onyx-server manually and re-run with --no-bootstrap",
+        err
+    )
+}
+
 fn upload_and_build(
     target: &str,
     identity: Option<&str>,
@@ -977,7 +1127,8 @@ fn upload_and_build(
         target,
         identity,
         &format!(
-            "cd {} && ~/.cargo/bin/cargo build --release -p server 2>&1",
+            "cd {} && ~/.cargo/bin/cargo build --release -p server 2>&1 && \
+             cp target/release/onyx-server onyx-server && chmod 700 onyx-server",
             shell_quote(&paths.remote_dir)
         ),
     )?;
@@ -995,6 +1146,47 @@ fn upload_and_build(
         ),
     );
     Ok(())
+}
+
+fn upload_prebuilt_server(
+    target: &str,
+    identity: Option<&str>,
+    hash: &str,
+    remote_arch: &str,
+    paths: &RemotePaths,
+) -> Result<bool> {
+    let Some(local_binary) = find_local_prebuilt_server(remote_arch) else {
+        return Ok(false);
+    };
+
+    let binary_name = server_artifact_name(remote_arch).unwrap_or("onyx-server");
+    eprintln!("  uploading prebuilt onyx-server ({binary_name})...");
+    let bytes = fs::read(&local_binary).with_context(|| {
+        format!(
+            "reading local prebuilt server binary {}",
+            local_binary.display()
+        )
+    })?;
+    let remote_binary = format!("{}/onyx-server", paths.remote_dir);
+    ssh_upload(target, identity, &remote_binary, &bytes)?;
+    ssh_show(
+        target,
+        identity,
+        &format!("chmod 700 {}", shell_quote(&remote_binary)),
+    )?;
+
+    let hash_path = format!("{}/.server-hash", paths.remote_dir);
+    let _ = ssh_capture(
+        target,
+        identity,
+        &format!(
+            "printf %s {} > {} && chmod 600 {}",
+            shell_quote(hash),
+            shell_quote(&hash_path),
+            shell_quote(&hash_path)
+        ),
+    );
+    Ok(true)
 }
 
 fn start_server(
@@ -1048,7 +1240,7 @@ fn start_server(
         target,
         identity,
         &format!(
-            "nohup {remote_dir}/target/release/onyx-server \
+            "nohup {remote_dir}/onyx-server \
          >{server_log} 2>&1 </dev/null & \
          printf %s \"$!\" > {server_pid} && \
          chmod 600 {server_pid} {server_log}",
@@ -1110,11 +1302,12 @@ fn start_server(
 
 fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result<()> {
     let hash = format!("{:016x}", source_hash());
-    let paths = resolve_remote_paths(ssh_target, identity)?;
+    let paths = resolve_remote_paths(ssh_target, identity).map_err(bootstrap_error_with_help)?;
 
     // Single SSH call: verify auth + get all state.
     let status = remote_status(ssh_target, identity, &hash, quic_port, &paths)
-        .context("cannot reach remote")?;
+        .context("cannot reach remote")
+        .map_err(bootstrap_error_with_help)?;
 
     // ── Fast path ─────────────────────────────────────────────────────────────
     if status.hash_ok && status.healthy && status.conf_ok {
@@ -1123,23 +1316,33 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
 
     // Config files stale but server is running — just push the new files.
     if status.hash_ok && status.healthy && !status.conf_ok {
-        ensure_config_files(ssh_target, identity, &paths)?;
+        ensure_config_files(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
         return Ok(());
     }
 
     // ── Slow path ────────────────────────────────────────────────────────────
     eprintln!("[onyx] setting up remote (one-time or after update)...");
 
-    if !status.has_cargo {
-        ensure_rust(ssh_target, identity)?;
-    }
-
     if !status.hash_ok {
-        upload_and_build(ssh_target, identity, &hash, &paths)?;
+        let used_prebuilt =
+            upload_prebuilt_server(ssh_target, identity, &hash, &status.arch, &paths)
+                .map_err(bootstrap_error_with_help)?;
+
+        if !used_prebuilt {
+            eprintln!(
+                "  no local prebuilt onyx-server for remote arch {}; falling back to cargo build",
+                status.arch
+            );
+            if !status.has_cargo {
+                ensure_rust(ssh_target, identity).map_err(bootstrap_error_with_help)?;
+            }
+            upload_and_build(ssh_target, identity, &hash, &paths)
+                .map_err(bootstrap_error_with_help)?;
+        }
     }
 
-    ensure_config_files(ssh_target, identity, &paths)?;
-    start_server(ssh_target, identity, quic_port, &paths)?;
+    ensure_config_files(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
+    start_server(ssh_target, identity, quic_port, &paths).map_err(bootstrap_error_with_help)?;
 
     eprintln!("[onyx] ready");
     Ok(())
@@ -1667,6 +1870,7 @@ async fn main() -> Result<()> {
         raw_target,
         identity_file,
         no_fallback,
+        no_bootstrap,
         low_bandwidth,
         forwards,
     } = cli_mode
@@ -1685,7 +1889,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("resolving target '{raw_target}'"))?;
 
     // SSH bootstrap (blocking, single SSH call on fast path).
-    if target.ssh_mode {
+    if target.ssh_mode && !no_bootstrap {
         bootstrap(
             &target.ssh_target,
             target.identity_file.as_deref(),
@@ -1733,7 +1937,7 @@ async fn main() -> Result<()> {
         // After 20 s of failed reconnects, re-run bootstrap via SSH.
         // This refreshes remote state and restarts a crashed server without
         // blocking on the first fast-path attempt.
-        if target.ssh_mode {
+        if target.ssh_mode && !no_bootstrap {
             if let Some(t) = disconnect_at {
                 let rebootstrap_due =
                     last_rebootstrap.map_or(true, |lr| lr.elapsed() > Duration::from_secs(30));

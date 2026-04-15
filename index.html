@@ -17,7 +17,10 @@
 
   <nav>
     <a href="/" class="logo">onyx</a>
-    <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
+    <div class="nav-actions">
+      <a href="#install" class="nav-link">Install</a>
+      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
+    </div>
   </nav>
 
   <main>
@@ -30,24 +33,33 @@
         <a href="#install" class="btn btn-ghost">Install</a>
       </div>
 
-      <div class="terminal-shell" aria-label="Onyx terminal preview">
-        <div class="terminal-top">
-          <div class="terminal-dots">
-            <span></span><span></span><span></span>
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <div class="mini-points" aria-label="Product highlights">
+            <span>QUIC first</span>
+            <span>SSH fallback</span>
+            <span>AI-friendly</span>
           </div>
-          <span class="terminal-label">onyx</span>
         </div>
-        <div class="terminal-body">
-          <div class="terminal-line terminal-line-static">
-            <span class="prompt">$</span>
-            <span class="terminal-text">stable remote shell for unreliable networks</span>
-          </div>
-          <div class="terminal-scene" id="terminal-scene">
-            <div class="terminal-line">
-              <span class="prompt">$</span>
-              <span class="terminal-text" id="typed"></span><span class="caret"></span>
+        <div class="terminal-shell hero-terminal" aria-label="Onyx terminal preview">
+          <div class="terminal-top">
+            <div class="terminal-dots">
+              <span></span><span></span><span></span>
             </div>
-            <div class="terminal-line terminal-line-muted" id="terminal-meta"></div>
+            <span class="terminal-label">onyx</span>
+          </div>
+          <div class="terminal-body">
+            <div class="terminal-line terminal-line-static">
+              <span class="prompt">$</span>
+              <span class="terminal-text">stable remote shell for unreliable networks</span>
+            </div>
+            <div class="terminal-scene" id="terminal-scene">
+              <div class="terminal-line">
+                <span class="prompt">$</span>
+                <span class="terminal-text" id="typed"></span><span class="caret"></span>
+              </div>
+              <div class="terminal-line terminal-line-muted" id="terminal-meta"></div>
+            </div>
           </div>
         </div>
       </div>
@@ -59,54 +71,104 @@
         <li>SSH fallback</li>
         <li>Session persistence</li>
         <li>Port forwarding</li>
-        <li>Works with SSH-based tools</li>
+        <li>ProxyCommand support</li>
         <li>AI-friendly</li>
       </ul>
+    </section>
+
+    <section class="install" id="install">
+      <div class="section-head">
+        <h2>Install the local client</h2>
+        <p>Onyx installs locally. The remote server component is provisioned automatically over SSH when needed.</p>
+      </div>
+      <div class="install-grid">
+        <article class="install-card">
+          <span class="install-kicker">Homebrew</span>
+          <div class="code-wrap">
+            <code id="brew-cmd">brew install shervin9/onyx/onyx</code>
+            <button id="copy-brew-btn" type="button" data-copy-target="brew-cmd">Copy</button>
+          </div>
+        </article>
+        <article class="install-card">
+          <span class="install-kicker">Shell installer</span>
+          <div class="code-wrap">
+            <code id="install-cmd">curl -sSL https://useonyx.dev/install.sh | bash</code>
+            <button id="copy-install-btn" type="button" data-copy-target="install-cmd">Copy</button>
+          </div>
+        </article>
+      </div>
+      <article class="install-card connect-card">
+        <span class="install-kicker">Connect</span>
+        <div class="usage-line">
+          <code id="connect-cmd">onyx user@server</code>
+        </div>
+      </article>
+    </section>
+
+    <section class="flow">
+      <div class="section-head">
+        <h2>Connection flow</h2>
+        <p>Bootstrap over SSH, prefer QUIC, and keep forwarding or proxy workflows on the same path.</p>
+      </div>
+      <div class="flow-shell">
+        <div class="flow-track" aria-hidden="true">
+          <div class="flow-line"></div>
+          <div class="flow-node active">
+            <span>SSH bootstrap</span>
+          </div>
+          <div class="flow-node">
+            <span>QUIC transport</span>
+          </div>
+          <div class="flow-node">
+            <span>Forward / proxy</span>
+          </div>
+          <div class="flow-pulse"></div>
+        </div>
+        <div class="flow-panels">
+          <article class="workflow-card flow-panel is-active" data-flow-step="0">
+            <span class="workflow-kicker">Bootstrap</span>
+            <pre><code>ssh dev-onyx</code></pre>
+            <p class="workflow-copy">Provision remotely over plain SSH only when needed.</p>
+          </article>
+          <article class="workflow-card flow-panel" data-flow-step="1">
+            <span class="workflow-kicker">Transport</span>
+            <pre><code>onyx user@server</code></pre>
+            <p class="workflow-copy">QUIC when available, with SSH fallback if UDP is blocked.</p>
+            <div class="flow-meta" id="flow-meta">[mode] QUIC</div>
+          </article>
+          <article class="workflow-card flow-panel" data-flow-step="2">
+            <span class="workflow-kicker">Forwarding</span>
+            <pre><code>onyx --forward 8888:8888 user@server</code></pre>
+            <p class="workflow-copy">Use Onyx for local tunnels or as a drop-in SSH transport.</p>
+          </article>
+        </div>
+      </div>
     </section>
 
     <section class="features">
       <div class="section-head">
         <h2>Built for real remote work</h2>
       </div>
-      <div class="feature-grid">
+      <div class="feature-grid compact-five">
         <article class="feature-card">
-          <strong>Reliable on flaky networks</strong>
-          <span>QUIC first. SSH fallback when needed.</span>
+          <strong>QUIC + SSH fallback</strong>
+          <span>Prefer QUIC. Fall back cleanly when the network says otherwise.</span>
         </article>
         <article class="feature-card">
           <strong>Session persistence</strong>
-          <span>tmux-backed sessions with cleaner reconnect behavior.</span>
+          <span>tmux-backed sessions with smoother reconnect behavior and scrollback.</span>
         </article>
         <article class="feature-card">
           <strong>Port forwarding</strong>
-          <span>Forward local ports to remote services through the same connection.</span>
+          <span>Forward local ports to remote services through the same Onyx connection.</span>
         </article>
         <article class="feature-card">
-          <strong>SSH tool compatibility</strong>
-          <span>Use Onyx as a transport layer for SSH-based workflows.</span>
+          <strong>SSH ProxyCommand support</strong>
+          <span>Use Onyx as a transport layer for SSH-based tools and existing configs.</span>
         </article>
-      </div>
-    </section>
-
-    <section class="workflow">
-      <div class="section-head">
-        <h2>Fits existing workflows</h2>
-        <p>Drop-in SSH transport for existing workflows.</p>
-      </div>
-      <div class="workflow-grid">
-        <article class="workflow-card">
-          <span class="workflow-kicker">SSH config</span>
-          <pre><code>Host dev-onyx
-  HostName server
-  ProxyCommand onyx proxy %h %p</code></pre>
-        </article>
-        <article class="workflow-card">
-          <span class="workflow-kicker">Port forwarding</span>
-          <pre><code>onyx --forward 8888:8888 user@server</code></pre>
-        </article>
-        <article class="workflow-card">
-          <span class="workflow-kicker">Shell session</span>
-          <pre><code>onyx user@server</code></pre>
+        <article class="feature-card">
+          <strong>AI-friendly workflows</strong>
+          <span>Designed for remote CLI work on unstable links without extra ceremony.</span>
         </article>
       </div>
     </section>
@@ -134,19 +196,6 @@
       </div>
     </section>
 
-    <section class="install" id="install">
-      <div class="section-head">
-        <h2>Install</h2>
-      </div>
-      <div class="code-wrap">
-        <code id="install-cmd">curl -sSL https://useonyx.dev/install.sh | bash</code>
-        <button id="copy-btn" type="button" onclick="copyCmd()">Copy</button>
-      </div>
-      <div class="usage-line">
-        <code>$ onyx user@server</code>
-      </div>
-    </section>
-
     <section class="oss">
       <div class="section-head">
         <h2>Open source</h2>
@@ -156,7 +205,7 @@
     </section>
 
     <section class="final-cta">
-      <p>Built for flaky networks. Ready for existing workflows.</p>
+      <p>Install locally. Connect when the network cooperates. Fall back when it doesn’t.</p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>

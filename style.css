@@ -4,6 +4,7 @@
   --bg: #090909;
   --surface: rgba(255, 255, 255, 0.028);
   --surface-strong: rgba(255, 255, 255, 0.04);
+  --surface-soft: rgba(255, 255, 255, 0.018);
   --border: rgba(255, 255, 255, 0.07);
   --border-strong: rgba(255, 255, 255, 0.12);
   --text: #ededef;
@@ -15,7 +16,7 @@
   --shadow: 0 30px 90px rgba(0, 0, 0, 0.45);
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --mono: "SFMono-Regular", "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
-  --w: 980px;
+  --w: 1040px;
   --narrow: 720px;
 }
 
@@ -67,7 +68,7 @@ nav {
   top: 0;
   left: 0;
   right: 0;
-  height: 52px;
+  height: 56px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -87,6 +88,12 @@ nav {
   color: var(--text);
 }
 
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
 .nav-link {
   font-size: 0.875rem;
   color: var(--dim);
@@ -99,7 +106,7 @@ nav {
 main {
   position: relative;
   z-index: 1;
-  padding-top: 52px;
+  padding-top: 56px;
 }
 
 section {
@@ -115,8 +122,8 @@ section {
 
 .hero {
   position: relative;
-  padding-top: 8.5rem;
-  padding-bottom: 5.5rem;
+  padding-top: 8.75rem;
+  padding-bottom: 5.75rem;
   text-align: center;
 }
 
@@ -171,14 +178,14 @@ h1 {
   flex-wrap: wrap;
 }
 
-.hero .actions { margin-bottom: 3rem; }
+.hero .actions { margin-bottom: 2.5rem; }
 
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 2.5rem;
-  padding: 0.55rem 1.15rem;
+  min-height: 2.625rem;
+  padding: 0.6rem 1.15rem;
   border-radius: 8px;
   border: 1px solid transparent;
   font-size: 0.875rem;
@@ -210,8 +217,36 @@ h1 {
   background: var(--surface);
 }
 
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+}
+
+.hero-copy {
+  display: flex;
+  justify-content: center;
+}
+
+.mini-points {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.7rem;
+}
+
+.mini-points span {
+  padding: 0.42rem 0.8rem;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.016);
+  color: var(--dim);
+  font-size: 0.79rem;
+}
+
 .terminal-shell {
-  max-width: 42rem;
+  width: min(100%, 42rem);
   margin: 0 auto;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -220,6 +255,20 @@ h1 {
     rgba(11, 11, 13, 0.92);
   box-shadow: var(--shadow);
   overflow: hidden;
+}
+
+.hero-terminal {
+  position: relative;
+}
+
+.hero-terminal::after {
+  content: "";
+  position: absolute;
+  inset: auto 8% -20% 8%;
+  height: 7rem;
+  background: radial-gradient(circle, rgba(110, 140, 255, 0.12), transparent 70%);
+  filter: blur(24px);
+  pointer-events: none;
 }
 
 .terminal-top {
@@ -297,10 +346,10 @@ h1 {
 }
 
 .trust-strip,
-.features,
-.workflow,
-.how,
 .install,
+.flow,
+.features,
+.how,
 .oss,
 .final-cta {
   border-top: 1px solid var(--border);
@@ -329,14 +378,14 @@ h1 {
   letter-spacing: -0.01em;
 }
 
-.features,
-.workflow,
-.how,
 .install,
+.flow,
+.features,
+.how,
 .oss,
 .final-cta {
-  padding-top: 4.5rem;
-  padding-bottom: 4.5rem;
+  padding-top: 4.75rem;
+  padding-bottom: 4.75rem;
 }
 
 h2 {
@@ -352,20 +401,234 @@ h2 {
   font-size: 0.95rem;
 }
 
+.install-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.install-card,
+.workflow-card,
+.feature-card,
+.how-step,
+.code-wrap,
+.usage-line,
+.flow-shell {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 14px;
+}
+
+.install-card {
+  padding: 1rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.018);
+}
+
+.connect-card {
+  margin-top: 1rem;
+}
+
+.install-kicker,
+.workflow-kicker {
+  display: inline-block;
+  margin-bottom: 0.8rem;
+  font-size: 0.74rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.code-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 0.95rem 1rem;
+  margin: 0;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.code-wrap code,
+.usage-line code,
+.workflow-card code,
+.flow-meta {
+  font-family: var(--mono);
+}
+
+.code-wrap code,
+.usage-line code {
+  font-size: 0.88rem;
+  color: var(--text);
+}
+
+.code-wrap code {
+  flex: 1;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-overflow: clip;
+  user-select: all;
+  scrollbar-width: thin;
+}
+
+button[id^="copy-"] {
+  flex-shrink: 0;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  font-size: 0.76rem;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+button[id^="copy-"]:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.usage-line {
+  padding: 0.95rem 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.usage-line code {
+  color: var(--text);
+  user-select: all;
+}
+
+.flow-shell {
+  padding: 1.3rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.015)),
+    rgba(11, 11, 13, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.flow-track {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+  align-items: center;
+  min-height: 4.25rem;
+  margin-bottom: 1.15rem;
+}
+
+.flow-line {
+  position: absolute;
+  left: 8%;
+  right: 8%;
+  top: 50%;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.1), rgba(110, 140, 255, 0.28), rgba(255, 255, 255, 0.08));
+  transform: translateY(-50%);
+}
+
+.flow-pulse {
+  position: absolute;
+  top: 50%;
+  left: 8%;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  background: rgba(235, 237, 239, 0.9);
+  box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.35);
+  animation: pulseTravel 7.2s ease-in-out infinite;
+}
+
+.flow-node {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 1.3rem;
+  color: var(--muted);
+  font-size: 0.84rem;
+  text-align: center;
+}
+
+.flow-node::before {
+  content: "";
+  position: absolute;
+  top: 0.1rem;
+  left: 50%;
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 999px;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.18);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.flow-node.active {
+  color: var(--text);
+}
+
+.flow-node.active::before {
+  background: rgba(235, 237, 239, 0.92);
+  box-shadow: 0 0 0 0.35rem rgba(110, 140, 255, 0.12);
+}
+
+.flow-panels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.workflow-card {
+  padding: 1rem 1.05rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.018);
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.flow-panel.is-active {
+  border-color: rgba(110, 140, 255, 0.22);
+  background:
+    linear-gradient(180deg, rgba(110, 140, 255, 0.06), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.02);
+  transform: translateY(-1px);
+}
+
+.workflow-card pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.workflow-card code {
+  font-size: 0.83rem;
+  line-height: 1.7;
+  color: #d6d7dc;
+}
+
+.workflow-copy {
+  margin-top: 0.7rem;
+  color: var(--dim);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.flow-meta {
+  margin-top: 0.7rem;
+  color: #aeb4c8;
+  font-size: 0.8rem;
+}
+
 .feature-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
 }
 
-.feature-card,
-.workflow-card,
-.how-step,
-.code-wrap,
-.usage-line {
-  border: 1px solid var(--border);
-  background: var(--surface);
-  border-radius: 14px;
+.compact-five .feature-card:last-child {
+  grid-column: 1 / -1;
 }
 
 .feature-card {
@@ -389,40 +652,6 @@ h2 {
   line-height: 1.6;
 }
 
-.workflow-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-}
-
-.workflow-card {
-  padding: 1rem 1.05rem;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.018)),
-    rgba(255, 255, 255, 0.018);
-}
-
-.workflow-kicker {
-  display: inline-block;
-  margin-bottom: 0.8rem;
-  font-size: 0.74rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
-.workflow-card pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.workflow-card code {
-  font-family: var(--mono);
-  font-size: 0.83rem;
-  line-height: 1.7;
-  color: #d6d7dc;
-}
-
 .how-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -440,57 +669,6 @@ h2 {
   font-weight: 600;
   color: var(--muted);
   letter-spacing: 0.08em;
-}
-
-.code-wrap {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-  padding: 0.95rem 1rem;
-  margin-bottom: 0.75rem;
-}
-
-.code-wrap code,
-.usage-line code {
-  font-family: var(--mono);
-  font-size: 0.88rem;
-  color: var(--text);
-}
-
-.code-wrap code {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  user-select: all;
-}
-
-#copy-btn {
-  flex-shrink: 0;
-  padding: 0.3rem 0.7rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dim);
-  font-size: 0.76rem;
-  font-family: var(--font);
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-
-#copy-btn:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.usage-line {
-  padding: 0.9rem 1rem;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.usage-line code {
-  color: var(--dim);
-  user-select: all;
 }
 
 .oss,
@@ -540,16 +718,79 @@ footer a:hover { color: var(--dim); }
   50% { transform: translate3d(0, -12px, 0); }
 }
 
+@keyframes pulseTravel {
+  0%, 8% {
+    left: 8%;
+    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
+  }
+  33%, 41% {
+    left: 50%;
+    box-shadow: 0 0 0 0.45rem rgba(110, 140, 255, 0.12);
+  }
+  66%, 74% {
+    left: 92%;
+    box-shadow: 0 0 0 0.35rem rgba(110, 140, 255, 0.1);
+  }
+  100% {
+    left: 8%;
+    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
+  }
+}
+
 @media (max-width: 900px) {
+  .install-grid,
+  .flow-panels,
   .feature-grid,
-  .workflow-grid,
   .how-grid {
     grid-template-columns: 1fr;
   }
 
+  .compact-five .feature-card:last-child {
+    grid-column: auto;
+  }
+
   .hero {
-    padding-top: 7.2rem;
-    padding-bottom: 4.6rem;
+    padding-top: 7.5rem;
+    padding-bottom: 4.75rem;
+  }
+
+  .flow-track {
+    grid-template-columns: 1fr;
+    gap: 1.1rem;
+    min-height: auto;
+    padding-left: 1.4rem;
+  }
+
+  .flow-line {
+    top: 0.3rem;
+    bottom: 0.3rem;
+    left: 0.3rem;
+    right: auto;
+    width: 1px;
+    height: auto;
+    transform: none;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(110, 140, 255, 0.28), rgba(255, 255, 255, 0.08));
+  }
+
+  .flow-node {
+    justify-content: flex-start;
+    padding-top: 0;
+    padding-left: 1.2rem;
+    text-align: left;
+    min-height: 1.2rem;
+  }
+
+  .flow-node::before {
+    top: 50%;
+    left: 0;
+    transform: translateY(-50%);
+  }
+
+  .flow-pulse {
+    left: 0.3rem;
+    top: 0.3rem;
+    transform: translate(-50%, -50%);
+    animation-name: pulseTravelVertical;
   }
 }
 
@@ -561,13 +802,61 @@ footer a:hover { color: var(--dim); }
     padding-right: 1rem;
   }
 
+  nav {
+    height: 54px;
+  }
+
+  .nav-actions {
+    gap: 0.85rem;
+  }
+
   .hero::before {
     width: 24rem;
     height: 16rem;
   }
 
+  h1 {
+    max-width: 11ch;
+    font-size: clamp(2.2rem, 11vw, 3.2rem);
+  }
+
   .sub {
+    max-width: 22rem;
     font-size: 0.98rem;
+    line-height: 1.68;
+  }
+
+  .hero .actions,
+  .final-cta .actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .btn {
+    width: 100%;
+  }
+
+  .mini-points {
+    gap: 0.5rem;
+  }
+
+  .mini-points span {
+    font-size: 0.75rem;
+  }
+
+  .terminal-shell {
+    border-radius: 16px;
+  }
+
+  .terminal-top,
+  .terminal-body {
+    padding-left: 0.9rem;
+    padding-right: 0.9rem;
+  }
+
+  .terminal-line {
+    font-size: 0.83rem;
+    gap: 0.45rem;
   }
 
   .code-wrap {
@@ -575,12 +864,59 @@ footer a:hover { color: var(--dim); }
     align-items: stretch;
   }
 
-  #copy-btn {
+  .code-wrap code {
+    font-size: 0.82rem;
+  }
+
+  button[id^="copy-"] {
     width: 100%;
+  }
+
+  .flow-shell {
+    padding: 1rem;
+  }
+
+  .install,
+  .flow,
+  .features,
+  .how,
+  .oss,
+  .final-cta {
+    padding-top: 4rem;
+    padding-bottom: 4rem;
   }
 
   footer {
     flex-direction: column;
     align-items: flex-start;
+  }
+}
+
+@media (max-width: 420px) {
+  .trust-strip ul {
+    justify-content: flex-start;
+  }
+
+  .trust-strip li {
+    font-size: 0.76rem;
+  }
+}
+
+@keyframes pulseTravelVertical {
+  0%, 8% {
+    top: 0.3rem;
+    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
+  }
+  33%, 41% {
+    top: 50%;
+    box-shadow: 0 0 0 0.45rem rgba(110, 140, 255, 0.12);
+  }
+  66%, 74% {
+    top: calc(100% - 0.3rem);
+    box-shadow: 0 0 0 0.35rem rgba(110, 140, 255, 0.1);
+  }
+  100% {
+    top: 0.3rem;
+    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
   }
 }
