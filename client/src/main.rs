@@ -38,33 +38,103 @@ const REMOTE_DIR: &str = "~/.local/share/onyx";
 // Uploaded to CONF_DIR during bootstrap and versioned via config_hash().
 // ---------------------------------------------------------------------------
 
-/// tmux configuration: dark theme, mouse, 50k scrollback, live metrics bar.
-/// Single-quoted style strings avoid Rust raw-string `"#` termination issues.
-const ONYX_TMUX_CONF: &str = r#"# onyx — auto-generated, do not edit (overwritten on update)
+/// tmux configuration: context-aware status bar, terminal title propagation
+/// for Warp and friends, and automatic window renaming based on the running
+/// foreground command (onyx:shell, onyx:claude, onyx:codex, ...).
+///
+/// Kept minimal on purpose — all dynamic pieces go through status.sh so
+/// there's exactly one shell invocation per refresh class.
+const ONYX_TMUX_CONF: &str = r##"# onyx — auto-generated, do not edit (overwritten on update)
 set -g mouse on
 set -g history-limit 50000
+
+# Terminal title → "claude · ~/workspace/meviq". Warp's sidebar / tab
+# detection reads this. set-titles fires on window/pane changes, not per
+# tick, so the shell cost is negligible.
+set -g set-titles on
+set -g set-titles-string '#(~/.config/onyx/status.sh title "#{pane_current_path}" "#{pane_current_command}")'
+
+# Auto-rename window to "onyx:shell" / "onyx:claude" / "onyx:codex" based
+# on the foreground command inside the pane.
+set -g automatic-rename on
+set -g automatic-rename-format '#(~/.config/onyx/status.sh window "#{pane_current_path}" "#{pane_current_command}")'
+
+# Status bar — onyx brand, minimal
 set -g status-style                'bg=colour235,fg=colour250'
-set -g status-interval             2
-set -g status-left                 '#[fg=colour214,bold] * onyx #[fg=colour240,nobold] | '
-set -g status-left-length          16
-set -g status-right                '#[fg=colour244]#(~/.config/onyx/status.sh)#[fg=colour214] quic '
-set -g status-right-length         80
+set -g status-interval             5
+set -g status-left                 '#[fg=colour214,bold][onyx:#{E:ONYX_MODE}]#[fg=colour240] '
+set -g status-left-length          20
+set -g status-right                '#[fg=colour244]#(~/.config/onyx/status.sh right "#{pane_current_path}" "#{pane_current_command}")'
+set -g status-right-length         120
 set -g window-status-current-style 'fg=colour214,bold'
 set -g pane-border-style           'fg=colour238'
 set -g pane-active-border-style    'fg=colour214'
 set -g message-style               'bg=colour235,fg=colour214'
-"#;
+"##;
 
-/// Status bar script — runs on the remote server every 2 s inside tmux.
-/// Shows GPU (if nvidia-smi present), CPU load, and RAM usage.
+/// Context script called from tmux. Dispatch on $1:
+///   right  → "~/workspace/meviq · main · claude"   (status-right)
+///   title  → "claude · ~/workspace/meviq"          (terminal title)
+///   window → "onyx:claude"                         (window name)
+/// $2 is the pane's cwd, $3 is pane_current_command. Kept portable
+/// (POSIX sh only) and single-pass: no nested forks beyond one optional
+/// git call, and only when a .git is present in the cwd's ancestry.
 const ONYX_STATUS_SH: &str = r#"#!/bin/sh
 # onyx status — auto-generated
-cpu=$(cut -d' ' -f1 /proc/loadavg 2>/dev/null)
-ram=$(free -h 2>/dev/null | awk '/Mem:/{printf "%s/%s", $3, $2}')
-gpu=$(nvidia-smi --query-gpu=utilization.gpu,memory.used \
-    --format=csv,noheader,nounits 2>/dev/null | head -1 | \
-    awk -F', ' '{gsub(/ /,"",$1); printf "gpu %s%%  vram %.0fG  ",$1,$2/1024}')
-printf "%scpu %s  ram %s  " "$gpu" "$cpu" "$ram"
+mode=$1
+cwd=$2
+cmd=$3
+
+# cwd → ~/... for readability
+short_cwd=$cwd
+case "$cwd" in
+  "$HOME") short_cwd="~" ;;
+  "$HOME"/*) short_cwd="~${cwd#"$HOME"}" ;;
+esac
+
+# Normalize common shell names (bash/zsh/sh/fish/dash/ksh, with optional
+# leading dash for login shells) to the single label "shell". Anything
+# else — claude, codex, vim, python, etc. — passes through unchanged.
+case "$cmd" in
+  -bash|-zsh|-sh|bash|zsh|sh|fish|dash|ksh) cmd=shell ;;
+esac
+
+# Git branch — best-effort, silent if not a repo or git missing. Only
+# invoke git when we can cheaply see a .git marker on the cwd path, so
+# non-repo directories don't pay a subprocess cost.
+branch=
+if [ -n "$cwd" ] && [ -d "$cwd" ]; then
+  d=$cwd
+  while [ "$d" != / ] && [ -n "$d" ]; do
+    if [ -e "$d/.git" ]; then
+      branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null) \
+        || branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null) \
+        || branch=
+      break
+    fi
+    d=${d%/*}
+  done
+fi
+
+case "$mode" in
+  right)
+    out=$short_cwd
+    [ -n "$branch" ] && out="$out · $branch"
+    [ "$cmd" != shell ] && [ -n "$cmd" ] && out="$out · $cmd"
+    printf '%s' "$out"
+    ;;
+  title)
+    if [ "$cmd" = shell ] || [ -z "$cmd" ]; then
+      printf '%s' "$short_cwd"
+    else
+      printf '%s · %s' "$cmd" "$short_cwd"
+    fi
+    ;;
+  window)
+    [ -z "$cmd" ] && cmd=shell
+    printf 'onyx:%s' "$cmd"
+    ;;
+esac
 "#;
 
 // ---------------------------------------------------------------------------
