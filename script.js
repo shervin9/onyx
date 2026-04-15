@@ -1,6 +1,9 @@
 (function () {
   var typed = document.getElementById("typed");
   var meta = document.getElementById("terminal-meta");
+  var flowTrack = document.querySelector(".flow-track");
+  var flowPulse = document.querySelector(".flow-pulse");
+  var flowLine = document.querySelector(".flow-line");
   var flowNodes = Array.prototype.slice.call(document.querySelectorAll(".flow-node"));
   var flowPanels = Array.prototype.slice.call(document.querySelectorAll(".flow-panel"));
   var flowMeta = document.getElementById("flow-meta");
@@ -10,7 +13,7 @@
     { command: "onyx user@server", meta: "[session] resumed" },
     { command: "onyx --forward 8888:8888 user@server", meta: "[forward] localhost:8888 -> remote:8888" },
     { command: "ssh dev-onyx", meta: "[transport] ProxyCommand onyx proxy %h %p" },
-    { command: "onyx dev-onyx", meta: "[mode] SSH fallback" }
+    { command: "ssh dev-onyx", meta: "[mode] SSH fallback" }
   ];
 
   var flowScenes = [
@@ -57,20 +60,96 @@
     });
   }
 
+  function measureFlow() {
+    if (!flowTrack || !flowNodes.length) return;
+
+    var trackRect = flowTrack.getBoundingClientRect();
+    var firstRect = flowNodes[0].getBoundingClientRect();
+    var lastRect = flowNodes[flowNodes.length - 1].getBoundingClientRect();
+    var isVertical = window.matchMedia("(max-width: 900px)").matches;
+
+    if (isVertical) {
+      var lineLeft = firstRect.left + firstRect.width / 2 - trackRect.left;
+      var lineTop = firstRect.top + firstRect.height / 2 - trackRect.top;
+      var lineHeight = lastRect.top + lastRect.height / 2 - firstRect.top - firstRect.height / 2;
+      flowTrack.style.setProperty("--flow-line-left", lineLeft + "px");
+      flowTrack.style.setProperty("--flow-line-top", lineTop + "px");
+      flowTrack.style.setProperty("--flow-line-height", Math.max(lineHeight, 0) + "px");
+      flowTrack.style.setProperty("--flow-line-width", "1px");
+    } else {
+      var lineLeftHorizontal = firstRect.left + firstRect.width / 2 - trackRect.left;
+      var lineRightHorizontal = lastRect.left + lastRect.width / 2 - trackRect.left;
+      var lineTopHorizontal = firstRect.top + firstRect.height / 2 - trackRect.top;
+      flowTrack.style.setProperty("--flow-line-left", lineLeftHorizontal + "px");
+      flowTrack.style.setProperty("--flow-line-width", Math.max(lineRightHorizontal - lineLeftHorizontal, 0) + "px");
+      flowTrack.style.setProperty("--flow-line-top", lineTopHorizontal + "px");
+      flowTrack.style.setProperty("--flow-line-height", "1px");
+    }
+  }
+
+  function placePulse(stepIndex, instant) {
+    if (!flowTrack || !flowPulse || !flowNodes.length) return;
+    var node = flowNodes[stepIndex];
+    if (!node) return;
+    var trackRect = flowTrack.getBoundingClientRect();
+    var nodeRect = node.getBoundingClientRect();
+    var left = nodeRect.left + nodeRect.width / 2 - trackRect.left;
+    var top = nodeRect.top + nodeRect.height / 2 - trackRect.top;
+
+    if (instant) {
+      flowPulse.style.transition = "none";
+    } else {
+      flowPulse.style.transition =
+        "left 0.72s cubic-bezier(0.22, 1, 0.36, 1), top 0.72s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.24s ease";
+    }
+
+    flowTrack.style.setProperty("--flow-pulse-left", left + "px");
+    flowTrack.style.setProperty("--flow-pulse-top", top + "px");
+    flowPulse.style.boxShadow = "0 0 0 0.35rem rgba(110, 140, 255, 0.12)";
+
+    if (instant) {
+      flowPulse.getBoundingClientRect();
+      flowPulse.style.transition =
+        "left 0.72s cubic-bezier(0.22, 1, 0.36, 1), top 0.72s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.24s ease";
+    }
+
+    window.clearTimeout(placePulse._pulseReset);
+    placePulse._pulseReset = window.setTimeout(function () {
+      if (flowPulse) {
+        flowPulse.style.boxShadow = "0 0 0 0 rgba(110, 140, 255, 0.3)";
+      }
+    }, 360);
+  }
+
   function loopFlow(index) {
     if (!flowNodes.length || !flowPanels.length) return;
     var scene = flowScenes[index];
+    measureFlow();
     setFlowStep(scene.step);
+    placePulse(scene.step, false);
     if (flowMeta) flowMeta.textContent = scene.meta;
     setTimeout(function () {
       loopFlow((index + 1) % flowScenes.length);
     }, 2400);
   }
 
+  function refreshFlowLayout() {
+    measureFlow();
+    var activeIndex = 0;
+    flowNodes.forEach(function (node, index) {
+      if (node.classList.contains("active")) activeIndex = index;
+    });
+    placePulse(activeIndex, true);
+  }
+
   setTimeout(function () {
+    refreshFlowLayout();
     loopTerminal(0);
     loopFlow(0);
   }, 700);
+
+  window.addEventListener("resize", refreshFlowLayout);
+  window.addEventListener("orientationchange", refreshFlowLayout);
 })();
 
 function copyText(targetId, button) {

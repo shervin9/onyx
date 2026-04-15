@@ -520,9 +520,10 @@ button[id^="copy-"]:hover {
 
 .flow-line {
   position: absolute;
-  left: 8%;
-  right: 8%;
-  top: 50%;
+  left: var(--flow-line-left, 8%);
+  right: auto;
+  width: var(--flow-line-width, 84%);
+  top: var(--flow-line-top, 50%);
   height: 1px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.1), rgba(110, 140, 255, 0.28), rgba(255, 255, 255, 0.08));
   transform: translateY(-50%);
@@ -530,15 +531,19 @@ button[id^="copy-"]:hover {
 
 .flow-pulse {
   position: absolute;
-  top: 50%;
-  left: 8%;
+  top: var(--flow-pulse-top, 50%);
+  left: var(--flow-pulse-left, 8%);
   width: 0.75rem;
   height: 0.75rem;
   border-radius: 999px;
   transform: translate(-50%, -50%);
   background: rgba(235, 237, 239, 0.9);
   box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.35);
-  animation: pulseTravel 7.2s ease-in-out infinite;
+  transition:
+    left 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+    top 0.72s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.24s ease;
+  will-change: left, top;
 }
 
 .flow-node {
@@ -718,25 +723,6 @@ footer a:hover { color: var(--dim); }
   50% { transform: translate3d(0, -12px, 0); }
 }
 
-@keyframes pulseTravel {
-  0%, 8% {
-    left: 8%;
-    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
-  }
-  33%, 41% {
-    left: 50%;
-    box-shadow: 0 0 0 0.45rem rgba(110, 140, 255, 0.12);
-  }
-  66%, 74% {
-    left: 92%;
-    box-shadow: 0 0 0 0.35rem rgba(110, 140, 255, 0.1);
-  }
-  100% {
-    left: 8%;
-    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
-  }
-}
-
 @media (max-width: 900px) {
   .install-grid,
   .flow-panels,
@@ -762,12 +748,12 @@ footer a:hover { color: var(--dim); }
   }
 
   .flow-line {
-    top: 0.3rem;
-    bottom: 0.3rem;
-    left: 0.3rem;
+    top: var(--flow-line-top, 0.3rem);
+    bottom: auto;
+    left: var(--flow-line-left, 0.3rem);
     right: auto;
     width: 1px;
-    height: auto;
+    height: var(--flow-line-height, calc(100% - 0.6rem));
     transform: none;
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(110, 140, 255, 0.28), rgba(255, 255, 255, 0.08));
   }
@@ -787,10 +773,7 @@ footer a:hover { color: var(--dim); }
   }
 
   .flow-pulse {
-    left: 0.3rem;
-    top: 0.3rem;
     transform: translate(-50%, -50%);
-    animation-name: pulseTravelVertical;
   }
 }
 
@@ -899,24 +882,5 @@ footer a:hover { color: var(--dim); }
 
   .trust-strip li {
     font-size: 0.76rem;
-  }
-}
-
-@keyframes pulseTravelVertical {
-  0%, 8% {
-    top: 0.3rem;
-    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
-  }
-  33%, 41% {
-    top: 50%;
-    box-shadow: 0 0 0 0.45rem rgba(110, 140, 255, 0.12);
-  }
-  66%, 74% {
-    top: calc(100% - 0.3rem);
-    box-shadow: 0 0 0 0.35rem rgba(110, 140, 255, 0.1);
-  }
-  100% {
-    top: 0.3rem;
-    box-shadow: 0 0 0 0 rgba(110, 140, 255, 0.3);
   }
 }
