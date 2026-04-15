@@ -5,13 +5,12 @@ on:
     tags:
       - "v*"
 
-permissions:
-  contents: write
-
 jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -70,6 +69,8 @@ jobs:
     name: Publish release
     needs: build
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +79,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          sha256sum onyx-* > onyx-sha256sums.txt
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2

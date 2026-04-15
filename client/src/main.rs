@@ -6,9 +6,16 @@ use rustls::{
     DigitallySignedStruct, SignatureScheme,
 };
 use shared::{Message, DEFAULT_PORT};
-use std::{io::Write, net::SocketAddr, os::unix::process::CommandExt, sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{
+    io::Write,
+    net::SocketAddr,
+    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // Source files embedded at compile time for remote bootstrap.
@@ -17,13 +24,12 @@ use tokio::net::TcpListener;
 const REMOTE_WORKSPACE_TOML: &str =
     "[workspace]\nmembers = [\"shared\", \"server\"]\nresolver = \"2\"\n";
 
-const SHARED_CARGO_TOML: &str  = include_str!("../../shared/Cargo.toml");
-const SHARED_LIB_RS: &str      = include_str!("../../shared/src/lib.rs");
-const SERVER_CARGO_TOML: &str  = include_str!("../../server/Cargo.toml");
-const SERVER_MAIN_RS: &str     = include_str!("../../server/src/main.rs");
+const SHARED_CARGO_TOML: &str = include_str!("../../shared/Cargo.toml");
+const SHARED_LIB_RS: &str = include_str!("../../shared/src/lib.rs");
+const SERVER_CARGO_TOML: &str = include_str!("../../server/Cargo.toml");
+const SERVER_MAIN_RS: &str = include_str!("../../server/src/main.rs");
 
-const REMOTE_DIR: &str  = "~/.local/share/onyx";
-const CONF_DIR: &str    = "~/.config/onyx";
+const REMOTE_DIR: &str = "~/.local/share/onyx";
 
 // ---------------------------------------------------------------------------
 // Remote config files — tmux setup + live status bar script.
@@ -66,10 +72,47 @@ printf "%scpu %s  ram %s  " "$gpu" "$cpu" "$ram"
 /// SHA-256 of DER bytes, formatted as "sha256:<hex>".
 fn cert_fingerprint(cert_der: &[u8]) -> String {
     let hash = ring::digest::digest(&ring::digest::SHA256, cert_der);
-    format!("sha256:{}", hash.as_ref().iter().map(|b| format!("{b:02x}")).collect::<String>())
+    format!(
+        "sha256:{}",
+        hash.as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
 
 type FpCapture = Arc<Mutex<Option<String>>>;
+
+#[derive(Clone, Copy)]
+struct BandwidthMode {
+    low_bandwidth: bool,
+    stdin_batch_window: Duration,
+    stdout_batch_window: Duration,
+    stdout_flush_window: Duration,
+    stdout_chunk_limit: usize,
+}
+
+impl BandwidthMode {
+    fn normal() -> Self {
+        Self {
+            low_bandwidth: false,
+            stdin_batch_window: Duration::from_millis(5),
+            stdout_batch_window: Duration::from_millis(0),
+            stdout_flush_window: Duration::from_millis(0),
+            stdout_chunk_limit: 4096,
+        }
+    }
+
+    fn low_bandwidth() -> Self {
+        Self {
+            low_bandwidth: true,
+            stdin_batch_window: Duration::from_millis(20),
+            stdout_batch_window: Duration::from_millis(30),
+            stdout_flush_window: Duration::from_millis(60),
+            stdout_chunk_limit: 16384,
+        }
+    }
+}
 
 /// Accepts every cert during the TLS handshake and captures the fingerprint.
 /// The actual TOFU check happens after the handshake completes, before any
@@ -77,35 +120,63 @@ type FpCapture = Arc<Mutex<Option<String>>>;
 #[derive(Debug)]
 struct CapturingVerifier {
     provider: Arc<rustls::crypto::CryptoProvider>,
-    capture:  FpCapture,
+    capture: FpCapture,
 }
 
 impl CapturingVerifier {
     fn new(capture: FpCapture) -> Arc<Self> {
-        Arc::new(Self { provider: Arc::new(rustls::crypto::ring::default_provider()), capture })
+        Arc::new(Self {
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+            capture,
+        })
     }
 }
 
 impl ServerCertVerifier for CapturingVerifier {
-    fn verify_server_cert(&self, end_entity: &CertificateDer<'_>, _: &[CertificateDer<'_>],
-        _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, rustls::Error>
-    {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _: &[CertificateDer<'_>],
+        _: &ServerName<'_>,
+        _: &[u8],
+        _: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
         *self.capture.lock().unwrap() = Some(cert_fingerprint(end_entity.as_ref()));
         Ok(ServerCertVerified::assertion())
     }
 
-    fn verify_tls12_signature(&self, message: &[u8], cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error>
-    { rustls::crypto::verify_tls12_signature(message, cert, dss,
-        &self.provider.signature_verification_algorithms) }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
 
-    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>,
-        dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, rustls::Error>
-    { rustls::crypto::verify_tls13_signature(message, cert, dss,
-        &self.provider.signature_verification_algorithms) }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.provider.signature_verification_algorithms.supported_schemes()
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
     }
 }
 
@@ -136,22 +207,65 @@ fn known_hosts_path() -> std::path::PathBuf {
     std::path::PathBuf::from(home).join(".local/share/onyx/known_hosts")
 }
 
+fn ensure_private_dir(path: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(path).with_context(|| format!("creating {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("setting permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn open_private_append(path: &std::path::Path) -> Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
+struct RemotePaths {
+    remote_dir: String,
+    conf_dir: String,
+}
+
+fn resolve_remote_paths(target: &str, identity: Option<&str>) -> Result<RemotePaths> {
+    let home =
+        ssh_capture(target, identity, "printf %s \"$HOME\"").context("resolving remote HOME")?;
+    anyhow::ensure!(!home.is_empty(), "remote HOME is empty");
+    Ok(RemotePaths {
+        remote_dir: format!("{home}/.local/share/onyx"),
+        conf_dir: format!("{home}/.config/onyx"),
+    })
+}
+
 /// TOFU check run after every QUIC handshake, before any application data.
 ///
 /// - **Known + match**    → silent Ok.
 /// - **Known + mismatch** → print warning block, Err (hard fail).
 /// - **New host**         → SSH-style interactive prompt; saves on yes, Err on no.
 async fn check_known_hosts(host_port: &str, remote_fp: &str) -> Result<()> {
-    let path    = known_hosts_path();
+    let path = known_hosts_path();
     let content = std::fs::read_to_string(&path).unwrap_or_default();
 
     for line in content.lines() {
         let mut it = line.splitn(2, ' ');
         let key = it.next().unwrap_or("");
-        let fp  = it.next().unwrap_or("");
-        if key != host_port { continue; }
+        let fp = it.next().unwrap_or("");
+        if key != host_port {
+            continue;
+        }
 
-        if fp == remote_fp { return Ok(()); } // known + matches
+        if fp == remote_fp {
+            return Ok(());
+        } // known + matches
 
         // ── Fingerprint mismatch ─────────────────────────────────────────────
         eprintln!();
@@ -160,17 +274,26 @@ async fn check_known_hosts(host_port: &str, remote_fp: &str) -> Result<()> {
         eprintln!("\x1b[31;1m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\x1b[0m");
         eprintln!();
         eprintln!("IT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!");
-        eprintln!("The onyx server at \x1b[1m{host_port}\x1b[0m presented a different certificate.");
+        eprintln!(
+            "The onyx server at \x1b[1m{host_port}\x1b[0m presented a different certificate."
+        );
         eprintln!("  stored:   {fp}");
         eprintln!("  received: {remote_fp}");
         eprintln!();
         eprintln!("If you rebuilt the server, remove the old entry with:");
-        eprintln!("  sed -i '/{}/d' {}", host_port.replace('/', r"\/"), path.display());
+        eprintln!(
+            "  sed -i '/{}/d' {}",
+            host_port.replace('/', r"\/"),
+            path.display()
+        );
         anyhow::bail!("host key verification failed for {host_port}");
     }
 
     // ── New host — interactive Trust On First Use ────────────────────────────
-    eprintln!("The authenticity of host '{}' can't be established.", host_port);
+    eprintln!(
+        "The authenticity of host '{}' can't be established.",
+        host_port
+    );
     eprintln!("SHA256 fingerprint: {remote_fp}");
     eprint!("Are you sure you want to continue connecting (yes/no)? ");
     std::io::stderr().flush().ok();
@@ -179,20 +302,24 @@ async fn check_known_hosts(host_port: &str, remote_fp: &str) -> Result<()> {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).ok();
         line.trim().to_lowercase()
-    }).await.unwrap_or_default();
+    })
+    .await
+    .unwrap_or_default();
 
     if answer != "yes" {
         anyhow::bail!("Host key verification failed.");
     }
 
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        ensure_private_dir(parent)?;
     }
     use std::io::Write as _;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&path)
-        .context("opening known_hosts")?;
+    let mut f = open_private_append(&path)?;
     writeln!(f, "{host_port} {remote_fp}").context("writing known_hosts")?;
-    eprintln!("Warning: Permanently added '{}' ({remote_fp}) to the list of known hosts.", host_port);
+    eprintln!(
+        "Warning: Permanently added '{}' ({remote_fp}) to the list of known hosts.",
+        host_port
+    );
 
     Ok(())
 }
@@ -203,7 +330,9 @@ async fn check_known_hosts(host_port: &str, remote_fp: &str) -> Result<()> {
 
 async fn send_msg(stream: &mut quinn::SendStream, msg: &Message) -> Result<()> {
     let payload = shared::encode(msg)?;
-    stream.write_all(&(payload.len() as u32).to_le_bytes()).await?;
+    stream
+        .write_all(&(payload.len() as u32).to_le_bytes())
+        .await?;
     stream.write_all(&payload).await?;
     Ok(())
 }
@@ -222,17 +351,27 @@ async fn recv_msg(stream: &mut quinn::RecvStream) -> Result<Message> {
 
 fn new_session_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let s = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let s = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     format!("{s:x}-{:x}", std::process::id())
 }
 
 fn get_terminal_size() -> (u16, u16) {
-    let mut ws = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
+    let mut ws = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
     unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ as _, &mut ws) };
     (ws.ws_col, ws.ws_row)
 }
 
-struct RawMode { saved: libc::termios }
+struct RawMode {
+    saved: libc::termios,
+}
 
 impl RawMode {
     fn enter() -> Self {
@@ -296,12 +435,50 @@ struct OnyxTarget {
     ssh_mode: bool,
 }
 
-/// Parse CLI arguments; return (raw_target, identity_file, no_fallback, forwards).
-fn parse_args() -> (String, Option<String>, bool, Vec<(u16, u16)>) {
+enum CliMode {
+    Interactive {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_fallback: bool,
+        low_bandwidth: bool,
+        forwards: Vec<(u16, u16)>,
+    },
+    Proxy {
+        target_host: String,
+        target_port: u16,
+    },
+}
+
+/// Parse CLI arguments.
+fn parse_args() -> CliMode {
     let mut args = std::env::args().skip(1).peekable();
+    if matches!(args.peek(), Some(cmd) if cmd == "proxy") {
+        args.next();
+        let target_host = args.next().unwrap_or_else(|| {
+            eprintln!("Usage: onyx proxy <host> <port>");
+            std::process::exit(1);
+        });
+        let target_port = args
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or_else(|| {
+                eprintln!("Usage: onyx proxy <host> <port>");
+                std::process::exit(1);
+            });
+        if let Some(extra) = args.next() {
+            eprintln!("onyx: unexpected argument: {extra}");
+            std::process::exit(1);
+        }
+        return CliMode::Proxy {
+            target_host,
+            target_port,
+        };
+    }
+
     let mut identity: Option<String> = None;
     let mut target: Option<String> = None;
     let mut no_fallback = false;
+    let mut low_bandwidth = false;
     let mut forwards: Vec<(u16, u16)> = Vec::new();
 
     while let Some(a) = args.next() {
@@ -312,18 +489,24 @@ fn parse_args() -> (String, Option<String>, bool, Vec<(u16, u16)>) {
             });
         } else if a == "--no-fallback" {
             no_fallback = true;
+        } else if a == "--low-bandwidth" {
+            low_bandwidth = true;
         } else if a == "--forward" || a == "-L" {
             let spec = args.next().unwrap_or_else(|| {
                 eprintln!("onyx: --forward requires local_port:remote_port");
                 std::process::exit(1);
             });
             let mut parts = spec.splitn(2, ':');
-            let lp = parts.next().and_then(|s| s.parse::<u16>().ok())
+            let lp = parts
+                .next()
+                .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or_else(|| {
                     eprintln!("onyx: --forward: invalid spec '{spec}' (expected local:remote)");
                     std::process::exit(1);
                 });
-            let rp = parts.next().and_then(|s| s.parse::<u16>().ok())
+            let rp = parts
+                .next()
+                .and_then(|s| s.parse::<u16>().ok())
                 .unwrap_or_else(|| {
                     eprintln!("onyx: --forward: invalid spec '{spec}' (expected local:remote)");
                     std::process::exit(1);
@@ -338,16 +521,25 @@ fn parse_args() -> (String, Option<String>, bool, Vec<(u16, u16)>) {
     }
 
     let target = target.unwrap_or_else(|| {
-        eprintln!("Usage: onyx [--no-fallback] [-i identity_file] [--forward local:remote] [user@]<host>[:<quic-port>]");
+        eprintln!("Usage: onyx [--no-fallback] [--low-bandwidth] [-i identity_file] [--forward local:remote] [user@]<host>[:<quic-port>]");
+        eprintln!("       onyx proxy <host> <port>");
         eprintln!("  my-server                     SSH alias → bootstrap + QUIC");
         eprintln!("  user@host[:port]              SSH bootstrap + QUIC");
         eprintln!("  128.140.63.67[:port]          direct QUIC (no SSH)");
         eprintln!("  --forward 8888:8888           tunnel localhost:8888 → remote:8888 (repeatable)");
+        eprintln!("  --low-bandwidth               smoother batching on poor links");
         eprintln!("  --no-fallback                 exit on QUIC failure instead of falling back to SSH");
+        eprintln!("  proxy <host> <port>           transparent TCP proxy for SSH ProxyCommand");
         std::process::exit(1);
     });
 
-    (target, identity, no_fallback, forwards)
+    CliMode::Interactive {
+        raw_target: target,
+        identity_file: identity,
+        no_fallback,
+        low_bandwidth,
+        forwards,
+    }
 }
 
 /// Use `ssh -G <ssh_target>` to resolve the canonical hostname and user.
@@ -377,9 +569,11 @@ fn resolve_via_ssh_config(ssh_target: &str, identity: Option<&str>) -> Result<(S
         }
     }
 
-    anyhow::ensure!(!hostname.is_empty(),
+    anyhow::ensure!(
+        !hostname.is_empty(),
         "ssh -G returned no hostname for '{ssh_target}'; \
-         check your SSH config or try a full user@host address");
+         check your SSH config or try a full user@host address"
+    );
 
     if user.is_empty() {
         user = std::env::var("USER")
@@ -403,27 +597,32 @@ fn build_target(raw: &str, identity: Option<String>) -> Result<OnyxTarget> {
     // Determine the bare host (strip leading user@).
     let host_only = match ssh_part.find('@') {
         Some(i) => &ssh_part[i + 1..],
-        None    => &ssh_part,
+        None => &ssh_part,
     };
 
     // Direct mode only when the host is a bare IP address and there is no '@'.
     // Everything else (hostnames, aliases, user@anything) uses SSH mode.
-    let has_at   = ssh_part.contains('@');
-    let is_ip    = host_only.parse::<std::net::IpAddr>().is_ok();
+    let has_at = ssh_part.contains('@');
+    let is_ip = host_only.parse::<std::net::IpAddr>().is_ok();
     let ssh_mode = has_at || !is_ip;
 
     if ssh_mode {
         // Resolve through SSH config to get the real hostname for QUIC.
-        let (quic_host, _user) =
-            resolve_via_ssh_config(&ssh_part, identity.as_deref())
-                .with_context(|| format!("resolving '{ssh_part}'"))?;
+        let (quic_host, _user) = resolve_via_ssh_config(&ssh_part, identity.as_deref())
+            .with_context(|| format!("resolving '{ssh_part}'"))?;
 
-        Ok(OnyxTarget { ssh_target: ssh_part, quic_host, quic_port, identity_file: identity, ssh_mode: true })
+        Ok(OnyxTarget {
+            ssh_target: ssh_part,
+            quic_host,
+            quic_port,
+            identity_file: identity,
+            ssh_mode: true,
+        })
     } else {
         // Direct: use the IP as-is, no SSH involved.
         Ok(OnyxTarget {
             ssh_target: String::new(),
-            quic_host:  host_only.to_string(),
+            quic_host: host_only.to_string(),
             quic_port,
             identity_file: identity,
             ssh_mode: false,
@@ -462,10 +661,7 @@ fn ssh_capture(target: &str, identity: Option<&str>, cmd: &str) -> Result<String
 
 /// Run remote command; inherit stdout + stderr (shows build output, etc.).
 fn ssh_show(target: &str, identity: Option<&str>, cmd: &str) -> Result<()> {
-    let st = ssh_cmd(target, identity)
-        .arg(cmd)
-        .status()
-        .context("ssh")?;
+    let st = ssh_cmd(target, identity).arg(cmd).status().context("ssh")?;
     if !st.success() {
         if st.code() == Some(255) {
             anyhow::bail!("SSH authentication failed for '{target}'");
@@ -475,23 +671,77 @@ fn ssh_show(target: &str, identity: Option<&str>, cmd: &str) -> Result<()> {
     Ok(())
 }
 
-
 /// Upload bytes to `remote_path` by piping into `cat > path` over SSH.
-/// Path uses `~` which the remote shell expands — do not quote it.
-fn ssh_upload(target: &str, identity: Option<&str>, remote_path: &str, content: &[u8]) -> Result<()> {
+fn ssh_upload(
+    target: &str,
+    identity: Option<&str>,
+    remote_path: &str,
+    content: &[u8],
+) -> Result<()> {
+    let parent = std::path::Path::new(remote_path)
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("remote path has no parent: {remote_path}"))?;
+    let parent = parent.display().to_string();
+    let mkdir = ssh_cmd(target, identity)
+        .arg(format!("mkdir -p {}", shell_quote(&parent)))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("creating remote upload directory")?;
+    if !mkdir.status.success() {
+        let stderr = String::from_utf8_lossy(&mkdir.stderr).trim().to_string();
+        anyhow::bail!(
+            "ssh upload failed\n  file: {remote_path}\n  exit: {}\n  stderr: {}",
+            mkdir.status.code().unwrap_or(-1),
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                &stderr
+            }
+        );
+    }
+
     let mut child = ssh_cmd(target, identity)
-        .arg(format!("cat > {remote_path}"))
+        .arg(format!("cat > {}", shell_quote(remote_path)))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .context("ssh upload")?;
 
     if let Some(mut s) = child.stdin.take() {
         s.write_all(content).context("writing to ssh stdin")?;
     }
-    let st = child.wait()?;
-    anyhow::ensure!(st.success(), "ssh upload to {remote_path} failed");
+    let out = child.wait_with_output().context("waiting for ssh upload")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        anyhow::bail!(
+            "ssh upload failed\n  file: {remote_path}\n  exit: {}\n  stderr: {}",
+            out.status.code().unwrap_or(-1),
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                &stderr
+            }
+        );
+    }
+
+    let verify = ssh_cmd(target, identity)
+        .arg(format!("test -f {}", shell_quote(remote_path)))
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .context("verifying remote upload")?;
+    if !verify.status.success() {
+        let stderr = String::from_utf8_lossy(&verify.stderr).trim().to_string();
+        anyhow::bail!(
+            "ssh upload verification failed\n  file: {remote_path}\n  exit: {}\n  stderr: {}",
+            verify.status.code().unwrap_or(-1),
+            if stderr.is_empty() {
+                "<empty>"
+            } else {
+                &stderr
+            }
+        );
+    }
     Ok(())
 }
 
@@ -503,9 +753,10 @@ fn ssh_upload(target: &str, identity: Option<&str>, remote_path: &str, content: 
 /// Used to detect when the local source has changed so we rebuild automatically.
 fn source_hash() -> u64 {
     const OFFSET: u64 = 14695981039346656037;
-    const PRIME:  u64 = 1099511628211;
+    const PRIME: u64 = 1099511628211;
     let mut h = OFFSET;
-    for b in SERVER_MAIN_RS.bytes()
+    for b in SERVER_MAIN_RS
+        .bytes()
         .chain(SHARED_LIB_RS.bytes())
         .chain(SERVER_CARGO_TOML.bytes())
         .chain(SHARED_CARGO_TOML.bytes())
@@ -520,7 +771,7 @@ fn source_hash() -> u64 {
 /// Separate from source_hash so config tweaks don't force a server rebuild.
 fn config_hash() -> u64 {
     const OFFSET: u64 = 14695981039346656037;
-    const PRIME:  u64 = 1099511628211;
+    const PRIME: u64 = 1099511628211;
     let mut h = OFFSET;
     for b in ONYX_TMUX_CONF.bytes().chain(ONYX_STATUS_SH.bytes()) {
         h ^= b as u64;
@@ -535,29 +786,44 @@ fn config_hash() -> u64 {
 // ---------------------------------------------------------------------------
 
 struct RemoteStatus {
-    hash_ok:   bool,   // remote .server-hash == current source hash
-    running:   bool,   // onyx-server process is alive
-    has_cargo: bool,   // ~/.cargo/bin/cargo exists
-    conf_ok:   bool,   // tmux config + status script are current
+    hash_ok: bool,   // remote .server-hash == current source hash
+    running: bool,   // onyx-server process is alive
+    healthy: bool,   // onyx-server process is confirmed ready for QUIC
+    own_pid: bool,   // server.pid still points to an onyx-server process
+    has_cargo: bool, // ~/.cargo/bin/cargo exists
+    conf_ok: bool,   // tmux config + status script are current
 }
 
 /// Single SSH round-trip: verifies auth and gathers all bootstrap pre-conditions.
 /// Returns Err on SSH auth failure or connection error.
-fn remote_status(target: &str, identity: Option<&str>, expected_hash: &str, quic_port: u16)
-    -> Result<RemoteStatus>
-{
+fn remote_status(
+    target: &str,
+    identity: Option<&str>,
+    expected_hash: &str,
+    quic_port: u16,
+    paths: &RemotePaths,
+) -> Result<RemoteStatus> {
     let conf_hash = format!("{:016x}", config_hash());
     // Everything in one shell snippet — one TCP+crypto handshake total.
     let script = format!(
-        "h=$(cat {REMOTE_DIR}/.server-hash 2>/dev/null); \
-         p=$(cat {REMOTE_DIR}/server.pid   2>/dev/null); \
+        "h=$(cat {remote_dir}/.server-hash 2>/dev/null); \
+         p=$(cat {remote_dir}/server.pid   2>/dev/null); \
          r=no; [ -n \"$p\" ] && kill -0 \"$p\" 2>/dev/null && r=yes; \
+         own=no; \
+         ready=no; \
+         if [ \"$r\" = yes ] && [ -r /proc/$p/cmdline ]; then \
+           cmd=$(tr '\\000' ' ' < /proc/$p/cmdline 2>/dev/null); \
+           case \"$cmd\" in *onyx-server*) own=yes ;; esac; \
+         fi; \
+         if [ \"$own\" = yes ] && grep -q 'listening on .*:{quic_port}  (ALPN: onyx)' {server_log} 2>/dev/null; then \
+           ready=yes; \
+         fi; \
          c=no; [ -f ~/.cargo/bin/cargo ] && c=yes; \
-         cv=$(cat {CONF_DIR}/.conf-hash 2>/dev/null); \
-         sudo ufw allow {quic_port}/udp >/dev/null 2>&1; \
-         sudo iptables -C INPUT -p udp --dport {quic_port} -j ACCEPT 2>/dev/null || \
-         sudo iptables -I INPUT -p udp --dport {quic_port} -j ACCEPT 2>/dev/null; \
-         echo \"h=$h r=$r c=$c cv=$cv\""
+         cv=$(cat {conf_dir}/.conf-hash 2>/dev/null); \
+         echo \"h=$h r=$r own=$own ready=$ready c=$c cv=$cv\"",
+        server_log = shell_quote(&format!("{}/server.log", paths.remote_dir)),
+        remote_dir = shell_quote(&paths.remote_dir),
+        conf_dir = shell_quote(&paths.conf_dir),
     );
 
     let out = ssh_cmd(target, identity)
@@ -569,14 +835,18 @@ fn remote_status(target: &str, identity: Option<&str>, expected_hash: &str, quic
     if !out.status.success() {
         if out.status.code() == Some(255) {
             anyhow::bail!(
-                "SSH authentication failed for '{}' — check your key/credentials", target
+                "SSH authentication failed for '{}' — check your key/credentials",
+                target
             );
         }
-        anyhow::bail!("SSH connection failed (exit {})", out.status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "SSH connection failed (exit {})",
+            out.status.code().unwrap_or(-1)
+        );
     }
 
     let text = String::from_utf8_lossy(&out.stdout);
-    let get  = |key: &str| -> String {
+    let get = |key: &str| -> String {
         text.split_whitespace()
             .find(|kv| kv.starts_with(&format!("{key}=")))
             .and_then(|kv| kv.splitn(2, '=').nth(1))
@@ -585,10 +855,12 @@ fn remote_status(target: &str, identity: Option<&str>, expected_hash: &str, quic
     };
 
     Ok(RemoteStatus {
-        hash_ok:   get("h") == expected_hash,
-        running:   get("r") == "yes",
+        hash_ok: get("h") == expected_hash,
+        running: get("r") == "yes",
+        healthy: get("ready") == "yes",
+        own_pid: get("own") == "yes",
         has_cargo: get("c") == "yes",
-        conf_ok:   get("cv") == conf_hash,
+        conf_ok: get("cv") == conf_hash,
     })
 }
 
@@ -598,14 +870,41 @@ fn remote_status(target: &str, identity: Option<&str>, expected_hash: &str, quic
 
 /// Upload tmux.conf and status.sh to CONF_DIR and record the config hash.
 /// Only called when config_hash() doesn't match the remote, so it's rare.
-fn ensure_config_files(target: &str, identity: Option<&str>) -> Result<()> {
+fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths) -> Result<()> {
     let conf_hash = format!("{:016x}", config_hash());
-    let _ = ssh_capture(target, identity, &format!("mkdir -p {CONF_DIR}"));
-    ssh_upload(target, identity, &format!("{CONF_DIR}/tmux.conf"),  ONYX_TMUX_CONF.as_bytes())?;
-    ssh_upload(target, identity, &format!("{CONF_DIR}/status.sh"),  ONYX_STATUS_SH.as_bytes())?;
-    let _ = ssh_capture(target, identity,
-        &format!("chmod +x {CONF_DIR}/status.sh && \
-                  echo '{conf_hash}' > {CONF_DIR}/.conf-hash"));
+    let _ = ssh_capture(
+        target,
+        identity,
+        &format!(
+            "mkdir -p {conf_dir} && chmod 700 {conf_dir}",
+            conf_dir = shell_quote(&paths.conf_dir)
+        ),
+    );
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/tmux.conf", paths.conf_dir),
+        ONYX_TMUX_CONF.as_bytes(),
+    )?;
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/status.sh", paths.conf_dir),
+        ONYX_STATUS_SH.as_bytes(),
+    )?;
+    let conf_hash_path = format!("{}/.conf-hash", paths.conf_dir);
+    let _ = ssh_capture(
+        target,
+        identity,
+        &format!(
+            "chmod 700 {conf_dir} && chmod 600 {conf_dir}/tmux.conf && \
+                  chmod 700 {conf_dir}/status.sh && \
+                  printf %s {conf_hash} > {conf_hash_path} && chmod 600 {conf_hash_path}",
+            conf_dir = shell_quote(&paths.conf_dir),
+            conf_hash = shell_quote(&conf_hash),
+            conf_hash_path = shell_quote(&conf_hash_path),
+        ),
+    );
     Ok(())
 }
 
@@ -615,74 +914,191 @@ fn ensure_config_files(target: &str, identity: Option<&str>) -> Result<()> {
 
 fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
     eprintln!("  installing Rust via rustup...");
-    ssh_show(target, identity,
+    ssh_show(
+        target,
+        identity,
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-         | sh -s -- -y --no-modify-path")
-        .context("Rust installation failed on remote")?;
+         | sh -s -- -y --no-modify-path",
+    )
+    .context("Rust installation failed on remote")?;
     eprintln!("  Rust installed");
     Ok(())
 }
 
-fn upload_and_build(target: &str, identity: Option<&str>, hash: &str) -> Result<()> {
+fn upload_and_build(
+    target: &str,
+    identity: Option<&str>,
+    hash: &str,
+    paths: &RemotePaths,
+) -> Result<()> {
     eprintln!("  uploading source...");
-    ssh_show(target, identity,
-        &format!("mkdir -p {REMOTE_DIR}/shared/src {REMOTE_DIR}/server/src"))?;
+    ssh_show(
+        target,
+        identity,
+        &format!(
+            "mkdir -p {remote_dir}/shared/src {remote_dir}/server/src && chmod 700 {remote_dir}",
+            remote_dir = shell_quote(&paths.remote_dir)
+        ),
+    )?;
 
-    ssh_upload(target, identity, &format!("{REMOTE_DIR}/Cargo.toml"),         REMOTE_WORKSPACE_TOML.as_bytes())?;
-    ssh_upload(target, identity, &format!("{REMOTE_DIR}/shared/Cargo.toml"),  SHARED_CARGO_TOML.as_bytes())?;
-    ssh_upload(target, identity, &format!("{REMOTE_DIR}/shared/src/lib.rs"),  SHARED_LIB_RS.as_bytes())?;
-    ssh_upload(target, identity, &format!("{REMOTE_DIR}/server/Cargo.toml"),  SERVER_CARGO_TOML.as_bytes())?;
-    ssh_upload(target, identity, &format!("{REMOTE_DIR}/server/src/main.rs"), SERVER_MAIN_RS.as_bytes())?;
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/Cargo.toml", paths.remote_dir),
+        REMOTE_WORKSPACE_TOML.as_bytes(),
+    )?;
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/shared/Cargo.toml", paths.remote_dir),
+        SHARED_CARGO_TOML.as_bytes(),
+    )?;
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/shared/src/lib.rs", paths.remote_dir),
+        SHARED_LIB_RS.as_bytes(),
+    )?;
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/server/Cargo.toml", paths.remote_dir),
+        SERVER_CARGO_TOML.as_bytes(),
+    )?;
+    ssh_upload(
+        target,
+        identity,
+        &format!("{}/server/src/main.rs", paths.remote_dir),
+        SERVER_MAIN_RS.as_bytes(),
+    )?;
 
     eprintln!("  building onyx-server (this takes a minute on first run)...");
-    ssh_show(target, identity,
-        &format!("cd {REMOTE_DIR} && ~/.cargo/bin/cargo build --release -p server 2>&1"))?;
+    ssh_show(
+        target,
+        identity,
+        &format!(
+            "cd {} && ~/.cargo/bin/cargo build --release -p server 2>&1",
+            shell_quote(&paths.remote_dir)
+        ),
+    )?;
     eprintln!("  build complete");
 
-    let _ = ssh_capture(target, identity,
-        &format!("echo '{hash}' > {REMOTE_DIR}/.server-hash"));
+    let hash_path = format!("{}/.server-hash", paths.remote_dir);
+    let _ = ssh_capture(
+        target,
+        identity,
+        &format!(
+            "printf %s {} > {} && chmod 600 {}",
+            shell_quote(hash),
+            shell_quote(&hash_path),
+            shell_quote(&hash_path)
+        ),
+    );
     Ok(())
 }
 
-fn start_server(target: &str, identity: Option<&str>) -> Result<()> {
-    eprintln!("  starting onyx-server...");
+fn start_server(
+    target: &str,
+    identity: Option<&str>,
+    quic_port: u16,
+    paths: &RemotePaths,
+) -> Result<()> {
+    let server_pid = format!("{}/server.pid", paths.remote_dir);
+    let server_log = format!("{}/server.log", paths.remote_dir);
+    let remote_dir = shell_quote(&paths.remote_dir);
+    let status = remote_status(target, identity, "", quic_port, paths)?;
+
+    if status.healthy {
+        eprintln!("[onyx] onyx-server already running");
+        return Ok(());
+    }
+
+    if status.running && status.own_pid {
+        eprintln!("[onyx] existing onyx-server is unhealthy; restarting");
+    } else if status.running {
+        anyhow::bail!(
+            "startup failed: port appears busy but server.pid does not point to a healthy onyx-server"
+        );
+    } else {
+        eprintln!("  starting onyx-server...");
+    }
 
     // Kill stale instance + give OS a moment to release the UDP socket.
-    let _ = ssh_capture(target, identity, &format!(
-        "pid=$(cat {REMOTE_DIR}/server.pid 2>/dev/null); \
+    if status.own_pid {
+        let _ = ssh_capture(
+            target,
+            identity,
+            &format!(
+                "pid=$(cat {} 2>/dev/null); \
          [ -n \"$pid\" ] && kill \"$pid\" 2>/dev/null; \
-         pkill -f onyx-server 2>/dev/null; \
-         sleep 0.5; true"
-    ));
+         sleep 0.5; true",
+                shell_quote(&server_pid)
+            ),
+        );
+    }
 
     // Clear old log so the readiness poll only sees fresh output.
-    let _ = ssh_capture(target, identity,
-        &format!(": > {REMOTE_DIR}/server.log 2>/dev/null; true"));
+    let _ = ssh_capture(
+        target,
+        identity,
+        &format!(": > {} 2>/dev/null; true", shell_quote(&server_log)),
+    );
 
-    ssh_show(target, identity, &format!(
-        "nohup {REMOTE_DIR}/target/release/onyx-server \
-         >{REMOTE_DIR}/server.log 2>&1 </dev/null & \
-         echo $! > {REMOTE_DIR}/server.pid"
-    ))?;
+    ssh_show(
+        target,
+        identity,
+        &format!(
+            "nohup {remote_dir}/target/release/onyx-server \
+         >{server_log} 2>&1 </dev/null & \
+         printf %s \"$!\" > {server_pid} && \
+         chmod 600 {server_pid} {server_log}",
+            server_pid = shell_quote(&server_pid),
+            server_log = shell_quote(&server_log),
+            remote_dir = remote_dir
+        ),
+    )?;
 
     // Poll server.log for "listening on" — confirms the UDP socket is bound.
     // Checks every 500 ms for up to 10 s.
     let ready = (0..20).any(|_| {
         std::thread::sleep(Duration::from_millis(500));
-        ssh_capture(target, identity, &format!(
-            "grep -q 'listening on' {REMOTE_DIR}/server.log 2>/dev/null && echo yes"
-        )).map(|s| s == "yes").unwrap_or(false)
+        ssh_capture(
+            target,
+            identity,
+            &format!(
+                "grep -q 'listening on' {} 2>/dev/null && echo yes",
+                shell_quote(&server_log)
+            ),
+        )
+        .map(|s| s == "yes")
+        .unwrap_or(false)
     });
 
     if !ready {
-        if let Ok(log) = ssh_capture(target, identity,
-                &format!("tail -20 {REMOTE_DIR}/server.log 2>/dev/null")) {
+        if let Ok(log) = ssh_capture(
+            target,
+            identity,
+            &format!("tail -20 {} 2>/dev/null", shell_quote(&server_log)),
+        ) {
             if !log.is_empty() {
                 eprintln!("[onyx] server.log:\n{log}");
             }
         }
+        if let Ok(err) = ssh_capture(
+            target,
+            identity,
+            &format!(
+                "grep -m1 'Address already in use' {} 2>/dev/null",
+                shell_quote(&server_log)
+            ),
+        ) {
+            if !err.is_empty() {
+                anyhow::bail!("onyx-server failed to start: {err}");
+            }
+        }
         anyhow::bail!(
-            "onyx-server failed to start — see {REMOTE_DIR}/server.log on the remote host"
+            "onyx-server failed to start — see {} on the remote host",
+            server_log
         );
     }
     Ok(())
@@ -694,19 +1110,20 @@ fn start_server(target: &str, identity: Option<&str>) -> Result<()> {
 
 fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result<()> {
     let hash = format!("{:016x}", source_hash());
+    let paths = resolve_remote_paths(ssh_target, identity)?;
 
     // Single SSH call: verify auth + get all state.
-    let status = remote_status(ssh_target, identity, &hash, quic_port)
+    let status = remote_status(ssh_target, identity, &hash, quic_port, &paths)
         .context("cannot reach remote")?;
 
     // ── Fast path ─────────────────────────────────────────────────────────────
-    if status.hash_ok && status.running && status.conf_ok {
+    if status.hash_ok && status.healthy && status.conf_ok {
         return Ok(());
     }
 
     // Config files stale but server is running — just push the new files.
-    if status.hash_ok && status.running && !status.conf_ok {
-        ensure_config_files(ssh_target, identity)?;
+    if status.hash_ok && status.healthy && !status.conf_ok {
+        ensure_config_files(ssh_target, identity, &paths)?;
         return Ok(());
     }
 
@@ -718,11 +1135,11 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
     }
 
     if !status.hash_ok {
-        upload_and_build(ssh_target, identity, &hash)?;
+        upload_and_build(ssh_target, identity, &hash, &paths)?;
     }
 
-    ensure_config_files(ssh_target, identity)?;
-    start_server(ssh_target, identity)?;
+    ensure_config_files(ssh_target, identity, &paths)?;
+    start_server(ssh_target, identity, quic_port, &paths)?;
 
     eprintln!("[onyx] ready");
     Ok(())
@@ -737,15 +1154,14 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
 /// flows in both directions until either side closes.
 /// The task runs until aborted (by try_once cleanup) or until the bind fails.
 async fn run_forward_listener(conn: quinn::Connection, local_port: u16, remote_port: u16) {
-    let listener = match TcpListener::bind(
-        std::net::SocketAddr::from(([127, 0, 0, 1], local_port))
-    ).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[forward] cannot bind localhost:{local_port}: {e}");
-            return;
-        }
-    };
+    let listener =
+        match TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], local_port))).await {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("[forward] cannot bind localhost:{local_port}: {e}");
+                return;
+            }
+        };
     eprintln!("[forward] localhost:{local_port} → remote:{remote_port}");
     loop {
         let (tcp, _addr) = match listener.accept().await {
@@ -764,16 +1180,17 @@ async fn run_forward_listener(conn: quinn::Connection, local_port: u16, remote_p
 /// Opens a QUIC stream, performs the ForwardConnect handshake, then copies
 /// bytes between the TCP socket and the QUIC stream until both sides close.
 async fn handle_forward_conn(
-    conn:        quinn::Connection,
-    tcp:         tokio::net::TcpStream,
+    conn: quinn::Connection,
+    tcp: tokio::net::TcpStream,
     remote_port: u16,
 ) -> Result<()> {
     let (mut qs, mut qr) = conn.open_bi().await.context("open forward stream")?;
     send_msg(&mut qs, &Message::ForwardConnect { remote_port }).await?;
     match recv_msg(&mut qr).await? {
         Message::ForwardAck => {}
-        Message::ForwardError { reason } =>
-            anyhow::bail!("server refused :{remote_port}: {reason}"),
+        Message::ForwardError { reason } => {
+            anyhow::bail!("server refused :{remote_port}: {reason}")
+        }
         other => anyhow::bail!("unexpected forward response: {other:?}"),
     }
     let (mut tcp_r, mut tcp_w) = tcp.into_split();
@@ -786,59 +1203,253 @@ async fn handle_forward_conn(
     Ok(())
 }
 
+async fn connect_authenticated(
+    server_addr: SocketAddr,
+    endpoint: &Endpoint,
+    host_port: &str,
+    capture: &FpCapture,
+) -> Result<quinn::Connection> {
+    *capture.lock().unwrap() = None;
+
+    let connecting = endpoint
+        .connect(server_addr, "localhost")
+        .context("creating QUIC connection")?;
+    let conn = tokio::time::timeout(Duration::from_secs(5), connecting)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "QUIC handshake timed out after 5 s (no response from {}; \
+                 UDP/{} may be blocked by the server firewall)",
+                server_addr,
+                server_addr.port()
+            )
+        })?
+        .map_err(|e| anyhow::anyhow!("QUIC handshake failed: {e:#}"))?;
+
+    let fp = capture
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("TLS verifier did not capture a fingerprint"))?;
+    check_known_hosts(host_port, &fp).await?;
+    Ok(conn)
+}
+
+enum ProxyStdinEvent {
+    Data(Vec<u8>),
+    Eof,
+}
+
+fn proxy_session_id() -> String {
+    format!("proxy-{}", new_session_id())
+}
+
+async fn connect_proxy_stream(
+    endpoint: &Endpoint,
+    server_addr: SocketAddr,
+    host_port: &str,
+    capture: &FpCapture,
+    proxy_session_id: &str,
+    target_host: &str,
+    target_port: u16,
+    resume: bool,
+) -> Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
+    let conn = connect_authenticated(server_addr, endpoint, host_port, capture).await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open proxy stream")?;
+    let setup = if resume {
+        Message::ProxyResume {
+            proxy_session_id: proxy_session_id.to_string(),
+        }
+    } else {
+        Message::ProxyConnect {
+            proxy_session_id: proxy_session_id.to_string(),
+            target_host: target_host.to_string(),
+            target_port,
+        }
+    };
+    send_msg(&mut send, &setup).await?;
+    match recv_msg(&mut recv).await? {
+        Message::ProxySessionReady {
+            proxy_session_id: ready,
+        } if ready == proxy_session_id => Ok((conn, send, recv)),
+        Message::ForwardError { reason } => anyhow::bail!("{reason}"),
+        other => anyhow::bail!("unexpected proxy response: {other:?}"),
+    }
+}
+
+async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
+    let target = build_target(&target_host, None)
+        .with_context(|| format!("resolving target '{target_host}'"))?;
+    let server_addr: SocketAddr = {
+        use std::net::ToSocketAddrs;
+        let addr_str = format!("{}:{}", target.quic_host, target.quic_port);
+        addr_str
+            .to_socket_addrs()
+            .with_context(|| format!("DNS lookup for '{}'", target.quic_host))?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no address resolved for {}", target.quic_host))?
+    };
+
+    let host_port = format!("{}:{}", target.quic_host, target.quic_port);
+    let capture: FpCapture = Arc::new(Mutex::new(None));
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(make_client_config(capture.clone())?);
+    let proxy_session_id = proxy_session_id();
+
+    let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<ProxyStdinEvent>();
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) => {
+                    let _ = stdin_tx.send(ProxyStdinEvent::Eof);
+                    break;
+                }
+                Ok(n) => {
+                    if stdin_tx
+                        .send(ProxyStdinEvent::Data(buf[..n].to_vec()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = stdin_tx.send(ProxyStdinEvent::Eof);
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut stdout = tokio::io::stdout();
+    let mut reconnect_deadline: Option<Instant> = None;
+    let mut logged_disconnect = false;
+    let mut resume = false;
+
+    loop {
+        let (conn, mut send, mut recv) = match connect_proxy_stream(
+            &endpoint,
+            server_addr,
+            &host_port,
+            &capture,
+            &proxy_session_id,
+            &target_host,
+            target_port,
+            resume,
+        )
+        .await
+        {
+            Ok(parts) => {
+                if logged_disconnect {
+                    eprintln!("[proxy] resumed");
+                    logged_disconnect = false;
+                }
+                reconnect_deadline = None;
+                parts
+            }
+            Err(e) if resume => {
+                let deadline = *reconnect_deadline
+                    .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                if !logged_disconnect {
+                    eprintln!("[proxy] disconnected, retrying…");
+                    logged_disconnect = true;
+                }
+                if Instant::now() >= deadline {
+                    eprintln!("[proxy] resume failed");
+                    return Err(e);
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let mut buf = [0u8; 4096];
+        let mut eof_sent = false;
+        loop {
+            tokio::select! {
+                maybe = stdin_rx.recv(), if !eof_sent => match maybe {
+                    Some(ProxyStdinEvent::Data(data)) => {
+                        if send.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(ProxyStdinEvent::Eof) | None => {
+                        eof_sent = true;
+                        if send.finish().is_err() {
+                            break;
+                        }
+                    }
+                },
+                res = recv.read(&mut buf) => match res {
+                    Ok(Some(0)) | Ok(None) => {
+                        conn.close(0u32.into(), b"bye");
+                        endpoint.wait_idle().await;
+                        return Ok(());
+                    }
+                    Ok(Some(n)) => {
+                        stdout.write_all(&buf[..n]).await?;
+                        stdout.flush().await?;
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+
+        conn.close(0u32.into(), b"bye");
+        endpoint.wait_idle().await;
+        resume = true;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Single connection attempt + I/O loop
 // ---------------------------------------------------------------------------
 
 async fn try_once(
     server_addr: SocketAddr,
-    endpoint:    &Endpoint,
-    session:     &mut Option<(String, String)>,
-    host_port:   &str,
-    capture:     &FpCapture,
-    forwards:    &[(u16, u16)],
+    endpoint: &Endpoint,
+    session: &mut Option<(String, String)>,
+    host_port: &str,
+    capture: &FpCapture,
+    forwards: &[(u16, u16)],
+    mode: BandwidthMode,
 ) -> Result<bool> {
-    // Clear any fingerprint left over from a previous attempt.
-    *capture.lock().unwrap() = None;
-
-    let connecting = endpoint.connect(server_addr, "localhost")
-        .context("creating QUIC connection")?;
-    let conn = tokio::time::timeout(Duration::from_secs(5), connecting)
-        .await
-        .map_err(|_| anyhow::anyhow!(
-            "QUIC handshake timed out after 5 s (no response from {}; \
-             UDP/{} may be blocked by the server firewall)",
-            server_addr, server_addr.port()
-        ))?
-        .map_err(|e| anyhow::anyhow!("QUIC handshake failed: {e:#}"))?;
-
-    // TOFU check — happens before any application data is sent.
-    // The verifier captured the cert fingerprint during the TLS handshake.
-    let fp = capture.lock().unwrap().clone()
-        .ok_or_else(|| anyhow::anyhow!("TLS verifier did not capture a fingerprint"))?;
-    check_known_hosts(host_port, &fp).await?;
+    let conn = connect_authenticated(server_addr, endpoint, host_port, capture).await?;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
 
     let is_resume = session.is_some();
     match session.as_ref() {
         None => {
-            send_msg(&mut send, &Message::Hello {
-                session_id: new_session_id(),
-                resume_token: String::new(),
-            }).await?;
+            send_msg(
+                &mut send,
+                &Message::Hello {
+                    session_id: new_session_id(),
+                    resume_token: String::new(),
+                },
+            )
+            .await?;
         }
         Some((sid, tok)) => {
-            send_msg(&mut send, &Message::Resume {
-                session_id: sid.clone(),
-                resume_token: tok.clone(),
-                last_seq: 0,
-            }).await?;
+            send_msg(
+                &mut send,
+                &Message::Resume {
+                    session_id: sid.clone(),
+                    resume_token: tok.clone(),
+                    last_seq: 0,
+                },
+            )
+            .await?;
         }
     }
 
     let (session_id, resume_token) = match recv_msg(&mut recv).await? {
-        Message::Welcome { session_id, resume_token } => (session_id, resume_token),
+        Message::Welcome {
+            session_id,
+            resume_token,
+        } => (session_id, resume_token),
         Message::Close { reason } => {
             eprintln!("[client] server rejected: {reason}");
             return Ok(true);
@@ -852,11 +1463,15 @@ async fn try_once(
     } else {
         eprintln!("[mode] QUIC  (session {session_id})");
     }
+    if mode.low_bandwidth {
+        eprintln!("[mode] low-bandwidth");
+    }
 
     // Spawn one TCP listener per --forward spec.  Each listener opens new QUIC
     // streams on this connection for individual TCP connections.  All handles
     // are aborted when this function returns (connection dropped or shell exit).
-    let forward_handles: Vec<tokio::task::JoinHandle<()>> = forwards.iter()
+    let forward_handles: Vec<tokio::task::JoinHandle<()>> = forwards
+        .iter()
         .map(|&(lp, rp)| tokio::spawn(run_forward_listener(conn.clone(), lp, rp)))
         .collect();
 
@@ -873,7 +1488,10 @@ async fn try_once(
         let mut sigwinch = tokio::signal::unix::signal(SignalKind::window_change()).ok();
 
         loop {
-            enum Ev { Data(std::io::Result<usize>), Winch }
+            enum Ev {
+                Data(std::io::Result<usize>),
+                Winch,
+            }
 
             // Drive stdin and SIGWINCH concurrently; fall back to stdin-only if
             // signal setup failed (non-Unix environments, permission issues, etc.).
@@ -890,20 +1508,27 @@ async fn try_once(
                 Ev::Data(Ok(0)) | Ev::Data(Err(_)) => break,
                 Ev::Data(Ok(n)) => {
                     let mut data = buf[..n].to_vec();
-                    // Drain any additional input arriving within 5 ms (paste batching).
-                    // Normal typing never triggers this window; pastes arrive as a burst.
-                    let deadline = tokio::time::Instant::now() + Duration::from_millis(5);
+                    // Normal mode keeps typing crisp. Low-bandwidth mode waits a bit longer
+                    // so bursts coalesce into fewer QUIC writes without changing the protocol.
+                    let deadline = tokio::time::Instant::now() + mode.stdin_batch_window;
                     loop {
                         match tokio::time::timeout_at(deadline, stdin.read(&mut buf)).await {
                             Ok(Ok(m)) if m > 0 => data.extend_from_slice(&buf[..m]),
                             _ => break,
                         }
                     }
-                    if send_msg(&mut send, &Message::Input { data }).await.is_err() { break; }
+                    if send_msg(&mut send, &Message::Input { data }).await.is_err() {
+                        break;
+                    }
                 }
                 Ev::Winch => {
                     let (cols, rows) = get_terminal_size();
-                    if send_msg(&mut send, &Message::Resize { cols, rows }).await.is_err() { break; }
+                    if send_msg(&mut send, &Message::Resize { cols, rows })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
             }
         }
@@ -911,13 +1536,57 @@ async fn try_once(
 
     let mut output_jh = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
+        let mut pending = Vec::new();
+        let mut last_flush = tokio::time::Instant::now();
         loop {
             match recv_msg(&mut recv).await {
                 Ok(Message::Output { data, .. }) => {
-                    if stdout.write_all(&data).await.is_err() { break false; }
-                    let _ = stdout.flush().await;
+                    if !mode.low_bandwidth {
+                        if stdout.write_all(&data).await.is_err() {
+                            break false;
+                        }
+                        let _ = stdout.flush().await;
+                        continue;
+                    }
+
+                    pending.extend_from_slice(&data);
+                    let deadline = tokio::time::Instant::now() + mode.stdout_batch_window;
+                    let mut saw_close = false;
+                    while pending.len() < mode.stdout_chunk_limit {
+                        match tokio::time::timeout_at(deadline, recv_msg(&mut recv)).await {
+                            Ok(Ok(Message::Output { data, .. })) => {
+                                pending.extend_from_slice(&data)
+                            }
+                            Ok(Ok(Message::Close { .. })) => {
+                                saw_close = true;
+                                break;
+                            }
+                            Ok(Ok(_)) => break,
+                            Ok(Err(_)) | Err(_) => break,
+                        }
+                    }
+
+                    if !pending.is_empty() {
+                        if stdout.write_all(&pending).await.is_err() {
+                            break false;
+                        }
+                        pending.clear();
+                    }
+                    if last_flush.elapsed() >= mode.stdout_flush_window {
+                        if stdout.flush().await.is_err() {
+                            break false;
+                        }
+                        last_flush = tokio::time::Instant::now();
+                    }
+                    if saw_close {
+                        let _ = stdout.flush().await;
+                        break true;
+                    }
                 }
                 Ok(Message::Close { .. }) => {
+                    if !pending.is_empty() {
+                        let _ = stdout.write_all(&pending).await;
+                    }
                     let _ = stdout.flush().await;
                     break true;
                 }
@@ -931,7 +1600,9 @@ async fn try_once(
         r = &mut output_jh  => { stdin_jh.abort();  r.unwrap_or(false) }
     };
 
-    for jh in &forward_handles { jh.abort(); }
+    for jh in &forward_handles {
+        jh.abort();
+    }
     conn.close(0u32.into(), b"bye");
     Ok(shell_exited)
 }
@@ -979,9 +1650,34 @@ fn clear_banner() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    rustls::crypto::ring::default_provider().install_default().ok();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
 
-    let (raw_target, identity_file, no_fallback, forwards) = parse_args();
+    let cli_mode = parse_args();
+    if let CliMode::Proxy {
+        target_host,
+        target_port,
+    } = cli_mode
+    {
+        return run_proxy_mode(target_host, target_port).await;
+    }
+
+    let CliMode::Interactive {
+        raw_target,
+        identity_file,
+        no_fallback,
+        low_bandwidth,
+        forwards,
+    } = cli_mode
+    else {
+        unreachable!();
+    };
+    let bandwidth_mode = if low_bandwidth {
+        BandwidthMode::low_bandwidth()
+    } else {
+        BandwidthMode::normal()
+    };
 
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
@@ -990,8 +1686,12 @@ async fn main() -> Result<()> {
 
     // SSH bootstrap (blocking, single SSH call on fast path).
     if target.ssh_mode {
-        bootstrap(&target.ssh_target, target.identity_file.as_deref(), target.quic_port)
-            .context("bootstrap failed")?;
+        bootstrap(
+            &target.ssh_target,
+            target.identity_file.as_deref(),
+            target.quic_port,
+        )
+        .context("bootstrap failed")?;
     }
 
     // Build QUIC SocketAddr from the resolved hostname (never the raw alias).
@@ -1010,8 +1710,8 @@ async fn main() -> Result<()> {
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(make_client_config(capture.clone())?);
 
-    let mut session:            Option<(String, String)> = None;
-    let mut reconnect_deadline: Option<Instant>          = if target.ssh_mode {
+    let mut session: Option<(String, String)> = None;
+    let mut reconnect_deadline: Option<Instant> = if target.ssh_mode {
         Some(Instant::now() + Duration::from_secs(30))
     } else {
         None
@@ -1031,25 +1731,36 @@ async fn main() -> Result<()> {
         }
 
         // After 20 s of failed reconnects, re-run bootstrap via SSH.
-        // This re-opens iptables rules that were flushed and restarts the
-        // server if it crashed — without blocking on the first fast-path attempt.
+        // This refreshes remote state and restarts a crashed server without
+        // blocking on the first fast-path attempt.
         if target.ssh_mode {
             if let Some(t) = disconnect_at {
-                let rebootstrap_due = last_rebootstrap
-                    .map_or(true, |lr| lr.elapsed() > Duration::from_secs(30));
+                let rebootstrap_due =
+                    last_rebootstrap.map_or(true, |lr| lr.elapsed() > Duration::from_secs(30));
                 if t.elapsed() > Duration::from_secs(20) && rebootstrap_due {
                     let ssh_target = target.ssh_target.clone();
-                    let identity   = target.identity_file.clone();
-                    let port       = target.quic_port;
+                    let identity = target.identity_file.clone();
+                    let port = target.quic_port;
                     let _ = tokio::task::spawn_blocking(move || {
                         bootstrap(&ssh_target, identity.as_deref(), port)
-                    }).await;
+                    })
+                    .await;
                     last_rebootstrap = Some(Instant::now());
                 }
             }
         }
 
-        match try_once(server_addr, &endpoint, &mut session, &host_port, &capture, &forwards).await {
+        match try_once(
+            server_addr,
+            &endpoint,
+            &mut session,
+            &host_port,
+            &capture,
+            &forwards,
+            bandwidth_mode,
+        )
+        .await
+        {
             // Shell exited cleanly — just exit.
             Ok(true) => break,
 
@@ -1081,19 +1792,28 @@ async fn main() -> Result<()> {
                     // Fetch server.log to distinguish firewall vs handshake.
                     eprintln!("onyx: QUIC failed — {e:#}{hint}");
                     if let Ok(log) = ssh_capture(
-                        &target.ssh_target, target.identity_file.as_deref(),
+                        &target.ssh_target,
+                        target.identity_file.as_deref(),
                         &format!("cat {REMOTE_DIR}/server.log 2>/dev/null"),
                     ) {
                         if log.is_empty() {
                             eprintln!("  server.log is empty — server may not have started");
                         } else {
-                            for line in log.lines() { eprintln!("  {line}"); }
+                            for line in log.lines() {
+                                eprintln!("  {line}");
+                            }
                             if log.contains("incoming from") {
-                                eprintln!("  → UDP packets reach the server; QUIC handshake failing");
+                                eprintln!(
+                                    "  → UDP packets reach the server; QUIC handshake failing"
+                                );
                             } else {
-                                eprintln!("  → No UDP packets logged — likely a cloud firewall issue");
-                                eprintln!("    Open UDP {port} in your provider's firewall panel",
-                                          port = target.quic_port);
+                                eprintln!(
+                                    "  → No UDP packets logged — likely a cloud firewall issue"
+                                );
+                                eprintln!(
+                                    "    Open UDP {port} in your provider's firewall panel",
+                                    port = target.quic_port
+                                );
                             }
                         }
                     }

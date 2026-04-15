@@ -2,6 +2,7 @@
 # onyx installer — detects platform, downloads the right binary from the
 # latest GitHub release, and installs to /usr/local/bin.
 set -e
+umask 077
 
 REPO="shervin9/onyx"
 INSTALL_DIR="/usr/local/bin"
@@ -31,16 +32,44 @@ if [ -z "$LATEST" ]; then
 fi
 
 URL="https://github.com/$REPO/releases/download/$LATEST/$ARTIFACT"
+SUMS_URL="https://github.com/$REPO/releases/download/$LATEST/onyx-sha256sums.txt"
+TMP_BIN=$(mktemp "/tmp/${BIN}.XXXXXX")
+TMP_SUMS=$(mktemp "/tmp/${BIN}-sha256sums.XXXXXX")
+
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
 
 echo "Installing onyx $LATEST ($ARTIFACT)..."
-curl -fsSL "$URL" -o "/tmp/$BIN"
-chmod +x "/tmp/$BIN"
+curl -fsSL "$URL" -o "$TMP_BIN"
+curl -fsSL "$SUMS_URL" -o "$TMP_SUMS"
+
+EXPECTED=$(grep " $ARTIFACT\$" "$TMP_SUMS" | awk '{print $1}')
+if [ -z "$EXPECTED" ]; then
+  echo "onyx: checksum for $ARTIFACT not found in release" >&2
+  rm -f "$TMP_BIN" "$TMP_SUMS"
+  exit 1
+fi
+
+ACTUAL=$(sha256_file "$TMP_BIN")
+if [ "$EXPECTED" != "$ACTUAL" ]; then
+  echo "onyx: checksum verification failed for $ARTIFACT" >&2
+  rm -f "$TMP_BIN" "$TMP_SUMS"
+  exit 1
+fi
+
+chmod +x "$TMP_BIN"
+rm -f "$TMP_SUMS"
 
 # Install — try sudo if the target directory isn't writable directly.
 if [ -w "$INSTALL_DIR" ]; then
-  mv "/tmp/$BIN" "$INSTALL_DIR/$BIN"
+  mv "$TMP_BIN" "$INSTALL_DIR/$BIN"
 else
-  sudo mv "/tmp/$BIN" "$INSTALL_DIR/$BIN"
+  sudo mv "$TMP_BIN" "$INSTALL_DIR/$BIN"
 fi
 
 echo "onyx installed to $INSTALL_DIR/$BIN"

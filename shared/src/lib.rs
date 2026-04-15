@@ -35,6 +35,16 @@ pub enum Message {
     Close { reason: String },
     /// Client → Server: open a TCP tunnel to remote_port on the server host.
     ForwardConnect { remote_port: u16 },
+    /// Client → Server: open a TCP connection to target_host:target_port from the server.
+    ProxyConnect {
+        proxy_session_id: String,
+        target_host: String,
+        target_port: u16,
+    },
+    /// Client → Server: resume a proxy session after a short QUIC interruption.
+    ProxyResume { proxy_session_id: String },
+    /// Server → Client: proxy session is ready for transparent byte forwarding.
+    ProxySessionReady { proxy_session_id: String },
     /// Server → Client: tunnel accepted, remote TCP connection established.
     ForwardAck,
     /// Server → Client: tunnel rejected (port unreachable, refused, etc.).

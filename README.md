@@ -10,6 +10,8 @@ replacement for mosh.
   installs + builds the server for you via SSH.  No manual setup on the remote.
 - **Secure by default** — TOFU cert pinning (like SSH) after the first
   connection.  No CA required.
+- **Low-bandwidth mode** — `--low-bandwidth` batches terminal traffic more
+  aggressively for unstable links and AI CLI workflows.
 - **Works through NAT** — QUIC over UDP punches through most NAT without
   extra firewall rules.
 - **GPU-ready status bar** — tmux status bar shows live CPU, RAM, GPU%, VRAM.
@@ -43,6 +45,12 @@ onyx user@host:7373
 
 # Skip SSH fallback if QUIC fails
 onyx --no-fallback user@host
+
+# Poor connection? Use lower-chattiness terminal batching
+onyx --low-bandwidth user@host
+
+# Transparent SSH transport for ProxyCommand
+onyx proxy host 22
 ```
 
 On first connect to a new host you'll see:
@@ -100,8 +108,10 @@ connection is restored.
 
 ## Cloud firewall
 
-OS-level firewall (ufw/iptables) is configured automatically.
-**Cloud-provider firewalls must be opened manually:**
+Open the UDP port explicitly. onyx no longer edits host firewalls during
+bootstrap.
+
+**Cloud-provider and host firewalls must be opened manually:**
 
 | Provider | Where |
 |---|---|
