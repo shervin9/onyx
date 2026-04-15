@@ -5,6 +5,7 @@
   var flowPulse = document.querySelector(".flow-pulse");
   var flowLine = document.querySelector(".flow-line");
   var flowNodes = Array.prototype.slice.call(document.querySelectorAll(".flow-node"));
+  var flowDots = Array.prototype.slice.call(document.querySelectorAll(".flow-dot"));
   var flowPanels = Array.prototype.slice.call(document.querySelectorAll(".flow-panel"));
   var flowMeta = document.getElementById("flow-meta");
 
@@ -60,41 +61,43 @@
     });
   }
 
+  function dotCenter(dot, trackRect) {
+    var r = dot.getBoundingClientRect();
+    return {
+      x: r.left + r.width / 2 - trackRect.left,
+      y: r.top + r.height / 2 - trackRect.top
+    };
+  }
+
   function measureFlow() {
-    if (!flowTrack || !flowNodes.length) return;
+    if (!flowTrack || !flowDots.length) return;
 
     var trackRect = flowTrack.getBoundingClientRect();
-    var firstRect = flowNodes[0].getBoundingClientRect();
-    var lastRect = flowNodes[flowNodes.length - 1].getBoundingClientRect();
+    var first = dotCenter(flowDots[0], trackRect);
+    var last = dotCenter(flowDots[flowDots.length - 1], trackRect);
     var isVertical = window.matchMedia("(max-width: 900px)").matches;
 
     if (isVertical) {
-      var lineLeft = firstRect.left + firstRect.width / 2 - trackRect.left;
-      var lineTop = firstRect.top + firstRect.height / 2 - trackRect.top;
-      var lineHeight = lastRect.top + lastRect.height / 2 - firstRect.top - firstRect.height / 2;
-      flowTrack.style.setProperty("--flow-line-left", lineLeft + "px");
-      flowTrack.style.setProperty("--flow-line-top", lineTop + "px");
-      flowTrack.style.setProperty("--flow-line-height", Math.max(lineHeight, 0) + "px");
+      flowTrack.style.setProperty("--flow-line-left", first.x + "px");
+      flowTrack.style.setProperty("--flow-line-top", first.y + "px");
+      flowTrack.style.setProperty("--flow-line-height", Math.max(last.y - first.y, 0) + "px");
       flowTrack.style.setProperty("--flow-line-width", "1px");
     } else {
-      var lineLeftHorizontal = firstRect.left + firstRect.width / 2 - trackRect.left;
-      var lineRightHorizontal = lastRect.left + lastRect.width / 2 - trackRect.left;
-      var lineTopHorizontal = firstRect.top + firstRect.height / 2 - trackRect.top;
-      flowTrack.style.setProperty("--flow-line-left", lineLeftHorizontal + "px");
-      flowTrack.style.setProperty("--flow-line-width", Math.max(lineRightHorizontal - lineLeftHorizontal, 0) + "px");
-      flowTrack.style.setProperty("--flow-line-top", lineTopHorizontal + "px");
+      flowTrack.style.setProperty("--flow-line-left", first.x + "px");
+      flowTrack.style.setProperty("--flow-line-width", Math.max(last.x - first.x, 0) + "px");
+      flowTrack.style.setProperty("--flow-line-top", first.y + "px");
       flowTrack.style.setProperty("--flow-line-height", "1px");
     }
   }
 
   function placePulse(stepIndex, instant) {
-    if (!flowTrack || !flowPulse || !flowNodes.length) return;
-    var node = flowNodes[stepIndex];
-    if (!node) return;
+    if (!flowTrack || !flowPulse || !flowDots.length) return;
+    var dot = flowDots[stepIndex];
+    if (!dot) return;
     var trackRect = flowTrack.getBoundingClientRect();
-    var nodeRect = node.getBoundingClientRect();
-    var left = nodeRect.left + nodeRect.width / 2 - trackRect.left;
-    var top = nodeRect.top + nodeRect.height / 2 - trackRect.top;
+    var center = dotCenter(dot, trackRect);
+    var left = center.x;
+    var top = center.y;
 
     if (instant) {
       flowPulse.style.transition = "none";

@@ -1,117 +1,148 @@
-# onyx
+# Onyx
 
-A QUIC-based terminal multiplexer client/server — a faster, more reliable
-replacement for mosh.
+Stable remote shell for unreliable networks. QUIC when available, SSH when
+it's not. Built for AI CLI workflows, remote development, and DevOps on
+flaky links.
 
-- **Instant reconnect** — survives laptop sleep, Wi-Fi switches, mobile
-  roaming.  Session stays alive on the remote; you're back in tmux within
-  milliseconds of reconnecting.
-- **Self-bootstrapping** — runs `onyx user@host` for the first time and it
-  installs + builds the server for you via SSH.  No manual setup on the remote.
-- **Secure by default** — TOFU cert pinning (like SSH) after the first
-  connection.  No CA required.
-- **Low-bandwidth mode** — `--low-bandwidth` batches terminal traffic more
-  aggressively for unstable links and AI CLI workflows.
-- **Works through NAT** — QUIC over UDP punches through most NAT without
-  extra firewall rules.
-- **GPU-ready status bar** — tmux status bar shows live CPU, RAM, GPU%, VRAM.
-
----
+- **QUIC first, SSH fallback** — prefers QUIC over UDP 7272; falls back
+  transparently to plain SSH when UDP is blocked (disable with
+  `--no-fallback`).
+- **Self-bootstrapping remote** — on first connect, Onyx provisions the
+  remote `onyx-server` over SSH. It prefers uploading a prebuilt binary for
+  the remote architecture and only falls back to `cargo build --release` on
+  the remote when no matching prebuilt is available.
+- **Interactive session persistence** — the interactive Onyx shell runs
+  under tmux; short drops reconnect into the same session and scrollback
+  within a 5-minute window.
+- **Port forwarding** — `onyx --forward LPORT:RPORT user@host` forwards a
+  local port to a remote port through the same QUIC connection (repeatable).
+- **SSH `ProxyCommand` support** — `onyx proxy %h %p` lets SSH-based tools
+  ride Onyx as a transport. Short transport drops are recovered
+  best-effort within a 30-second window; longer drops end the underlying
+  SSH session.
+- **TOFU trust with fingerprint pinning** — first connect prompts for the
+  server's SHA-256 fingerprint; subsequent mismatches fail hard. See
+  [SECURITY.md](SECURITY.md).
 
 ## Install
+
+### Homebrew (coming soon)
+
+```bash
+brew install shervin9/onyx/onyx
+```
+
+The tap will be available at [`shervin9/homebrew-onyx`](https://github.com/shervin9/homebrew-onyx)
+once the first release is tagged. For now, use the shell installer below.
+
+### Shell installer
 
 ```bash
 curl -fsSL https://useonyx.dev/install.sh | sh
 ```
 
-**Platforms:** Linux x86_64, Linux arm64, macOS Apple Silicon
+Installs the local `onyx` client plus the matching Linux `onyx-server`
+companion binaries into `/usr/local/bin`. All artifacts are checksum-verified
+against `onyx-sha256sums.txt` from the release.
 
-Or download a binary directly from the
-[Releases](https://github.com/shervin9/onyx/releases) page.
+**Supported platforms:** Linux x86_64, Linux arm64, macOS Apple Silicon.
+A Homebrew formula for macOS arm64 is planned.
 
----
+### Build from source
+
+```bash
+git clone https://github.com/shervin9/onyx
+cd onyx
+cargo build --release
+# client:  target/release/onyx
+# server:  target/release/onyx-server
+```
+
+Requires Rust 1.75+.
 
 ## Quickstart
 
 ```bash
-# Connect to a host (bootstraps server on first run)
-onyx user@192.0.2.1
+# Interactive shell (bootstraps the server on first run)
+onyx user@host
 
-# Use an SSH config alias
-onyx hetzner-dev
+# SSH config alias
+onyx dev-onyx
 
 # Custom QUIC port
 onyx user@host:7373
 
-# Skip SSH fallback if QUIC fails
+# Local port forwarding (repeatable)
+onyx --forward 8888:8888 user@host
+
+# Skip the remote install/start check on subsequent connects
+onyx --no-bootstrap user@host
+
+# Hard-require QUIC; do not fall back to SSH
 onyx --no-fallback user@host
 
-# Poor connection? Use lower-chattiness terminal batching
+# Chattier terminal traffic gets batched for flaky links
 onyx --low-bandwidth user@host
 
-# Transparent SSH transport for ProxyCommand
+# SSH ProxyCommand transport for SSH-based tools
 onyx proxy host 22
 ```
 
-On first connect to a new host you'll see:
+First connect to a new host prompts for fingerprint confirmation:
 
 ```
-onyx: permanently added '192.0.2.1:7272' (sha256:ab12cd…) to known hosts.
+onyx: new host host:7272
+  fingerprint sha256:ab12cd…
+Trust this host? [y/N]
 ```
 
-Subsequent connects are silent unless the server certificate changes.
+After confirmation the fingerprint is stored in
+`~/.local/share/onyx/known_hosts` and subsequent connects are silent.
 
----
+## SSH `ProxyCommand` usage
 
-## How it works
-
-```
-onyx user@host
-  │
-  ├─ SSH (one round-trip) ──→ check source hash, open firewall, read fingerprint
-  │                          (builds + starts server on first run)
-  │
-  └─ QUIC/UDP ─────────────→ persistent PTY session in tmux
-                              reconnects transparently on network drop
-```
-
-The server binary is **never shipped manually**.  The client embeds the server
-source at compile time and uploads + builds it when the source hash changes.
-Remote files live in `~/.local/share/onyx/`.
-
----
-
-## Session persistence
-
-Disconnect and reconnect as often as you like — you always land back in the
-same tmux session.
+Drop this into your `~/.ssh/config` to route a host through Onyx:
 
 ```
-⚡  onyx — connection lost · 12s  reconnecting…
+Host dev-onyx
+  HostName host.example.com
+  User alice
+  ProxyCommand onyx proxy %h %p
 ```
 
-The counter shows while onyx is reconnecting.  It disappears the moment the
-connection is restored.
+Then `ssh dev-onyx` transports over Onyx. Short drops (under ~30s) reconnect
+automatically; longer drops terminate SSH. **This is best-effort
+reconnection — not a guarantee that SSH sessions survive real network
+loss.** If you need session-level persistence for arbitrary tools, use
+`mosh` or run tmux/screen on the remote.
 
----
+## Bootstrap and install model
 
-## Requirements
+Onyx is a **local-install** tool. You install `onyx` on your workstation;
+the remote server is provisioned automatically.
 
-**Client:** Linux or macOS (Apple Silicon).
+- The client connects first over SSH and checks whether a healthy
+  `onyx-server` is already running (`remote_status`). If yes, it skips
+  straight to QUIC.
+- Otherwise it uploads a prebuilt `onyx-server` binary matching the remote
+  architecture (looked up in the installer's install dir, `target/release`,
+  or a local cross-compile dir).
+- If no matching prebuilt binary is available, it uploads the source and
+  runs `cargo build --release` on the remote (installing Rust via `rustup`
+  if needed).
+- Remote install dir defaults to `~/.local/share/onyx/`, falling back to
+  `/tmp/onyx` if the home path is not writable. Override with
+  `ONYX_REMOTE_DIR=/path onyx user@host`.
+- `--no-bootstrap` assumes the remote is already set up and skips the
+  install/start check.
 
-**Server:** Linux (x86_64 or arm64), with:
-- SSH access
-- `curl` (to install Rust if not present)
-- UDP port 7272 open in your cloud provider's firewall (see below)
-
----
+Onyx **does not** modify remote firewall rules. Open UDP 7272 at your
+cloud provider and on the host firewall once — see below.
 
 ## Cloud firewall
 
-Open the UDP port explicitly. onyx no longer edits host firewalls during
-bootstrap.
-
-**Cloud-provider and host firewalls must be opened manually:**
+Open UDP 7272 on both the cloud-provider firewall and any host firewall
+(`ufw`, `firewalld`, etc.).
 
 | Provider | Where |
 |---|---|
@@ -119,51 +150,52 @@ bootstrap.
 | AWS | EC2 Security Group → inbound UDP 7272 |
 | GCP | VPC → Firewall rules → UDP 7272 |
 
-One-time, then you never touch it again.
-
----
+One-time setup per host.
 
 ## Scroll, copy, mouse
 
-onyx uses tmux, so all tmux shortcuts work:
+Interactive sessions run under tmux, so all tmux shortcuts work:
 
 | Action | Keys |
 |---|---|
 | Enter scroll mode | `Ctrl-b [` |
 | Scroll | Arrow keys / PgUp / PgDn |
-| Copy | `y` or `Enter` in copy mode |
-| Mouse scroll | Enabled by default |
+| Copy in copy mode | `y` or `Enter` |
+| Mouse scroll | On by default |
 
----
+## Security model
 
-## Known-hosts file
+Onyx uses a **Trust-On-First-Use** model with self-signed certs and
+fingerprint pinning in `~/.local/share/onyx/known_hosts`. Mismatches fail
+hard; trust state is never silently updated. Full details and reporting
+instructions are in [SECURITY.md](SECURITY.md).
 
-Cert fingerprints are stored in `~/.local/share/onyx/known_hosts`.
+## Known limitations
 
-To remove a host (e.g. after rebuilding the server):
+- QUIC requires UDP reachability. If UDP is blocked and `--no-fallback` is
+  not set, Onyx falls back to SSH.
+- Interactive persistence is tmux-backed and scoped to the interactive
+  Onyx shell — not to arbitrary tools run over proxy mode.
+- Proxy-mode reconnect is a best-effort short-drop recovery path, not a
+  guarantee of SSH session survival.
+- Release binaries are checksum-verified but not cryptographically signed.
+- No reproducible build attestation for the remote server.
+- GPU metrics in the tmux status bar require `nvidia-smi` on the remote
+  and are best-effort.
+
+## Uninstall
 
 ```bash
-sed -i '/192.0.2.1:7272/d' ~/.local/share/onyx/known_hosts
+# remove the client binary
+sudo rm /usr/local/bin/onyx /usr/local/bin/onyx-server-linux-*
+
+# remove local trust + config state
+rm -rf ~/.local/share/onyx ~/.config/onyx
+
+# remove the remote install on each server
+ssh user@host 'rm -rf ~/.local/share/onyx ~/.config/onyx'
 ```
 
----
+## License
 
-## Build from source
-
-```bash
-git clone https://github.com/shervin9/onyx
-cd onyx
-cargo build --release
-# binary at target/release/onyx
-```
-
-Requires Rust 1.75+.
-
----
-
-## Roadmap
-
-- **v0.2** — port forwarding (`--forward 8888:8888` for Jupyter / TensorBoard)
-- **v0.3** — live resource metrics in status bar (GPU%, VRAM, CPU, RAM)
-- **v0.4** — multi-server fan-out (`onyx gpu-1 gpu-2 gpu-3`)
-- **v0.5** — file sync (`--sync ./src:/remote/src`)
+[MIT](LICENSE).

@@ -79,7 +79,7 @@
     <section class="install" id="install">
       <div class="section-head">
         <h2>Install the local client</h2>
-        <p>Onyx installs locally. The remote server component is provisioned automatically over SSH when needed.</p>
+        <p>Installs the <code>onyx</code> client on your workstation. The remote <code>onyx-server</code> is provisioned automatically over SSH on first connect.</p>
       </div>
       <div class="install-grid">
         <article class="install-card">
@@ -92,7 +92,7 @@
         <article class="install-card">
           <span class="install-kicker">Shell installer</span>
           <div class="code-wrap">
-            <code id="install-cmd">curl -sSL https://useonyx.dev/install.sh | bash</code>
+            <code id="install-cmd">curl -fsSL https://useonyx.dev/install.sh | sh</code>
             <button id="copy-install-btn" type="button" data-copy-target="install-cmd">Copy</button>
           </div>
         </article>
@@ -114,21 +114,24 @@
         <div class="flow-track" aria-hidden="true">
           <div class="flow-line"></div>
           <div class="flow-node active">
-            <span>SSH bootstrap</span>
+            <span class="flow-dot"></span>
+            <span class="flow-label">SSH bootstrap</span>
           </div>
           <div class="flow-node">
-            <span>QUIC transport</span>
+            <span class="flow-dot"></span>
+            <span class="flow-label">QUIC transport</span>
           </div>
           <div class="flow-node">
-            <span>Forward / proxy</span>
+            <span class="flow-dot"></span>
+            <span class="flow-label">Forward / proxy</span>
           </div>
           <div class="flow-pulse"></div>
         </div>
         <div class="flow-panels">
           <article class="workflow-card flow-panel is-active" data-flow-step="0">
             <span class="workflow-kicker">Bootstrap</span>
-            <pre><code>ssh dev-onyx</code></pre>
-            <p class="workflow-copy">Provision remotely over plain SSH only when needed.</p>
+            <pre><code>onyx user@server</code></pre>
+            <p class="workflow-copy">First connect provisions <code>onyx-server</code> on the remote over SSH.</p>
           </article>
           <article class="workflow-card flow-panel" data-flow-step="1">
             <span class="workflow-kicker">Transport</span>
@@ -137,9 +140,9 @@
             <div class="flow-meta" id="flow-meta">[mode] QUIC</div>
           </article>
           <article class="workflow-card flow-panel" data-flow-step="2">
-            <span class="workflow-kicker">Forwarding</span>
+            <span class="workflow-kicker">Forward / proxy</span>
             <pre><code>onyx --forward 8888:8888 user@server</code></pre>
-            <p class="workflow-copy">Use Onyx for local tunnels or as a drop-in SSH transport.</p>
+            <p class="workflow-copy">Forward local ports over the same QUIC connection, or use <code>onyx proxy %h %p</code> as an SSH <code>ProxyCommand</code>.</p>
           </article>
         </div>
       </div>
@@ -215,7 +218,7 @@
 
   <footer>
     <span class="logo">onyx</span>
-    <span>Open source · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a></span>
+    <span>MIT licensed · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></span>
   </footer>
 
   <script src="script.js"></script>
