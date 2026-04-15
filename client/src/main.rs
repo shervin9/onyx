@@ -538,6 +538,10 @@ enum CliMode {
 /// Parse CLI arguments.
 fn parse_args() -> CliMode {
     let mut args = std::env::args().skip(1).peekable();
+    if matches!(args.peek(), Some(a) if a == "--version" || a == "-V") {
+        println!("onyx {}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
     if matches!(args.peek(), Some(cmd) if cmd == "proxy") {
         args.next();
         let target_host = args.next().unwrap_or_else(|| {
