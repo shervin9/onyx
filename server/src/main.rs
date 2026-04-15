@@ -18,6 +18,35 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Notify};
 
 // ---------------------------------------------------------------------------
+// Session retention tuning
+// ---------------------------------------------------------------------------
+//
+// Retention windows govern how long a detached session's in-process state
+// (PTY task, output broadcast, resume token) is kept alive waiting for the
+// client to reconnect. These are **best-effort, in-memory** guarantees:
+//
+//   - If the onyx-server process dies (host reboot, OOM, kill), every
+//     detached session is lost regardless of retention window.
+//   - If the shell process under the PTY exits on its own, the session
+//     ends immediately — retention has no bearing.
+//
+// Interactive retention is long because the session is cheap to keep
+// around and the user-facing cost of losing it is high. Proxy retention is
+// shorter because the SSH session underneath won't survive a long gap
+// anyway (TCPKeepAlive, proto timers), so pretending otherwise would
+// mislead users. See SECURITY.md / README.md for the documented claim.
+
+/// How long a detached interactive session's state is retained
+/// before GC reaps it.
+const DETACHED_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60); // 12h
+/// How long a detached proxy session's target TCP socket is kept alive
+/// waiting for the client to resume. Longer than before, but still
+/// short — SSH state above us rarely survives longer gaps.
+const DETACHED_PROXY_TTL: Duration = Duration::from_secs(120);
+/// How often the GC sweep runs.
+const GC_INTERVAL: Duration = Duration::from_secs(60);
+
+// ---------------------------------------------------------------------------
 // TLS / QUIC setup
 // ---------------------------------------------------------------------------
 
@@ -438,7 +467,7 @@ async fn run_proxy_stream(
     .await?;
 
     if !last_attach {
-        eprintln!("[server] proxy {proxy_session_id}: resumed");
+        eprintln!("[proxy {proxy_session_id}] resumed");
     }
 
     let input_task = tokio::spawn(async move {
@@ -712,7 +741,7 @@ async fn run_session(
                 sid2,
             ));
 
-            println!("[server] new session {session_id}");
+            println!("[session {session_id}] started");
             session_id
         }
 
@@ -746,7 +775,7 @@ async fn run_session(
                 .ok();
                 anyhow::bail!("resume rejected: {reason}");
             }
-            println!("[server] reattached to session {session_id}");
+            println!("[session {session_id}] resumed");
             session_id
         }
 
@@ -840,19 +869,23 @@ async fn run_session(
     input_task.abort();
     if let Some(meta) = sessions.lock().unwrap().get_mut(&session_id) {
         meta.detached_at = Some(Instant::now());
-        println!("[server] session {session_id}: detached, GC in 5 min");
+        let hrs = DETACHED_SESSION_TTL.as_secs() / 3600;
+        println!("[session {session_id}] detached (retention {hrs}h)");
     }
     send.finish().ok();
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// GC task — runs every 30 s, kills sessions detached for > 5 min
+// GC task — reaps sessions detached past their retention window.
+//
+// Only sessions with a set `detached_at` are ever considered. Healthy
+// attached sessions are never touched.
 // ---------------------------------------------------------------------------
 
 async fn gc_task(sessions: Sessions, proxy_sessions: ProxySessions) {
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        tokio::time::sleep(GC_INTERVAL).await;
         let now = Instant::now();
         {
             let mut locked = sessions.lock().unwrap();
@@ -860,7 +893,7 @@ async fn gc_task(sessions: Sessions, proxy_sessions: ProxySessions) {
                 .iter()
                 .filter_map(|(id, meta)| {
                     meta.detached_at
-                        .filter(|&t| now.duration_since(t) >= Duration::from_secs(300))
+                        .filter(|&t| now.duration_since(t) >= DETACHED_SESSION_TTL)
                         .map(|_| id.clone())
                 })
                 .collect();
@@ -869,7 +902,7 @@ async fn gc_task(sessions: Sessions, proxy_sessions: ProxySessions) {
                     if let Some(tx) = meta.shutdown_tx.take() {
                         let _ = tx.send(());
                     }
-                    println!("[server] session {id}: GC expired");
+                    println!("[session {id}] expired");
                 }
             }
         }
@@ -880,7 +913,7 @@ async fn gc_task(sessions: Sessions, proxy_sessions: ProxySessions) {
                 .iter()
                 .filter_map(|(id, meta)| {
                     meta.detached_at
-                        .filter(|&t| now.duration_since(t) >= Duration::from_secs(30))
+                        .filter(|&t| now.duration_since(t) >= DETACHED_PROXY_TTL)
                         .map(|_| id.clone())
                 })
                 .collect()
@@ -888,7 +921,7 @@ async fn gc_task(sessions: Sessions, proxy_sessions: ProxySessions) {
         for id in &expired_proxy {
             if let Some(meta) = proxy_sessions.lock().unwrap().remove(id) {
                 let _ = meta.shutdown_tx.send(true);
-                println!("[server] proxy {id}: grace expired");
+                println!("[proxy {id}] grace expired");
             }
         }
     }
