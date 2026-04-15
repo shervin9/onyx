@@ -16,7 +16,7 @@ class Onyx < Formula
   end
 
   def install
-    bin.install Dir["onyx-macos-arm64"].first => "onyx"
+    bin.install "onyx-macos-arm64" => "onyx"
   end
 
   def caveats

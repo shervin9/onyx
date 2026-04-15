@@ -100,6 +100,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: write
+    outputs:
+      macos_arm64_sha256: ${{ steps.checksums.outputs.macos_arm64_sha256 }}
     steps:
       - uses: actions/checkout@v4
 
@@ -110,9 +112,16 @@ jobs:
           merge-multiple: true
 
       - name: Generate checksums
+        id: checksums
         run: |
           cd artifacts
           sha256sum onyx-* > onyx-sha256sums.txt
+          macos_sha=$(awk '$2 == "onyx-macos-arm64" {print $1}' onyx-sha256sums.txt)
+          if [ -z "$macos_sha" ]; then
+            echo "::error::onyx-macos-arm64 checksum not found"
+            exit 1
+          fi
+          echo "macos_arm64_sha256=$macos_sha" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -141,3 +150,58 @@ jobs:
             ```bash
             curl -fsSL https://useonyx.dev/install.sh | sh
             ```
+
+  bump-homebrew-formula:
+    name: Bump Homebrew tap
+    needs: release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: shervin9/homebrew-onyx
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update formula
+        env:
+          TAG: ${{ github.ref_name }}
+          SHA256: ${{ needs.release.outputs.macos_arm64_sha256 }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          if [ -z "$SHA256" ]; then
+            echo "::error::missing macos_arm64_sha256 from release job"
+            exit 1
+          fi
+          cd tap
+          sed -i -E "s|^([[:space:]]*)version \"[^\"]*\"|\\1version \"${VERSION}\"|" Formula/onyx.rb
+          sed -i -E "s|^([[:space:]]*)sha256 \"[a-f0-9]+\"|\\1sha256 \"${SHA256}\"|" Formula/onyx.rb
+          grep -E "^[[:space:]]*version \"${VERSION}\"$" Formula/onyx.rb
+          grep -E "^[[:space:]]*sha256 \"${SHA256}\"$" Formula/onyx.rb
+
+      - name: Commit and push
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          cd tap
+          git config user.name "onyx-release-bot"
+          git config user.email "release-bot@useonyx.dev"
+          if git diff --quiet -- Formula/onyx.rb; then
+            echo "Formula already up to date for ${TAG}"
+            exit 0
+          fi
+          git add Formula/onyx.rb
+          git commit -m "onyx ${TAG}: bump formula"
+          git push
+
+      - name: Trigger tap validation
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh api \
+            --method POST \
+            repos/shervin9/homebrew-onyx/dispatches \
+            -f event_type=onyx-formula-bumped \
+            -f client_payload[version]="${TAG}" || echo "dispatch failed (non-fatal; push-based workflow will still run)"
