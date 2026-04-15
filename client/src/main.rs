@@ -1292,7 +1292,6 @@ fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
 fn upload_and_build(
     target: &str,
     identity: Option<&str>,
-    hash: &str,
     paths: &RemotePaths,
 ) -> Result<()> {
     eprintln!("  uploading source...");
@@ -1337,35 +1336,27 @@ fn upload_and_build(
     )?;
 
     eprintln!("  building onyx-server (this takes a minute on first run)...");
+    // Build into the workspace's target/ as usual, then stage the resulting
+    // binary at onyx-server.new. We deliberately do NOT overwrite the live
+    // onyx-server path here — that triggers ETXTBSY ("Text file busy") if
+    // the old server is still running. The atomic install step below takes
+    // care of the actual swap.
     ssh_show(
         target,
         identity,
         &format!(
             "cd {} && ~/.cargo/bin/cargo build --release -p server 2>&1 && \
-             cp target/release/onyx-server onyx-server && chmod 700 onyx-server",
+             cp target/release/onyx-server onyx-server.new",
             shell_quote(&paths.remote_dir)
         ),
     )?;
     eprintln!("  build complete");
-
-    let hash_path = format!("{}/.server-hash", paths.remote_dir);
-    let _ = ssh_capture(
-        target,
-        identity,
-        &format!(
-            "printf %s {} > {} && chmod 600 {}",
-            shell_quote(hash),
-            shell_quote(&hash_path),
-            shell_quote(&hash_path)
-        ),
-    );
     Ok(())
 }
 
 fn upload_prebuilt_server(
     target: &str,
     identity: Option<&str>,
-    hash: &str,
     remote_arch: &str,
     paths: &RemotePaths,
 ) -> Result<bool> {
@@ -1381,26 +1372,109 @@ fn upload_prebuilt_server(
             local_binary.display()
         )
     })?;
-    let remote_binary = format!("{}/onyx-server", paths.remote_dir);
-    ssh_upload(target, identity, &remote_binary, &bytes)?;
-    ssh_show(
-        target,
-        identity,
-        &format!("chmod 700 {}", shell_quote(&remote_binary)),
-    )?;
-
-    let hash_path = format!("{}/.server-hash", paths.remote_dir);
-    let _ = ssh_capture(
-        target,
-        identity,
-        &format!(
-            "printf %s {} > {} && chmod 600 {}",
-            shell_quote(hash),
-            shell_quote(&hash_path),
-            shell_quote(&hash_path)
-        ),
-    );
+    // Stage at onyx-server.new — never write directly to the live path,
+    // which would ETXTBSY against a running onyx-server. The atomic
+    // install step moves this into place after stopping the old server.
+    let staging = format!("{}/onyx-server.new", paths.remote_dir);
+    ssh_upload(target, identity, &staging, &bytes)?;
     Ok(true)
+}
+
+/// Stop the currently-running onyx-server (if we own its pid), atomically
+/// rename the pre-uploaded onyx-server.new into place, update the hash
+/// stamp, and leave the system ready for `start_server`.
+///
+/// This is the critical reliability fix: we never write over the live
+/// binary. Linux returns ETXTBSY ("Text file busy") if you try to
+/// open-for-write a file that is currently executing as a process; the
+/// old flow hit that exact error on every in-place update. The new flow
+/// uploads to a staging path, stops the running process, then uses
+/// `mv -f` (POSIX-atomic on the same filesystem) to swap.
+fn install_staged_server_binary(
+    target: &str,
+    identity: Option<&str>,
+    hash: &str,
+    status: &RemoteStatus,
+    paths: &RemotePaths,
+) -> Result<()> {
+    let server_pid = format!("{}/server.pid", paths.remote_dir);
+    let hash_path = format!("{}/.server-hash", paths.remote_dir);
+
+    // Only kill the remote process if server.pid clearly points at our
+    // onyx-server. Avoids stomping unrelated processes if the pid file
+    // somehow contains a stale/wrong value.
+    let stop_cmd = if status.own_pid {
+        format!(
+            "pid=$(cat {pid} 2>/dev/null); \
+             if [ -n \"$pid\" ] && kill -0 \"$pid\" 2>/dev/null; then \
+               kill \"$pid\" 2>/dev/null; \
+               for i in 1 2 3 4 5 6 7 8 9 10; do \
+                 kill -0 \"$pid\" 2>/dev/null || break; \
+                 sleep 0.2; \
+               done; \
+               kill -0 \"$pid\" 2>/dev/null && kill -9 \"$pid\" 2>/dev/null; \
+               true; \
+             fi; ",
+            pid = shell_quote(&server_pid),
+        )
+    } else {
+        String::new()
+    };
+
+    // Distinct exit codes so classify_install_error can produce a precise
+    // diagnosis rather than a generic "bootstrap failed".
+    let script = format!(
+        "cd {remote_dir} || exit 10; \
+         [ -f onyx-server.new ] || {{ echo 'onyx-server.new missing after upload' >&2; exit 20; }}; \
+         chmod 700 onyx-server.new || exit 21; \
+         {stop_cmd}\
+         mv -f onyx-server.new onyx-server || {{ echo 'mv onyx-server.new onyx-server failed' >&2; exit 22; }}; \
+         printf %s {hash} > {hash_path} || exit 23; \
+         chmod 600 {hash_path} || exit 24",
+        remote_dir = shell_quote(&paths.remote_dir),
+        stop_cmd = stop_cmd,
+        hash = shell_quote(hash),
+        hash_path = shell_quote(&hash_path),
+    );
+
+    ssh_show(target, identity, &script).map_err(classify_install_error)
+}
+
+/// Turn a shell-error from install_staged_server_binary into a precise,
+/// user-facing message. Only renames errors whose cause we are sure of —
+/// anything else is passed through unchanged.
+fn classify_install_error(err: anyhow::Error) -> anyhow::Error {
+    let msg = format!("{err:?}");
+    if msg.contains("Text file busy") || msg.contains("ETXTBSY") {
+        anyhow::anyhow!(
+            "could not replace onyx-server: binary reports busy even via atomic swap. \
+             This should not normally happen; file a bug with the output above. \
+             Underlying error: {err}"
+        )
+    } else if msg.contains("Permission denied") {
+        anyhow::anyhow!(
+            "could not install onyx-server: permission denied on remote. \
+             Try a writable path, e.g. ONYX_REMOTE_DIR=/tmp/onyx onyx user@host. \
+             Underlying error: {err}"
+        )
+    } else if msg.contains("No space left on device") {
+        anyhow::anyhow!(
+            "could not install onyx-server: remote disk is full. \
+             Underlying error: {err}"
+        )
+    } else if msg.contains("command not found") {
+        anyhow::anyhow!(
+            "missing required tool on remote (mv/chmod/kill). \
+             Underlying error: {err}"
+        )
+    } else if msg.contains("exit 20") {
+        anyhow::anyhow!(
+            "onyx-server.new was not found on the remote after upload — \
+             the upload likely failed silently. Underlying error: {err}"
+        )
+    } else {
+        err
+    }
 }
 
 fn start_server(
@@ -1538,9 +1612,8 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
     eprintln!("[onyx] setting up remote (one-time or after update)...");
 
     if !status.hash_ok {
-        let used_prebuilt =
-            upload_prebuilt_server(ssh_target, identity, &hash, &status.arch, &paths)
-                .map_err(bootstrap_error_with_help)?;
+        let used_prebuilt = upload_prebuilt_server(ssh_target, identity, &status.arch, &paths)
+            .map_err(bootstrap_error_with_help)?;
 
         if !used_prebuilt {
             eprintln!(
@@ -1550,9 +1623,14 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
             if !status.has_cargo {
                 ensure_rust(ssh_target, identity).map_err(bootstrap_error_with_help)?;
             }
-            upload_and_build(ssh_target, identity, &hash, &paths)
-                .map_err(bootstrap_error_with_help)?;
+            upload_and_build(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
         }
+
+        // Atomically stop the old onyx-server (if any), swap in the new
+        // binary via mv, and update the hash stamp. Must run after upload
+        // and before start_server.
+        install_staged_server_binary(ssh_target, identity, &hash, &status, &paths)
+            .map_err(bootstrap_error_with_help)?;
     }
 
     ensure_config_files(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
