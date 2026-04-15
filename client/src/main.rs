@@ -520,6 +520,7 @@ struct OnyxTarget {
     ssh_mode: bool,
 }
 
+#[cfg_attr(test, derive(Debug))]
 enum CliMode {
     Interactive {
         raw_target: String,
@@ -535,34 +536,49 @@ enum CliMode {
     },
 }
 
-/// Parse CLI arguments.
-fn parse_args() -> CliMode {
-    let mut args = std::env::args().skip(1).peekable();
-    if matches!(args.peek(), Some(a) if a == "--version" || a == "-V") {
-        println!("onyx {}", env!("CARGO_PKG_VERSION"));
-        std::process::exit(0);
-    }
-    if matches!(args.peek(), Some(cmd) if cmd == "proxy") {
-        args.next();
-        let target_host = args.next().unwrap_or_else(|| {
-            eprintln!("Usage: onyx proxy <host> <port>");
-            std::process::exit(1);
-        });
-        let target_port = args
-            .next()
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or_else(|| {
-                eprintln!("Usage: onyx proxy <host> <port>");
-                std::process::exit(1);
-            });
-        if let Some(extra) = args.next() {
-            eprintln!("onyx: unexpected argument: {extra}");
-            std::process::exit(1);
+/// Outcome of parsing argv. Separate from `CliMode` so `--help` / `--version`
+/// can short-circuit cleanly without the pure parser touching process state.
+#[cfg_attr(test, derive(Debug))]
+enum ParseOutcome {
+    Run(CliMode),
+    Help,
+    Version,
+}
+
+/// Pure parser used by both the real CLI entry point and unit tests.
+/// `args` is the argv **without** the program name (argv[1..]).
+fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
+    let mut it = args.into_iter().peekable();
+
+    // --help / --version are accepted as the first token. (Placing them
+    // later would require a full pre-scan; doing that matches common
+    // CLI conventions — `git commit --help` works, `git commit -m x --help`
+    // does not.)
+    if let Some(first) = it.peek() {
+        match first.as_str() {
+            "--help" | "-h" => return Ok(ParseOutcome::Help),
+            "--version" | "-V" => return Ok(ParseOutcome::Version),
+            _ => {}
         }
-        return CliMode::Proxy {
+    }
+
+    if matches!(it.peek(), Some(cmd) if cmd == "proxy") {
+        it.next();
+        let target_host = it
+            .next()
+            .ok_or_else(|| "proxy: missing <host>".to_string())?;
+        let target_port = it
+            .next()
+            .ok_or_else(|| "proxy: missing <port>".to_string())?
+            .parse::<u16>()
+            .map_err(|_| "proxy: <port> must be 0-65535".to_string())?;
+        if let Some(extra) = it.next() {
+            return Err(format!("unexpected argument: {extra}"));
+        }
+        return Ok(ParseOutcome::Run(CliMode::Proxy {
             target_host,
             target_port,
-        };
+        }));
     }
 
     let mut identity: Option<String> = None;
@@ -572,68 +588,262 @@ fn parse_args() -> CliMode {
     let mut low_bandwidth = false;
     let mut forwards: Vec<(u16, u16)> = Vec::new();
 
-    while let Some(a) = args.next() {
-        if a == "-i" {
-            identity = args.next().or_else(|| {
-                eprintln!("onyx: -i requires an argument");
-                std::process::exit(1);
-            });
-        } else if a == "--no-fallback" {
-            no_fallback = true;
-        } else if a == "--no-bootstrap" {
-            no_bootstrap = true;
-        } else if a == "--low-bandwidth" {
-            low_bandwidth = true;
-        } else if a == "--forward" || a == "-L" {
-            let spec = args.next().unwrap_or_else(|| {
-                eprintln!("onyx: --forward requires local_port:remote_port");
-                std::process::exit(1);
-            });
-            let mut parts = spec.splitn(2, ':');
-            let lp = parts
-                .next()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or_else(|| {
-                    eprintln!("onyx: --forward: invalid spec '{spec}' (expected local:remote)");
-                    std::process::exit(1);
-                });
-            let rp = parts
-                .next()
-                .and_then(|s| s.parse::<u16>().ok())
-                .unwrap_or_else(|| {
-                    eprintln!("onyx: --forward: invalid spec '{spec}' (expected local:remote)");
-                    std::process::exit(1);
-                });
-            forwards.push((lp, rp));
-        } else if target.is_none() {
-            target = Some(a);
-        } else {
-            eprintln!("onyx: unexpected argument: {a}");
-            std::process::exit(1);
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-i" => {
+                identity = Some(
+                    it.next()
+                        .ok_or_else(|| "-i requires an argument".to_string())?,
+                );
+            }
+            "--no-fallback" => no_fallback = true,
+            "--no-bootstrap" => no_bootstrap = true,
+            "--low-bandwidth" => low_bandwidth = true,
+            "--forward" | "-L" => {
+                let spec = it
+                    .next()
+                    .ok_or_else(|| "--forward requires local_port:remote_port".to_string())?;
+                let (lp, rp) = parse_forward_spec(&spec)?;
+                forwards.push((lp, rp));
+            }
+            // A leading `-` that isn't a known flag is almost always a
+            // mistyped flag — reject it clearly rather than silently
+            // treating it as a hostname and failing much later in
+            // ssh -G with a cryptic message.
+            other if other.starts_with('-') && target.is_none() => {
+                return Err(format!("unknown flag: {other} (try --help)"));
+            }
+            _ if target.is_none() => target = Some(a),
+            _ => return Err(format!("unexpected argument: {a}")),
         }
     }
 
-    let target = target.unwrap_or_else(|| {
-        eprintln!("Usage: onyx [--no-fallback] [--no-bootstrap] [--low-bandwidth] [-i identity_file] [--forward local:remote] [user@]<host>[:<quic-port>]");
-        eprintln!("       onyx proxy <host> <port>");
-        eprintln!("  my-server                     SSH alias → bootstrap + QUIC");
-        eprintln!("  user@host[:port]              SSH bootstrap + QUIC");
-        eprintln!("  128.140.63.67[:port]          direct QUIC (no SSH)");
-        eprintln!("  --forward 8888:8888           tunnel localhost:8888 → remote:8888 (repeatable)");
-        eprintln!("  --low-bandwidth               smoother batching on poor links");
-        eprintln!("  --no-bootstrap                skip remote install/start checks");
-        eprintln!("  --no-fallback                 exit on QUIC failure instead of falling back to SSH");
-        eprintln!("  proxy <host> <port>           transparent TCP proxy for SSH ProxyCommand");
-        std::process::exit(1);
-    });
+    let target = target.ok_or_else(|| "missing target (try --help)".to_string())?;
 
-    CliMode::Interactive {
+    Ok(ParseOutcome::Run(CliMode::Interactive {
         raw_target: target,
         identity_file: identity,
         no_fallback,
         no_bootstrap,
         low_bandwidth,
         forwards,
+    }))
+}
+
+fn parse_forward_spec(spec: &str) -> Result<(u16, u16), String> {
+    let mut parts = spec.splitn(2, ':');
+    let lp = parts
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("--forward: invalid spec '{spec}' (expected local:remote)"))?;
+    let rp = parts
+        .next()
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("--forward: invalid spec '{spec}' (expected local:remote)"))?;
+    Ok((lp, rp))
+}
+
+const HELP_TEXT: &str = "\
+onyx — stable remote shell for unreliable networks (QUIC + SSH fallback)
+
+USAGE
+  onyx [OPTIONS] [user@]<host>[:<quic-port>]       interactive shell
+  onyx proxy <host> <port>                          SSH ProxyCommand transport
+  onyx --help | --version
+
+MODES
+  Interactive     tmux-backed shell over QUIC; short reconnects resume the
+                  same session. Detached sessions are retained server-side
+                  for up to 12 hours (in-memory; does not survive
+                  onyx-server restart).
+  Proxy           stdio-bridged TCP tunnel for use as SSH ProxyCommand.
+                  Short transport drops are recovered best-effort within
+                  ~2 minutes; longer drops end the underlying SSH session.
+
+INSTALL MODEL
+  onyx is a local CLI. On first connect to a host it provisions
+  onyx-server on the remote over SSH, preferring a prebuilt binary
+  matching the remote arch and falling back to `cargo build --release`
+  only if no prebuilt is available. Subsequent connects reuse the
+  already-running server.
+
+OPTIONS
+  -i <file>                 SSH identity file for bootstrap
+  -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
+  --no-bootstrap            skip remote install/start checks
+  --no-fallback             exit on QUIC failure instead of falling back to SSH
+  --low-bandwidth           smoother batching on poor links
+  -h, --help                show this help
+  -V, --version             print version
+
+EXAMPLES
+  onyx user@host
+  onyx dev-server                    # SSH alias from ~/.ssh/config
+  onyx --forward 8888:8888 user@host
+  onyx proxy host.example.com 22     # behind ProxyCommand in ssh_config
+";
+
+/// Real CLI entry point. Wraps `parse_args_from` and converts parse errors /
+/// help / version into the process-level side effects.
+fn parse_args() -> CliMode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match parse_args_from(args) {
+        Ok(ParseOutcome::Run(mode)) => mode,
+        Ok(ParseOutcome::Help) => {
+            print!("{HELP_TEXT}");
+            std::process::exit(0);
+        }
+        Ok(ParseOutcome::Version) => {
+            println!("onyx {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
+        Err(msg) => {
+            eprintln!("onyx: {msg}");
+            eprintln!("run `onyx --help` for usage");
+            std::process::exit(2);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// parse_args tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod parse_args_tests {
+    use super::*;
+
+    fn s(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn help_flag_long_and_short() {
+        assert!(matches!(
+            parse_args_from(s(&["--help"])).unwrap(),
+            ParseOutcome::Help
+        ));
+        assert!(matches!(
+            parse_args_from(s(&["-h"])).unwrap(),
+            ParseOutcome::Help
+        ));
+    }
+
+    #[test]
+    fn version_flag_long_and_short() {
+        assert!(matches!(
+            parse_args_from(s(&["--version"])).unwrap(),
+            ParseOutcome::Version
+        ));
+        assert!(matches!(
+            parse_args_from(s(&["-V"])).unwrap(),
+            ParseOutcome::Version
+        ));
+    }
+
+    #[test]
+    fn bare_target_is_interactive() {
+        let out = parse_args_from(s(&["user@host"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Interactive { raw_target, .. }) => {
+                assert_eq!(raw_target, "user@host");
+            }
+            _ => panic!("expected Interactive"),
+        }
+    }
+
+    #[test]
+    fn flags_and_target_any_order() {
+        let out = parse_args_from(s(&["--no-bootstrap", "--no-fallback", "host"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Interactive {
+                no_bootstrap,
+                no_fallback,
+                low_bandwidth,
+                ..
+            }) => {
+                assert!(no_bootstrap);
+                assert!(no_fallback);
+                assert!(!low_bandwidth);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn forward_short_and_long() {
+        let out = parse_args_from(s(&["-L", "8080:80", "--forward", "9000:9000", "host"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Interactive { forwards, .. }) => {
+                assert_eq!(forwards, vec![(8080u16, 80u16), (9000u16, 9000u16)]);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn proxy_mode() {
+        let out = parse_args_from(s(&["proxy", "host.example.com", "22"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Proxy {
+                target_host,
+                target_port,
+            }) => {
+                assert_eq!(target_host, "host.example.com");
+                assert_eq!(target_port, 22);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn unknown_flag_does_not_become_target() {
+        // Regression: `onyx --version` once got treated as hostname and
+        // ended up inside ssh -G. Unknown flags must be rejected cleanly.
+        let err = parse_args_from(s(&["--no-such-flag"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "err was: {err}");
+    }
+
+    #[test]
+    fn missing_target_is_error_not_panic() {
+        let err = parse_args_from(s(&[])).unwrap_err();
+        assert!(err.contains("missing target"));
+    }
+
+    #[test]
+    fn proxy_rejects_non_numeric_port() {
+        let err = parse_args_from(s(&["proxy", "host", "not-a-port"])).unwrap_err();
+        assert!(err.contains("0-65535"));
+    }
+
+    #[test]
+    fn forward_rejects_bad_spec() {
+        let err = parse_args_from(s(&["--forward", "not-a-port", "host"])).unwrap_err();
+        assert!(err.contains("invalid spec"));
+    }
+
+    #[test]
+    fn identity_flag_requires_value() {
+        let err = parse_args_from(s(&["-i"])).unwrap_err();
+        assert!(err.contains("-i requires"));
+    }
+
+    #[test]
+    fn help_text_mentions_key_concepts() {
+        for needle in [
+            "USAGE",
+            "Interactive",
+            "Proxy",
+            "--forward",
+            "--no-fallback",
+            "--no-bootstrap",
+            "--low-bandwidth",
+            "proxy <host> <port>",
+        ] {
+            assert!(
+                HELP_TEXT.contains(needle),
+                "HELP_TEXT missing '{needle}'"
+            );
+        }
     }
 }
 
@@ -1530,7 +1740,22 @@ async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
     });
 
     let mut stdout = tokio::io::stdout();
+
+    // Proxy reconnect tuning.
+    //
+    // Client window matches the server's DETACHED_PROXY_TTL (120s). That
+    // window is intentionally short — the SSH session above us rarely
+    // survives longer gaps, so silently retrying for minutes gives users
+    // a false sense of persistence.
+    //
+    // Backoff grows to avoid hammering a server that is simply down,
+    // but stays bounded so normal packet-loss recovery is prompt.
+    const PROXY_RESUME_WINDOW: Duration = Duration::from_secs(120);
+    const PROXY_BACKOFF_INITIAL: Duration = Duration::from_millis(500);
+    const PROXY_BACKOFF_MAX: Duration = Duration::from_secs(4);
+
     let mut reconnect_deadline: Option<Instant> = None;
+    let mut backoff = PROXY_BACKOFF_INITIAL;
     let mut logged_disconnect = false;
     let mut resume = false;
 
@@ -1549,24 +1774,35 @@ async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
         {
             Ok(parts) => {
                 if logged_disconnect {
-                    eprintln!("[proxy] resumed");
+                    // Only legitimately a "resumed" message if the server
+                    // accepted a ProxyResume — which is exactly when we
+                    // reach Ok(..) with resume=true.
+                    if resume {
+                        eprintln!("[proxy] resumed");
+                    }
                     logged_disconnect = false;
                 }
                 reconnect_deadline = None;
+                backoff = PROXY_BACKOFF_INITIAL;
                 parts
             }
             Err(e) if resume => {
                 let deadline = *reconnect_deadline
-                    .get_or_insert_with(|| Instant::now() + Duration::from_secs(30));
+                    .get_or_insert_with(|| Instant::now() + PROXY_RESUME_WINDOW);
                 if !logged_disconnect {
-                    eprintln!("[proxy] disconnected, retrying…");
+                    eprintln!("[proxy] transport hiccup, retrying…");
                     logged_disconnect = true;
                 }
                 if Instant::now() >= deadline {
-                    eprintln!("[proxy] resume failed");
+                    eprintln!(
+                        "[proxy] connection lost; SSH session cannot be resumed \
+                         (grace {}s expired)",
+                        PROXY_RESUME_WINDOW.as_secs()
+                    );
                     return Err(e);
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(backoff).await;
+                backoff = std::cmp::min(backoff * 2, PROXY_BACKOFF_MAX);
                 continue;
             }
             Err(e) => return Err(e),
