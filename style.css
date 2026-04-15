@@ -15,7 +15,7 @@
   --glow-soft: rgba(92, 120, 214, 0.08);
   --shadow: 0 30px 90px rgba(0, 0, 0, 0.45);
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
-  --mono: "SFMono-Regular", "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
+  --mono: "Roboto Mono", "SFMono-Regular", "SF Mono", "Fira Code", "Cascadia Code", Consolas, monospace;
   --w: 1040px;
   --narrow: 720px;
 }
@@ -303,6 +303,8 @@ h1 {
   padding: 1.2rem 1.25rem 1.3rem;
   text-align: left;
   font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 .terminal-line {
@@ -454,6 +456,8 @@ h2 {
 .workflow-card code,
 .flow-meta {
   font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: -0.01em;
 }
 
 .code-wrap code,
