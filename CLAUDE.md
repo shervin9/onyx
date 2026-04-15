@@ -68,8 +68,9 @@ A remote shell CLI with:
 
 ## Known limitations (keep surfacing)
 
-- Proxy-mode reconnect window is short (~30s); longer drops end the SSH
-  session underneath.
+- Proxy-mode reconnect window is short (~120s); longer drops end the SSH
+  session underneath. Interactive-session retention is longer (12h) but
+  still in-memory — does not survive onyx-server restart.
 - `--low-bandwidth` is a batching tweak, not a compression algorithm.
 - GPU metrics in tmux status bar are best-effort (`nvidia-smi` optional).
 - Homebrew tap is not live yet — landing page marks it clearly as

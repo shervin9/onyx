@@ -12,14 +12,15 @@ flaky links.
   the remote architecture and only falls back to `cargo build --release` on
   the remote when no matching prebuilt is available.
 - **Interactive session persistence** — the interactive Onyx shell runs
-  under tmux; short drops reconnect into the same session and scrollback
-  within a 5-minute window.
+  under tmux. Reconnecting within the retention window (12 hours by default,
+  in-memory) resumes the same session and scrollback. Retention is
+  best-effort: if `onyx-server` restarts, detached sessions are lost.
 - **Port forwarding** — `onyx --forward LPORT:RPORT user@host` forwards a
   local port to a remote port through the same QUIC connection (repeatable).
 - **SSH `ProxyCommand` support** — `onyx proxy %h %p` lets SSH-based tools
   ride Onyx as a transport. Short transport drops are recovered
-  best-effort within a 30-second window; longer drops end the underlying
-  SSH session.
+  best-effort within roughly two minutes; longer drops end the underlying
+  SSH session. This is *not* Mosh-style persistence for arbitrary tools.
 - **TOFU trust with fingerprint pinning** — first connect prompts for the
   server's SHA-256 fingerprint; subsequent mismatches fail hard. See
   [SECURITY.md](SECURITY.md).
@@ -110,8 +111,8 @@ Host dev-onyx
   ProxyCommand onyx proxy %h %p
 ```
 
-Then `ssh dev-onyx` transports over Onyx. Short drops (under ~30s) reconnect
-automatically; longer drops terminate SSH. **This is best-effort
+Then `ssh dev-onyx` transports over Onyx. Short drops (under ~2 minutes)
+reconnect automatically; longer drops terminate SSH. **This is best-effort
 reconnection — not a guarantee that SSH sessions survive real network
 loss.** If you need session-level persistence for arbitrary tools, use
 `mosh` or run tmux/screen on the remote.
