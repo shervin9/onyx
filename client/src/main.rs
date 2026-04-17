@@ -563,6 +563,94 @@ fn quic_error_hint(e: &anyhow::Error) -> &'static str {
     }
 }
 
+fn proxy_session_not_resumable(e: &anyhow::Error) -> bool {
+    format!("{e:#}")
+        .to_ascii_lowercase()
+        .contains("proxy session not resumable")
+}
+
+fn quic_unavailable_for_proxy(e: &anyhow::Error) -> bool {
+    let s = format!("{e:#}").to_ascii_lowercase();
+    [
+        "timed out",
+        "deadline",
+        "udp/",
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "dns lookup",
+        "no address resolved",
+    ]
+    .iter()
+    .any(|needle| s.contains(needle))
+}
+
+/// Plain-TCP fallback for proxy mode when QUIC is unavailable.
+///
+/// Bridges stdin/stdout to a direct TCP connection to `target_host:target_port`.
+/// This is what SSH would do with no ProxyCommand at all — it gives the outer
+/// SSH client a direct TCP stream. The onyx-server on the remote is not
+/// involved. TOFU/QUIC pinning does not apply here; the outer SSH client
+/// does its own host-key check.
+///
+/// This is a **fresh** TCP connection: it can replace QUIC for a *new* SSH
+/// session, but it cannot recover an SSH session that was previously carried
+/// over QUIC — that session's state lives in the dead QUIC path.
+async fn tcp_proxy_fallback(target_host: &str, target_port: u16) -> Result<()> {
+    let addr = format!("{target_host}:{target_port}");
+    let tcp = tokio::net::TcpStream::connect(&addr)
+        .await
+        .with_context(|| format!("TCP fallback connect to {addr}"))?;
+    let _ = tcp.set_nodelay(true);
+    let (mut tcp_r, mut tcp_w) = tcp.into_split();
+
+    let mut stdin = tokio::io::stdin();
+    let mut stdout = tokio::io::stdout();
+
+    // Drive both directions concurrently. Either side closing completes the
+    // copy; when both complete we're done.
+    let up = async {
+        let _ = tokio::io::copy(&mut stdin, &mut tcp_w).await;
+        let _ = tcp_w.shutdown().await;
+    };
+    let down = async {
+        let _ = tokio::io::copy(&mut tcp_r, &mut stdout).await;
+        let _ = stdout.flush().await;
+    };
+    tokio::join!(up, down);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Reliability tuning — client-side timeouts and backoff
+// ---------------------------------------------------------------------------
+//
+// These govern how aggressively the interactive client retries a disrupted
+// QUIC session and how long it waits for the server to respond. Tuned for
+// real-world remote development where short Wi-Fi blips and NAT rebinds are
+// common and users value staying in the same shell over clean failure.
+
+/// QUIC handshake timeout for interactive mode. Longer than before to tolerate
+/// slow cellular / overseas links without giving up prematurely, short enough
+/// that a truly blocked UDP port fails within ~10 s.
+const INTERACTIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Retry window after first successful session is dropped. Covers laptop
+/// sleep, VPN reconnect, multi-minute transitions.
+const INTERACTIVE_RECONNECT_WINDOW: Duration = Duration::from_secs(600);
+/// Retry window before the very first successful session. Short because the
+/// common failure here is "server is down / firewalled" and we want to fall
+/// back to SSH quickly rather than hang.
+const INTERACTIVE_INITIAL_CONNECT_WINDOW: Duration = Duration::from_secs(45);
+/// Initial / maximum backoff between interactive reconnect attempts.
+/// Prevents CPU-spinning against a down server while staying responsive
+/// for short drops.
+const INTERACTIVE_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
+const INTERACTIVE_BACKOFF_MAX: Duration = Duration::from_secs(3);
+
+/// QUIC handshake timeout for proxy mode. Kept the same as interactive so
+/// the fallback decision happens on a similar cadence.
+const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+
 // ---------------------------------------------------------------------------
 // Target resolution
 //
@@ -603,6 +691,7 @@ enum CliMode {
     Proxy {
         target_host: String,
         target_port: u16,
+        no_fallback: bool,
     },
 }
 
@@ -634,6 +723,11 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
 
     if matches!(it.peek(), Some(cmd) if cmd == "proxy") {
         it.next();
+        let mut no_fallback = false;
+        while matches!(it.peek(), Some(flag) if flag == "--no-fallback") {
+            it.next();
+            no_fallback = true;
+        }
         let target_host = it
             .next()
             .ok_or_else(|| "proxy: missing <host>".to_string())?;
@@ -648,6 +742,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         return Ok(ParseOutcome::Run(CliMode::Proxy {
             target_host,
             target_port,
+            no_fallback,
         }));
     }
 
@@ -722,13 +817,19 @@ USAGE
   onyx --help | --version
 
 MODES
-  Interactive     tmux-backed shell over QUIC; short reconnects resume the
-                  same session. Detached sessions are retained server-side
-                  for up to 12 hours (in-memory; does not survive
-                  onyx-server restart).
+  Interactive     tmux-backed shell over QUIC. The client retries a
+                  disrupted session for up to ~10 minutes with exponential
+                  backoff, so short Wi-Fi/VPN/NAT hiccups recover in place.
+                  Detached sessions are retained server-side for up to
+                  12 hours (in-memory; does not survive onyx-server
+                  restart).
   Proxy           stdio-bridged TCP tunnel for use as SSH ProxyCommand.
                   Short transport drops are recovered best-effort within
                   ~2 minutes; longer drops end the underlying SSH session.
+                  When QUIC is unavailable, proxy mode falls back to a
+                  plain TCP bridge to <host> <port> unless --no-fallback
+                  is set. The plain-TCP path cannot revive a QUIC-started
+                  SSH session; it only replaces QUIC for new sessions.
 
 INSTALL MODEL
   onyx is a local CLI. On first connect to a host it provisions
@@ -741,7 +842,9 @@ OPTIONS
   -i <file>                 SSH identity file for bootstrap
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
   --no-bootstrap            skip remote install/start checks
-  --no-fallback             exit on QUIC failure instead of falling back to SSH
+  --no-fallback             exit on QUIC failure instead of falling back
+                              (plain SSH exec for interactive, plain TCP
+                               bridge for proxy mode)
   --low-bandwidth           smoother batching on poor links
   -h, --help                show this help
   -V, --version             print version
@@ -751,6 +854,7 @@ EXAMPLES
   onyx dev-server                    # SSH alias from ~/.ssh/config
   onyx --forward 8888:8888 user@host
   onyx proxy host.example.com 22     # behind ProxyCommand in ssh_config
+  onyx proxy --no-fallback host 22   # require QUIC for ProxyCommand
 ";
 
 /// Real CLI entry point. Wraps `parse_args_from` and converts parse errors /
@@ -857,11 +961,25 @@ mod parse_args_tests {
             ParseOutcome::Run(CliMode::Proxy {
                 target_host,
                 target_port,
+                no_fallback,
             }) => {
                 assert_eq!(target_host, "host.example.com");
                 assert_eq!(target_port, 22);
+                assert!(!no_fallback);
             }
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn proxy_mode_accepts_no_fallback() {
+        let out = parse_args_from(s(&["proxy", "--no-fallback", "host.example.com", "22"]))
+            .unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Proxy { no_fallback, .. }) => {
+                assert!(no_fallback);
+            }
+            _ => panic!("expected Proxy"),
         }
     }
 
@@ -908,12 +1026,110 @@ mod parse_args_tests {
             "--no-bootstrap",
             "--low-bandwidth",
             "proxy <host> <port>",
+            "proxy --no-fallback",
+            "12 hours",
+            "plain TCP bridge",
         ] {
             assert!(
                 HELP_TEXT.contains(needle),
                 "HELP_TEXT missing '{needle}'"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reliability classifier + tuning tests
+// ---------------------------------------------------------------------------
+//
+// These cover the decision points that the reconnect/fallback machinery
+// depends on. They are pure functions on error strings and constants, so
+// they run without any network or spawned process.
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+
+    fn err(msg: &str) -> anyhow::Error {
+        anyhow::anyhow!(msg.to_string())
+    }
+
+    #[test]
+    fn proxy_session_not_resumable_matches_server_string() {
+        // Exact string the server sends in ForwardError.reason.
+        assert!(proxy_session_not_resumable(&err(
+            "proxy session not resumable"
+        )));
+        // Case-insensitive, substring match through outer context.
+        assert!(proxy_session_not_resumable(&err(
+            "ProxyResume rejected: Proxy Session Not Resumable"
+        )));
+        assert!(!proxy_session_not_resumable(&err(
+            "timed out waiting for handshake"
+        )));
+    }
+
+    #[test]
+    fn quic_unavailable_classifier_covers_common_offline_cases() {
+        for needle in [
+            "QUIC handshake timed out after 8 s",
+            "deadline exceeded",
+            "UDP/7272 may be blocked",
+            "DNS lookup for 'x' failed",
+            "connection refused",
+            "network is unreachable",
+            "no route to host",
+            "no address resolved for foo",
+        ] {
+            assert!(
+                quic_unavailable_for_proxy(&err(needle)),
+                "expected offline classification for: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn quic_unavailable_classifier_ignores_handshake_tls_errors() {
+        // TLS / ALPN mismatches mean the server is reachable — falling
+        // back to plain TCP would hide a real configuration problem. The
+        // classifier must stay strict about what it considers "offline".
+        for needle in [
+            "QUIC handshake failed: alpn mismatch",
+            "invalid certificate",
+            "host key verification failed",
+        ] {
+            assert!(
+                !quic_unavailable_for_proxy(&err(needle)),
+                "did not expect offline classification for: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn reconnect_constants_form_coherent_progression() {
+        // Backoff must actually grow and never exceed the cap.
+        assert!(INTERACTIVE_BACKOFF_INITIAL < INTERACTIVE_BACKOFF_MAX);
+        assert!(INTERACTIVE_BACKOFF_MAX <= Duration::from_secs(5));
+        // Initial-connect window must be shorter than the post-session
+        // reconnect window (we're stricter before we ever had a session).
+        assert!(INTERACTIVE_INITIAL_CONNECT_WINDOW < INTERACTIVE_RECONNECT_WINDOW);
+        // The post-session window must be long enough to cover the
+        // "medium outage" target we document (multi-minute).
+        assert!(INTERACTIVE_RECONNECT_WINDOW >= Duration::from_secs(300));
+        // Handshake timeout must fit inside one reconnect attempt so a
+        // single failed attempt doesn't blow the whole window.
+        assert!(INTERACTIVE_HANDSHAKE_TIMEOUT * 4 < INTERACTIVE_RECONNECT_WINDOW);
+        assert_eq!(INTERACTIVE_HANDSHAKE_TIMEOUT, PROXY_HANDSHAKE_TIMEOUT);
+    }
+
+    #[test]
+    fn exponential_backoff_saturates_at_max() {
+        // Simulates the loop body's `backoff = min(backoff * 2, MAX)`.
+        let mut b = INTERACTIVE_BACKOFF_INITIAL;
+        for _ in 0..32 {
+            b = std::cmp::min(b * 2, INTERACTIVE_BACKOFF_MAX);
+        }
+        assert_eq!(b, INTERACTIVE_BACKOFF_MAX);
     }
 }
 
@@ -1773,18 +1989,20 @@ async fn connect_authenticated(
     endpoint: &Endpoint,
     host_port: &str,
     capture: &FpCapture,
+    handshake_timeout: Duration,
 ) -> Result<quinn::Connection> {
     *capture.lock().unwrap() = None;
 
     let connecting = endpoint
         .connect(server_addr, "localhost")
         .context("creating QUIC connection")?;
-    let conn = tokio::time::timeout(Duration::from_secs(5), connecting)
+    let conn = tokio::time::timeout(handshake_timeout, connecting)
         .await
         .map_err(|_| {
             anyhow::anyhow!(
-                "QUIC handshake timed out after 5 s (no response from {}; \
+                "QUIC handshake timed out after {} s (no response from {}; \
                  UDP/{} may be blocked by the server firewall)",
+                handshake_timeout.as_secs(),
                 server_addr,
                 server_addr.port()
             )
@@ -1818,8 +2036,10 @@ async fn connect_proxy_stream(
     target_host: &str,
     target_port: u16,
     resume: bool,
+    handshake_timeout: Duration,
 ) -> Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream)> {
-    let conn = connect_authenticated(server_addr, endpoint, host_port, capture).await?;
+    let conn =
+        connect_authenticated(server_addr, endpoint, host_port, capture, handshake_timeout).await?;
     let (mut send, mut recv) = conn.open_bi().await.context("open proxy stream")?;
     let setup = if resume {
         Message::ProxyResume {
@@ -1842,17 +2062,30 @@ async fn connect_proxy_stream(
     }
 }
 
-async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
+async fn run_proxy_mode(
+    target_host: String,
+    target_port: u16,
+    no_fallback: bool,
+) -> Result<()> {
     let target = build_target(&target_host, None)
         .with_context(|| format!("resolving target '{target_host}'"))?;
-    let server_addr: SocketAddr = {
+    let server_addr: SocketAddr = match {
         use std::net::ToSocketAddrs;
         let addr_str = format!("{}:{}", target.quic_host, target.quic_port);
         addr_str
             .to_socket_addrs()
-            .with_context(|| format!("DNS lookup for '{}'", target.quic_host))?
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("no address resolved for {}", target.quic_host))?
+            .with_context(|| format!("DNS lookup for '{}'", target.quic_host))
+            .and_then(|mut it| {
+                it.next()
+                    .ok_or_else(|| anyhow::anyhow!("no address resolved for {}", target.quic_host))
+            })
+    } {
+        Ok(a) => a,
+        Err(e) if !no_fallback => {
+            eprintln!("[proxy] DNS lookup failed ({e:#}); falling back to plain TCP");
+            return tcp_proxy_fallback(&target_host, target_port).await;
+        }
+        Err(e) => return Err(e),
     };
 
     let host_port = format!("{}:{}", target.quic_host, target.quic_port);
@@ -1917,6 +2150,7 @@ async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
             &target_host,
             target_port,
             resume,
+            PROXY_HANDSHAKE_TIMEOUT,
         )
         .await
         {
@@ -1935,6 +2169,17 @@ async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
                 parts
             }
             Err(e) if resume => {
+                // Server says the session is gone for good — no point
+                // retrying the resume window, the SSH session above us is
+                // already toast. Fail fast with a precise message.
+                if proxy_session_not_resumable(&e) {
+                    eprintln!(
+                        "[proxy] server dropped this proxy session; \
+                         SSH session above cannot be resumed"
+                    );
+                    return Err(e);
+                }
+
                 let deadline = *reconnect_deadline
                     .get_or_insert_with(|| Instant::now() + PROXY_RESUME_WINDOW);
                 if !logged_disconnect {
@@ -1953,7 +2198,18 @@ async fn run_proxy_mode(target_host: String, target_port: u16) -> Result<()> {
                 backoff = std::cmp::min(backoff * 2, PROXY_BACKOFF_MAX);
                 continue;
             }
-            Err(e) => return Err(e),
+            Err(e) => {
+                // First-connect failure (no SSH session above us yet). If
+                // QUIC is unreachable, falling back to a plain TCP bridge is
+                // exactly what SSH with no ProxyCommand would do.
+                if !no_fallback && quic_unavailable_for_proxy(&e) {
+                    eprintln!(
+                        "[proxy] QUIC unavailable ({e:#}); falling back to plain TCP"
+                    );
+                    return tcp_proxy_fallback(&target_host, target_port).await;
+                }
+                return Err(e);
+            }
         };
 
         let mut buf = [0u8; 4096];
@@ -2007,7 +2263,14 @@ async fn try_once(
     forwards: &[(u16, u16)],
     mode: BandwidthMode,
 ) -> Result<bool> {
-    let conn = connect_authenticated(server_addr, endpoint, host_port, capture).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        endpoint,
+        host_port,
+        capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
 
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
 
@@ -2249,9 +2512,10 @@ async fn main() -> Result<()> {
     if let CliMode::Proxy {
         target_host,
         target_port,
+        no_fallback,
     } = cli_mode
     {
-        return run_proxy_mode(target_host, target_port).await;
+        return run_proxy_mode(target_host, target_port, no_fallback).await;
     }
 
     let CliMode::Interactive {
@@ -2304,7 +2568,7 @@ async fn main() -> Result<()> {
 
     let mut session: Option<(String, String)> = None;
     let mut reconnect_deadline: Option<Instant> = if target.ssh_mode {
-        Some(Instant::now() + Duration::from_secs(30))
+        Some(Instant::now() + INTERACTIVE_INITIAL_CONNECT_WINDOW)
     } else {
         None
     };
@@ -2314,6 +2578,9 @@ async fn main() -> Result<()> {
     // don't hammer SSH on every retry but do re-open the firewall / restart
     // a crashed server after a reasonable delay.
     let mut last_rebootstrap: Option<Instant> = None;
+    // Exponential backoff between reconnect attempts. Resets after every
+    // successful reconnect (via try_once returning Ok).
+    let mut backoff = INTERACTIVE_BACKOFF_INITIAL;
 
     loop {
         // Erase any live banner line before entering raw terminal mode so it
@@ -2356,20 +2623,31 @@ async fn main() -> Result<()> {
             // Shell exited cleanly — just exit.
             Ok(true) => break,
 
-            // Network dropped mid-session.
+            // Network dropped mid-session. `Ok(false)` means try_once
+            // previously handshook successfully, so this is a *fresh* drop
+            // — reset the disconnect timer, window, and backoff.
             Ok(false) => {
-                let t = *disconnect_at.get_or_insert_with(Instant::now);
-                reconnect_deadline = Some(Instant::now() + Duration::from_secs(300));
-                reconnect_banner(t, Duration::from_secs(2)).await;
+                let now = Instant::now();
+                disconnect_at = Some(now);
+                reconnect_deadline = Some(now + INTERACTIVE_RECONNECT_WINDOW);
+                backoff = INTERACTIVE_BACKOFF_INITIAL;
+                // The banner itself waits 2 s before the next reconnect
+                // attempt, which is our first-retry gap.
+                reconnect_banner(now, Duration::from_secs(2)).await;
             }
 
             Err(e) => {
                 let hint = quic_error_hint(&e);
                 if let Some(dl) = reconnect_deadline {
                     if Instant::now() < dl {
-                        // Still within retry window — show banner and try again.
+                        // Still within retry window — show banner, back off,
+                        // and try again. Backoff grows so we don't hammer a
+                        // genuinely-down server between the 8 s handshake
+                        // timeouts, but stays short enough (max 3 s) that
+                        // short drops recover quickly.
                         let t = *disconnect_at.get_or_insert_with(Instant::now);
-                        reconnect_banner(t, Duration::from_secs(2)).await;
+                        reconnect_banner(t, backoff).await;
+                        backoff = std::cmp::min(backoff * 2, INTERACTIVE_BACKOFF_MAX);
                         continue;
                     }
                 }

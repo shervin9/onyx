@@ -502,9 +502,20 @@ async fn run_proxy_stream(
     }
 
     input_task.abort();
-    if let Some(meta) = proxy_sessions.lock().unwrap().get_mut(&proxy_session_id) {
-        meta.detached_at = Some(Instant::now());
-        meta.attached.store(false, Ordering::SeqCst);
+    let became_detached = {
+        let mut locked = proxy_sessions.lock().unwrap();
+        match locked.get_mut(&proxy_session_id) {
+            Some(meta) => {
+                meta.detached_at = Some(Instant::now());
+                meta.attached.store(false, Ordering::SeqCst);
+                true
+            }
+            None => false,
+        }
+    };
+    if became_detached {
+        let secs = DETACHED_PROXY_TTL.as_secs();
+        println!("[proxy {proxy_session_id}] detached (resume grace {secs}s)");
     }
     send.finish().ok();
     Ok(())
@@ -585,6 +596,11 @@ async fn handle_proxy_message(
             ));
             tokio::spawn(proxy_writer_task(tcp_w, input_rx, shutdown_tx));
 
+            let ttl = DETACHED_PROXY_TTL.as_secs();
+            println!(
+                "[proxy {proxy_session_id}] started → {target_host}:{target_port} \
+                 (resume grace {ttl}s)"
+            );
             run_proxy_stream(send, recv, proxy_sessions, proxy_session_id, true).await
         }
         Message::ProxyResume { proxy_session_id } => {
@@ -752,11 +768,21 @@ async fn run_session(
             ..
         } => {
             // Validate under the lock; never hold the guard across an await.
+            //
+            // We reject a Resume when the session is still attached
+            // (detached_at == None and the previous stream is still live).
+            // Two concurrent streams on the same PTY would race input and
+            // fan out output twice — the user sees garbled terminal state.
+            // Clients always call Resume only after their previous stream
+            // has ended, so the common case is `detached_at.is_some()`.
             let reject: Option<String> = {
                 let mut locked = sessions.lock().unwrap();
                 match locked.get_mut(&session_id) {
                     None => Some("session not found".into()),
                     Some(meta) if meta.resume_token != resume_token => Some("invalid token".into()),
+                    Some(meta) if meta.detached_at.is_none() => {
+                        Some("session already attached".into())
+                    }
                     Some(meta) => {
                         meta.detached_at = None;
                         None
