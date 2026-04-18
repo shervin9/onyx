@@ -211,24 +211,24 @@
     <section class="mcp-section" id="mcp">
       <div class="section-head section-head-centered mcp-head">
         <h2>Local MCP for remote execution</h2>
-        <p>Agents talk local. Onyx runs remote.</p>
+        <p>Agents talk local. Onyx executes remote.</p>
       </div>
 
-      <div class="mcp-diagram" aria-label="Agent to Onyx MCP to remote host">
-        <div class="mcp-rail" id="mcp-rail">
+      <div class="mcp-stage" aria-label="Agent to Onyx MCP to remote host">
+        <div class="mcp-track" id="mcp-track">
           <div class="mcp-line" aria-hidden="true"></div>
-          <div class="mcp-node is-active">
-            <span class="mcp-dot" aria-hidden="true"></span>
-            <span class="mcp-node-label">Agent</span>
-          </div>
-          <div class="mcp-node">
-            <span class="mcp-dot" aria-hidden="true"></span>
-            <span class="mcp-node-label">Onyx MCP</span>
-          </div>
-          <div class="mcp-node">
-            <span class="mcp-dot" aria-hidden="true"></span>
-            <span class="mcp-node-label">Remote host</span>
-          </div>
+          <article class="mcp-card is-active">
+            <strong class="mcp-card-title">Agent</strong>
+            <span class="mcp-card-subtitle">Claude / Codex</span>
+          </article>
+          <article class="mcp-card">
+            <strong class="mcp-card-title">Onyx MCP</strong>
+            <span class="mcp-card-subtitle">local bridge</span>
+          </article>
+          <article class="mcp-card">
+            <strong class="mcp-card-title">Remote Host</strong>
+            <span class="mcp-card-subtitle">hetzner-dev</span>
+          </article>
           <div class="mcp-pulse" aria-hidden="true"></div>
         </div>
       </div>

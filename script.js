@@ -8,11 +8,10 @@
   var flowDots = Array.prototype.slice.call(document.querySelectorAll(".flow-dot"));
   var flowPanels = Array.prototype.slice.call(document.querySelectorAll(".flow-panel"));
   var flowMeta = document.getElementById("flow-meta");
-  var mcpRail = document.getElementById("mcp-rail");
+  var mcpTrack = document.getElementById("mcp-track");
   var mcpLine = document.querySelector(".mcp-line");
   var mcpPulse = document.querySelector(".mcp-pulse");
-  var mcpNodes = Array.prototype.slice.call(document.querySelectorAll(".mcp-node"));
-  var mcpDots = Array.prototype.slice.call(document.querySelectorAll(".mcp-dot"));
+  var mcpCards = Array.prototype.slice.call(document.querySelectorAll(".mcp-card"));
   var repoMetaStrip = document.getElementById("repo-meta-strip");
   var repoMetaText = document.getElementById("repo-meta-text");
 
@@ -156,63 +155,75 @@
   }
 
   function setMcpStep(stepIndex) {
-    mcpNodes.forEach(function (node, index) {
-      node.classList.toggle("is-active", index === stepIndex);
+    mcpCards.forEach(function (card, index) {
+      card.classList.toggle("is-active", index === stepIndex);
     });
   }
 
-  function measureMcpRail() {
-    if (!mcpRail || !mcpDots.length || !mcpLine) return;
+  function measureMcpTrack() {
+    if (!mcpTrack || !mcpCards.length || !mcpLine) return;
 
-    var railRect = mcpRail.getBoundingClientRect();
-    var first = dotCenter(mcpDots[0], railRect);
-    var last = dotCenter(mcpDots[mcpDots.length - 1], railRect);
+    var trackRect = mcpTrack.getBoundingClientRect();
+    var first = dotCenter(mcpCards[0], trackRect);
+    var last = dotCenter(mcpCards[mcpCards.length - 1], trackRect);
+    var isVertical = window.matchMedia("(max-width: 900px)").matches;
 
-    mcpRail.style.setProperty("--mcp-line-left", first.x + "px");
-    mcpRail.style.setProperty("--mcp-line-width", Math.max(last.x - first.x, 0) + "px");
-    mcpRail.style.setProperty("--mcp-line-top", first.y + "px");
+    if (isVertical) {
+      mcpTrack.style.setProperty("--mcp-line-left", first.x + "px");
+      mcpTrack.style.setProperty("--mcp-line-top", first.y + "px");
+      mcpTrack.style.setProperty("--mcp-line-height", Math.max(last.y - first.y, 0) + "px");
+      mcpTrack.style.setProperty("--mcp-line-width", "1px");
+    } else {
+      mcpTrack.style.setProperty("--mcp-line-left", first.x + "px");
+      mcpTrack.style.setProperty("--mcp-line-width", Math.max(last.x - first.x, 0) + "px");
+      mcpTrack.style.setProperty("--mcp-line-top", first.y + "px");
+      mcpTrack.style.setProperty("--mcp-line-height", "1px");
+    }
   }
 
   function placeMcpPulse(stepIndex, instant) {
-    if (!mcpRail || !mcpPulse || !mcpDots.length) return;
-    var dot = mcpDots[stepIndex];
-    if (!dot) return;
+    if (!mcpTrack || !mcpPulse || !mcpCards.length) return;
+    var card = mcpCards[stepIndex];
+    if (!card) return;
 
-    var railRect = mcpRail.getBoundingClientRect();
-    var center = dotCenter(dot, railRect);
+    var trackRect = mcpTrack.getBoundingClientRect();
+    var center = dotCenter(card, trackRect);
 
     if (instant) {
       mcpPulse.style.transition = "none";
     } else {
       mcpPulse.style.transition =
-        "left 1.05s cubic-bezier(0.22, 1, 0.36, 1), top 1.05s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
+        "left 1.12s cubic-bezier(0.22, 1, 0.36, 1), top 1.12s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
     }
 
-    mcpRail.style.setProperty("--mcp-pulse-left", center.x + "px");
-    mcpRail.style.setProperty("--mcp-pulse-top", center.y + "px");
+    mcpTrack.style.setProperty("--mcp-pulse-left", center.x + "px");
+    mcpTrack.style.setProperty("--mcp-pulse-top", center.y + "px");
 
     if (instant) {
       mcpPulse.getBoundingClientRect();
       mcpPulse.style.transition =
-        "left 1.05s cubic-bezier(0.22, 1, 0.36, 1), top 1.05s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
+        "left 1.12s cubic-bezier(0.22, 1, 0.36, 1), top 1.12s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
     }
   }
 
-  function loopMcp(index) {
-    if (!mcpNodes.length) return;
-    measureMcpRail();
-    setMcpStep(index);
-    placeMcpPulse(index, false);
+  var mcpSequence = [0, 1, 2, 1];
+
+  function loopMcp(sequenceIndex) {
+    if (!mcpCards.length) return;
+    var cardIndex = mcpSequence[sequenceIndex];
+    measureMcpTrack();
+    setMcpStep(cardIndex);
+    placeMcpPulse(cardIndex, false);
     setTimeout(function () {
-      loopMcp((index + 1) % mcpNodes.length);
-    }, 1800);
+      loopMcp((sequenceIndex + 1) % mcpSequence.length);
+    }, 1700);
   }
 
   function refreshMcpLayout() {
-    measureMcpRail();
+    measureMcpTrack();
     var activeIndex = 0;
-    mcpNodes.forEach(function (node, index) {
-      if (node.classList.contains("is-active")) activeIndex = index;
+    mcpCards.forEach(function (card, index) {
+      if (card.classList.contains("is-active")) activeIndex = index;
     });
     placeMcpPulse(activeIndex, true);
   }
