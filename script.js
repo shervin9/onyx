@@ -8,13 +8,18 @@
   var flowDots = Array.prototype.slice.call(document.querySelectorAll(".flow-dot"));
   var flowPanels = Array.prototype.slice.call(document.querySelectorAll(".flow-panel"));
   var flowMeta = document.getElementById("flow-meta");
+  var repoMetaStrip = document.getElementById("repo-meta-strip");
+  var repoMetaText = document.getElementById("repo-meta-text");
+
+  var repoApiUrl = "https://api.github.com/repos/shervin9/onyx";
+  var latestReleaseApiUrl = "https://api.github.com/repos/shervin9/onyx/releases/latest";
 
   var terminalScenes = [
-    { command: "onyx user@server", meta: "[mode] QUIC" },
-    { command: "onyx user@server", meta: "[session] tmux-backed" },
-    { command: "onyx exec gpu-box --detach -- python train.py", meta: "[job] detached" },
-    { command: "onyx attach gpu-box job_a1b2c3d4", meta: "[job] reattached" },
-    { command: "ssh dev-onyx", meta: "[transport] ProxyCommand onyx proxy %h %p" }
+    { command: "onyx user@host", meta: "[shell] auto-reconnect" },
+    { command: "onyx exec prod -- deploy.sh", meta: "[exec] resumable job" },
+    { command: "onyx attach gpu-box job_84f31", meta: "[job] resumed" },
+    { command: "onyx jobs gpu-box --json", meta: "[json] NDJSON events" },
+    { command: "ssh prod-onyx", meta: "[transport] ProxyCommand onyx proxy %h %p" }
   ];
 
   var flowScenes = [
@@ -145,6 +150,56 @@
     placePulse(activeIndex, true);
   }
 
+  function fetchJson(url) {
+    return fetch(url, {
+      headers: {
+        Accept: "application/vnd.github+json"
+      }
+    }).then(function (response) {
+      if (!response.ok) {
+        throw new Error("HTTP " + response.status);
+      }
+      return response.json();
+    });
+  }
+
+  function formatCount(value) {
+    if (typeof value !== "number" || !isFinite(value)) return "";
+    return new Intl.NumberFormat("en-US").format(value);
+  }
+
+  function loadRepoMeta() {
+    if (!repoMetaStrip || !repoMetaText || !window.fetch) return;
+
+    Promise.all([
+      fetchJson(repoApiUrl).catch(function () { return null; }),
+      fetchJson(latestReleaseApiUrl).catch(function () { return null; })
+    ]).then(function (results) {
+      var repo = results[0];
+      var release = results[1];
+      var parts = [];
+
+      if (release && typeof release.tag_name === "string" && release.tag_name.trim()) {
+        parts.push("Latest " + release.tag_name.trim());
+      }
+
+      if (repo && typeof repo.stargazers_count === "number") {
+        parts.push(formatCount(repo.stargazers_count) + " stars");
+      }
+
+      if (repo && typeof repo.forks_count === "number") {
+        parts.push(formatCount(repo.forks_count) + " forks");
+      }
+
+      if (!parts.length) return;
+
+      repoMetaText.textContent = parts.join(" · ");
+      repoMetaStrip.hidden = false;
+    }).catch(function () {
+      repoMetaStrip.hidden = true;
+    });
+  }
+
   // ── onyx exec animated demo ───────────────────────────────────────────
   //
   // A narrative loop: the user detaches a training job, loses the
@@ -152,47 +207,46 @@
   // animation is pre-scripted — no randomness, no perf work per frame —
   // so it stays restrained and deterministic.
 
-  var execStatuses = Array.prototype.slice.call(document.querySelectorAll(".exec-status"));
+  var execStatusBadge = document.getElementById("exec-status-badge");
+  var execStatusMeta = document.getElementById("exec-status-meta");
   var execCommandLine = document.getElementById("exec-command-line");
   var execLine1 = document.getElementById("exec-line-1");
   var execLine2 = document.getElementById("exec-line-2");
   var execLine3 = document.getElementById("exec-line-3");
   var execLine4 = document.getElementById("exec-line-4");
-  var execLine5 = document.getElementById("exec-line-5");
-  var execStatusLine = document.getElementById("exec-status-line");
-  var execReattachLine = document.getElementById("exec-reattach-line");
-  var execCompleteLine = document.getElementById("exec-complete-line");
-  var execJobidLine = document.getElementById("exec-jobid-line");
+  var execJobLine = document.getElementById("exec-job-line");
+  var execDropLine = document.getElementById("exec-drop-line");
+  var execResumedLine = document.getElementById("exec-resumed-line");
   var execScene = document.getElementById("exec-scene");
   var execRevealLines = [
     execCommandLine,
-    execJobidLine,
+    execJobLine,
     execLine1,
     execLine2,
+    execDropLine,
+    execResumedLine,
     execLine3,
-    execStatusLine,
-    execReattachLine,
-    execLine4,
-    execLine5,
-    execCompleteLine
+    execLine4
   ];
   var execTimeline = [
-    { state: "running", show: [execCommandLine], delay: 580 },
-    { show: [execJobidLine], delay: 760 },
-    { show: [execLine1], delay: 860 },
-    { show: [execLine2], delay: 900 },
-    { show: [execLine3], delay: 1040 },
-    { state: "reconnecting", show: [execStatusLine], delay: 1400 },
-    { state: "reattached", hide: [execStatusLine], show: [execReattachLine], delay: 680 },
-    { show: [execLine4], delay: 860 },
-    { show: [execLine5], delay: 980 },
-    { state: "completed", show: [execCompleteLine], delay: 2400 }
+    { label: "starting", tone: "neutral", meta: "gpu-box • preparing job", show: [execCommandLine], delay: 960 },
+    { label: "running", tone: "running", meta: "gpu-box • job_84f31", show: [execJobLine], delay: 1080 },
+    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine1], delay: 1180 },
+    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine2], delay: 1480 },
+    { label: "connection lost", tone: "lost", meta: "gpu-box • reconnecting", show: [execDropLine], delay: 1900 },
+    { label: "resumed", tone: "resumed", meta: "gpu-box • job_84f31", hide: [execDropLine], show: [execResumedLine], delay: 1380 },
+    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine3], delay: 1120 },
+    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine4], delay: 2600 }
   ];
 
-  function setExecStatus(state) {
-    execStatuses.forEach(function (status) {
-      status.classList.toggle("is-active", status.getAttribute("data-exec-state") === state);
-    });
+  function setExecStatus(label, tone, metaText) {
+    if (execStatusBadge) {
+      execStatusBadge.textContent = label || "starting";
+      execStatusBadge.setAttribute("data-tone", tone || "neutral");
+    }
+    if (execStatusMeta && metaText) {
+      execStatusMeta.textContent = metaText;
+    }
   }
 
   function toggleExecLine(el, visible) {
@@ -204,7 +258,7 @@
     execRevealLines.forEach(function (line) {
       toggleExecLine(line, false);
     });
-    setExecStatus("running");
+    setExecStatus("starting", "neutral", "gpu-box • preparing job");
   }
 
   function runExecStep(i) {
@@ -215,7 +269,7 @@
     }
 
     var step = execTimeline[i];
-    if (step.state) setExecStatus(step.state);
+    setExecStatus(step.label, step.tone, step.meta);
     if (step.hide) {
       step.hide.forEach(function (line) {
         toggleExecLine(line, false);
@@ -230,12 +284,14 @@
   }
 
   function startExecDemo() {
-    if (!execScene || !execStatuses.length) return;
+    if (!execScene || !execStatusBadge) return;
     resetExecScene();
     setTimeout(function () {
       runExecStep(0);
-    }, 520);
+    }, 720);
   }
+
+  loadRepoMeta();
 
   setTimeout(function () {
     refreshFlowLayout();

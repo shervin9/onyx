@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Onyx — Resilient remote shell and execution layer</title>
-  <meta name="description" content="Resilient remote shell and execution layer for unreliable networks. QUIC when available. SSH when it’s not. Shells and commands that survive network instability.">
+  <title>Onyx — Reliable remote execution and interactive sessions</title>
+  <meta name="description" content="Remote work that survives the network. Stable interactive sessions, resumable exec, auto-reconnect, jobs, logs, and JSON output for automation.">
   <meta name="theme-color" content="#090909">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -19,6 +19,7 @@
   <nav>
     <a href="./" class="logo">onyx</a>
     <div class="nav-actions">
+      <a href="#shell" class="nav-link">Shell</a>
       <a href="#exec" class="nav-link">Exec</a>
       <a href="#install" class="nav-link">Install</a>
       <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
@@ -27,285 +28,264 @@
 
   <main>
     <section class="hero">
+      <div class="repo-meta-strip" id="repo-meta-strip" hidden>
+        <a
+          href="https://github.com/shervin9/onyx"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="repo-meta-link"
+          aria-label="Onyx GitHub metadata"
+        >
+          <span id="repo-meta-text"></span>
+        </a>
+      </div>
       <div class="badge">Open source</div>
-      <h1>Your command should not die because your connection did.</h1>
-      <p class="sub">
-        <span class="sub-line">QUIC when available. SSH when it’s not.</span>
-        <span class="sub-line">Run shells and commands that survive unreliable networks.</span>
-      </p>
+      <h1>Remote work that survives the network.</h1>
+      <p class="sub">Run shells and commands that keep going — even when your connection doesn’t.</p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>
       </div>
 
-      <div class="hero-grid">
-        <div class="hero-copy">
-          <div class="mini-points" aria-label="Product highlights">
-            <span>Shell sessions</span>
-            <span>Resumable exec</span>
-            <span>SSH fallback</span>
+      <div class="mini-points" aria-label="Product highlights">
+        <span>Auto-reconnect</span>
+        <span>Resumable exec</span>
+        <span>QUIC + SSH fallback</span>
+      </div>
+
+      <div class="terminal-shell hero-terminal" aria-label="Onyx terminal preview">
+        <div class="terminal-top">
+          <div class="terminal-dots">
+            <span></span><span></span><span></span>
           </div>
+          <span class="terminal-label">onyx</span>
         </div>
-        <div class="terminal-shell hero-terminal" aria-label="Onyx terminal preview">
-          <div class="terminal-top">
-            <div class="terminal-dots">
-              <span></span><span></span><span></span>
-            </div>
-            <span class="terminal-label">onyx</span>
+        <div class="terminal-body">
+          <div class="terminal-line terminal-line-static">
+            <span class="prompt">$</span>
+            <span class="terminal-text">stable sessions and resumable jobs over bad networks</span>
           </div>
-          <div class="terminal-body">
-            <div class="terminal-line terminal-line-static">
+          <div class="terminal-scene" id="terminal-scene">
+            <div class="terminal-line">
               <span class="prompt">$</span>
-              <span class="terminal-text">shells and commands survive unstable networks</span>
+              <span class="terminal-text" id="typed"></span><span class="caret"></span>
             </div>
-            <div class="terminal-scene" id="terminal-scene">
-              <div class="terminal-line">
-                <span class="prompt">$</span>
-                <span class="terminal-text" id="typed"></span><span class="caret"></span>
-              </div>
-              <div class="terminal-line terminal-line-muted" id="terminal-meta"></div>
-            </div>
+            <div class="terminal-line terminal-line-muted" id="terminal-meta"></div>
           </div>
         </div>
       </div>
     </section>
 
-    <section class="trust-strip" aria-label="Product highlights">
-      <ul>
-        <li>Open source</li>
-        <li>QUIC first</li>
-        <li>SSH fallback</li>
-        <li>tmux-backed shell</li>
-        <li>Resumable exec</li>
-        <li>Port forwarding</li>
-        <li>JSON output</li>
-      </ul>
-    </section>
-
-    <section class="install" id="install">
+    <section class="trust-section">
       <div class="section-head">
-        <h2>Install the local client</h2>
-        <p>Onyx installs locally. The remote server is provisioned automatically over SSH.</p>
+        <h2>Built for real network conditions.</h2>
+        <p>Packet loss, flaky Wi-Fi, and blocked UDP are normal. Onyx is built to keep the remote side running and recover cleanly.</p>
       </div>
-      <div class="install-grid">
-        <article class="install-card">
-          <span class="install-kicker">Homebrew</span>
-          <div class="code-wrap">
-            <code id="brew-cmd">brew install shervin9/onyx/onyx</code>
-            <button id="copy-brew-btn" type="button" data-copy-target="brew-cmd">Copy</button>
-          </div>
+      <div class="feature-grid trust-grid">
+        <article class="feature-card">
+          <strong>Handles packet loss</strong>
+          <span>Keeps the client focused on reconnect and resume instead of forcing you to restart work.</span>
         </article>
-        <article class="install-card">
-          <span class="install-kicker">Shell installer</span>
-          <div class="code-wrap">
-            <code id="install-cmd">curl -fsSL https://useonyx.dev/install.sh | sh</code>
-            <button id="copy-install-btn" type="button" data-copy-target="install-cmd">Copy</button>
-          </div>
+        <article class="feature-card">
+          <strong>Works over flaky Wi-Fi</strong>
+          <span>Interactive sessions and exec jobs are designed for short drops, not perfect links.</span>
+        </article>
+        <article class="feature-card">
+          <strong>Falls back to SSH automatically</strong>
+          <span>Prefer QUIC when UDP works. Use SSH when it does not.</span>
+        </article>
+        <article class="feature-card">
+          <strong>Keeps jobs running server-side</strong>
+          <span><code>onyx exec</code> jobs keep going on the remote even after the client disconnects.</span>
         </article>
       </div>
-      <article class="install-card connect-card">
-        <span class="install-kicker">Connect</span>
-        <div class="usage-line">
-          <code id="connect-cmd">onyx user@server</code>
-        </div>
-      </article>
     </section>
 
     <section class="flow shell-feature" id="shell">
       <div class="section-head">
-        <h2>Resilient remote shell</h2>
-        <p>Keep your session alive through unstable networks. Onyx replaces a fragile SSH hop with tmux-backed shells, QUIC-first transport, and clean fallback when UDP disappears.</p>
+        <h2>Stable interactive sessions.</h2>
+        <p>Use Onyx like a normal shell target. It reconnects automatically, keeps the session under tmux, and retains it for up to 12 hours by default.</p>
       </div>
-      <div class="flow-shell">
-        <div class="flow-track" aria-hidden="true">
-          <div class="flow-line"></div>
-          <div class="flow-node active">
-            <span class="flow-dot"></span>
-            <span class="flow-label">SSH bootstrap</span>
-          </div>
-          <div class="flow-node">
-            <span class="flow-dot"></span>
-            <span class="flow-label">QUIC transport</span>
-          </div>
-          <div class="flow-node">
-            <span class="flow-dot"></span>
-            <span class="flow-label">Forward / proxy</span>
-          </div>
-          <div class="flow-pulse"></div>
-        </div>
-        <div class="flow-panels">
-          <article class="workflow-card flow-panel is-active" data-flow-step="0">
-            <span class="workflow-kicker">Bootstrap</span>
-            <pre><code>onyx user@server</code></pre>
-            <p class="workflow-copy">Provision <code>onyx-server</code> automatically over SSH on first connect.</p>
-          </article>
-          <article class="workflow-card flow-panel" data-flow-step="1">
-            <span class="workflow-kicker">Transport</span>
-            <pre><code>onyx user@server</code></pre>
-            <p class="workflow-copy">Prefer QUIC. Fall back to SSH when UDP is blocked.</p>
-            <div class="flow-meta" id="flow-meta">[mode] QUIC</div>
-          </article>
-          <article class="workflow-card flow-panel" data-flow-step="2">
-            <span class="workflow-kicker">Forward / proxy</span>
-            <pre><code>onyx --forward 8888:8888 user@server</code></pre>
-            <p class="workflow-copy">Forward ports or route SSH tools through <code>onyx proxy %h %p</code>.</p>
-          </article>
-        </div>
+      <div class="shell-stack">
+        <article class="workflow-card shell-command-card">
+          <span class="workflow-kicker">Interactive shell</span>
+          <pre><code>onyx user@host</code></pre>
+          <p class="workflow-copy">Start a remote shell with QUIC first, automatic SSH fallback, and tmux-backed session state on the server.</p>
+        </article>
       </div>
       <div class="shell-notes">
         <article class="shell-note">
-          <strong>tmux-backed sessions</strong>
-          <span>Reconnect without reopening the shell or losing scrollback.</span>
+          <strong>Reconnects automatically</strong>
+          <span>Short network drops trigger reconnect instead of forcing a fresh login.</span>
         </article>
         <article class="shell-note">
-          <strong>Forwarding stays on path</strong>
-          <span>Carry local port forwarding through the same Onyx connection.</span>
+          <strong>tmux-backed</strong>
+          <span>Keep shell state and scrollback on the server instead of treating the session as disposable.</span>
         </article>
         <article class="shell-note">
-          <strong>Drop-in SSH transport</strong>
-          <span>Use <code>onyx proxy %h %p</code> for <code>ProxyCommand</code>-based tools.</span>
+          <strong>12h retention</strong>
+          <span>The remote tmux session is retained for up to 12 hours by default.</span>
         </article>
       </div>
     </section>
 
     <section class="exec-feature" id="exec">
       <div class="section-head exec-head">
-        <h2>Run commands that survive the network.</h2>
-        <p><code>onyx exec</code> turns remote commands into resumable jobs. Start detached, reconnect cleanly, and reattach without restarting the work.</p>
+        <h2>Run commands that don’t die.</h2>
+        <p><code>onyx exec</code> starts a server-side job. Disconnect, reattach, read logs, or list jobs later. Add <code>--json</code> when automation needs structured output.</p>
       </div>
 
       <div class="terminal-shell exec-terminal" aria-label="onyx exec resumable job animation">
-        <div class="terminal-top exec-terminal-top">
-          <div class="exec-terminal-meta">
-            <div class="terminal-dots">
-              <span></span><span></span><span></span>
-            </div>
-            <span class="terminal-label">onyx exec</span>
+        <div class="terminal-top">
+          <div class="terminal-dots">
+            <span></span><span></span><span></span>
           </div>
-          <div class="exec-status-track" aria-label="Execution status">
-            <div class="exec-status" data-exec-state="running">running</div>
-            <div class="exec-status" data-exec-state="reconnecting">reconnecting</div>
-            <div class="exec-status" data-exec-state="reattached">reattached</div>
-            <div class="exec-status" data-exec-state="completed">completed</div>
-          </div>
+          <span class="terminal-label">onyx exec</span>
+        </div>
+        <div class="exec-status-bar" aria-live="polite">
+          <span class="exec-status-label">status</span>
+          <span class="exec-status-badge" id="exec-status-badge" data-tone="neutral">starting</span>
+          <span class="exec-status-meta" id="exec-status-meta">gpu-box • job_84f31</span>
         </div>
         <div class="terminal-body exec-scene" id="exec-scene">
-            <div class="terminal-line exec-reveal" id="exec-command-line">
-              <span class="prompt">$</span>
-              <span class="terminal-text">onyx exec gpu-box --detach -- python train.py</span>
-            </div>
-            <div class="terminal-line terminal-line-muted exec-reveal" id="exec-jobid-line">
-              <span class="exec-prefix">[job]</span>
-              <span class="terminal-text">job_a1b2c3d4  detached  ring buffer live</span>
-            </div>
-            <div class="terminal-line exec-reveal" id="exec-line-1">
-              <span class="exec-prefix">train</span>
-              <span class="terminal-text">epoch 1  loss=0.912  samples=4096</span>
-            </div>
-            <div class="terminal-line exec-reveal" id="exec-line-2">
-              <span class="exec-prefix">train</span>
-              <span class="terminal-text">epoch 2  loss=0.734  samples=8192</span>
-            </div>
-            <div class="terminal-line exec-reveal" id="exec-line-3">
-              <span class="exec-prefix">train</span>
-              <span class="terminal-text">epoch 3  loss=0.581  samples=12288</span>
-            </div>
-            <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-status-line">
-              <span class="exec-prefix">[net]</span>
-              <span class="terminal-text">reconnecting…</span>
-            </div>
-            <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-reattach-line">
-              <span class="exec-prefix">[job]</span>
-              <span class="terminal-text">reattached  seq 4</span>
-            </div>
-            <div class="terminal-line exec-reveal" id="exec-line-4">
-              <span class="exec-prefix">train</span>
-              <span class="terminal-text">epoch 4  loss=0.448  samples=16384</span>
-            </div>
-            <div class="terminal-line exec-reveal" id="exec-line-5">
-              <span class="exec-prefix">train</span>
-              <span class="terminal-text">epoch 5  loss=0.361  checkpoint=best.pt</span>
-            </div>
-            <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-complete-line">
-              <span class="exec-prefix">[job]</span>
-              <span class="terminal-text">completed  artifacts synced</span>
-            </div>
+          <div class="terminal-line exec-reveal" id="exec-command-line">
+            <span class="prompt">$</span>
+            <span class="terminal-text">onyx exec gpu-box --detach -- python train.py</span>
+          </div>
+          <div class="terminal-line terminal-line-muted exec-reveal" id="exec-job-line">
+            <span class="exec-prefix">[job]</span>
+            <span class="terminal-text">job_84f31  running  detached</span>
+          </div>
+          <div class="terminal-line exec-reveal" id="exec-line-1">
+            <span class="exec-prefix">train</span>
+            <span class="terminal-text">epoch=01  loss=0.912  samples=4096</span>
+          </div>
+          <div class="terminal-line exec-reveal" id="exec-line-2">
+            <span class="exec-prefix">train</span>
+            <span class="terminal-text">epoch=02  loss=0.734  samples=8192</span>
+          </div>
+          <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-drop-line">
+            <span class="exec-prefix">[net]</span>
+            <span class="terminal-text">connection lost...</span>
+          </div>
+          <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-resumed-line">
+            <span class="exec-prefix">[job]</span>
+            <span class="terminal-text">resumed  seq=27</span>
+          </div>
+          <div class="terminal-line exec-reveal" id="exec-line-3">
+            <span class="exec-prefix">train</span>
+            <span class="terminal-text">epoch=03  loss=0.581  samples=12288</span>
+          </div>
+          <div class="terminal-line exec-reveal" id="exec-line-4">
+            <span class="exec-prefix">train</span>
+            <span class="terminal-text">epoch=04  checkpoint=best.pt</span>
+          </div>
         </div>
       </div>
 
       <div class="exec-command-grid" aria-label="Onyx exec command examples">
         <article class="exec-command-card">
           <span class="exec-command-label">Run</span>
-          <code>onyx exec gpu-box --detach -- python train.py</code>
+          <code>onyx exec prod -- deploy.sh</code>
+          <p>Start a remote command and stay attached to its output.</p>
         </article>
         <article class="exec-command-card">
-          <span class="exec-command-label">Reattach</span>
-          <code>onyx attach gpu-box job_a1b2c3d4</code>
+          <span class="exec-command-label">Detach</span>
+          <code>onyx exec gpu-box --detach -- python train.py</code>
+          <p>Start a job and get back a job id immediately.</p>
+        </article>
+        <article class="exec-command-card">
+          <span class="exec-command-label">Resume</span>
+          <code>onyx attach gpu-box &lt;job_id&gt;</code>
+          <p>Reattach after a disconnect or later from the same target.</p>
         </article>
         <article class="exec-command-card">
           <span class="exec-command-label">Logs</span>
-          <code>onyx logs gpu-box job_a1b2c3d4</code>
+          <code>onyx logs gpu-box &lt;job_id&gt;</code>
+          <p>Read buffered output without taking over the running job.</p>
         </article>
       </div>
+      <p class="exec-support-copy"><code>onyx jobs gpu-box --json</code> emits NDJSON job records for scripts, CI, and AI agents.</p>
     </section>
 
     <section class="features">
       <div class="section-head">
-        <h2>Core capabilities</h2>
-        <p>Built around shells, jobs, and transport that hold up when the link does not.</p>
+        <h2>For people and automation.</h2>
+        <p>Interactive shells for humans. Structured jobs for scripts and agents.</p>
       </div>
       <div class="feature-grid">
         <article class="feature-card">
-          <strong>QUIC + SSH fallback</strong>
-          <span>Prefer QUIC for the fast path, then fall back to SSH when UDP is blocked.</span>
+          <strong>Attach / logs / jobs</strong>
+          <span>Run work once, then inspect it later with a simple server-side job model.</span>
         </article>
         <article class="feature-card">
-          <strong>Session persistence (tmux-backed)</strong>
-          <span>Keep interactive shells reattachable with scrollback instead of starting from scratch.</span>
+          <strong>JSON output</strong>
+          <span><code>--json</code> emits NDJSON events that fit CI pipelines and agent workflows.</span>
         </article>
         <article class="feature-card">
-          <strong>Resumable exec</strong>
-          <span><code>onyx exec</code> keeps commands running after client disconnects and lets you attach later.</span>
+          <strong>Drop-in SSH transport</strong>
+          <span>Use <code>onyx proxy %h %p</code> as a <code>ProxyCommand</code> transport for SSH-based tools.</span>
         </article>
         <article class="feature-card">
           <strong>Port forwarding</strong>
-          <span>Forward local ports to remote services through the same Onyx transport path.</span>
-        </article>
-        <article class="feature-card">
-          <strong>ProxyCommand</strong>
-          <span>Use <code>onyx proxy %h %p</code> as a drop-in transport for SSH-based tools.</span>
-        </article>
-        <article class="feature-card">
-          <strong>JSON output (<code>--json</code>)</strong>
-          <span>Emit structured NDJSON events for CI pipelines, agents, and log consumers.</span>
+          <span>Carry local forwards over the same path used for your shell or exec traffic.</span>
         </article>
       </div>
     </section>
 
+    <section class="install" id="install">
+      <div class="section-head">
+        <h2>Install</h2>
+        <p>Install or update the client. Then connect.</p>
+      </div>
+      <div class="install-grid">
+        <article class="install-card">
+          <span class="install-kicker">Install</span>
+          <div class="code-wrap">
+            <code id="brew-cmd">brew install shervin9/onyx/onyx</code>
+            <button id="copy-brew-btn" type="button" data-copy-target="brew-cmd">Copy</button>
+          </div>
+        </article>
+        <article class="install-card">
+          <span class="install-kicker">Update</span>
+          <div class="code-wrap">
+            <code id="upgrade-cmd">brew upgrade shervin9/onyx/onyx --formula</code>
+            <button id="copy-upgrade-btn" type="button" data-copy-target="upgrade-cmd">Copy</button>
+          </div>
+        </article>
+      </div>
+      <article class="install-card connect-card">
+        <span class="install-kicker">Connect</span>
+        <div class="usage-line">
+          <code id="connect-cmd">onyx user@host</code>
+        </div>
+      </article>
+    </section>
+
     <section class="oss">
       <div class="section-head section-head-centered">
-        <h2>Open source. No lock-in.</h2>
-        <p>Self-host it, inspect it, and keep the protocol simple.</p>
+        <h2>Open source, self-hostable.</h2>
+        <p>MIT licensed. No lock-in. Runs on your servers.</p>
       </div>
       <div class="oss-grid">
         <article class="oss-item">
-          <strong>Self-hostable</strong>
-          <span>Run the client and server yourself without a managed control plane.</span>
+          <strong>MIT licensed</strong>
+          <span>Use and modify it under a permissive license.</span>
         </article>
         <article class="oss-item">
-          <strong>Inspectable</strong>
-          <span>Audit the code, the trust model, and the transport behavior directly.</span>
+          <strong>No lock-in</strong>
+          <span>Keep your clients, hosts, and automation under your control.</span>
         </article>
         <article class="oss-item">
-          <strong>Simple protocol</strong>
-          <span>Keep the transport story understandable instead of hiding it behind platform lock-in.</span>
+          <strong>Runs on your servers</strong>
+          <span>Bootstrap provisions <code>onyx-server</code> over SSH when needed.</span>
         </article>
       </div>
       <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
     </section>
 
     <section class="final-cta">
-      <p>Install locally. Keep shells and commands alive when the network slips.</p>
+      <p>Install the client. Keep shells and commands running when the network drops.</p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>
