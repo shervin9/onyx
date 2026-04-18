@@ -5,7 +5,7 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
     DigitallySignedStruct, SignatureScheme,
 };
-use shared::{Message, DEFAULT_PORT};
+use shared::{JobStatus, JobSummary, Message, StdStream, DEFAULT_PORT};
 use std::{
     fs,
     io::Write,
@@ -693,6 +693,34 @@ enum CliMode {
         target_port: u16,
         no_fallback: bool,
     },
+    Exec {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        detach: bool,
+        command: Vec<String>,
+    },
+    Jobs {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+    },
+    Attach {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        job_id: String,
+    },
+    Logs {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        job_id: String,
+    },
 }
 
 /// Outcome of parsing argv. Separate from `CliMode` so `--help` / `--version`
@@ -744,6 +772,138 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             target_port,
             no_fallback,
         }));
+    }
+
+    // ── exec / jobs / attach / logs ─────────────────────────────────────
+    //
+    // All four share a small prelude: `onyx <sub> <target> [flags]` where
+    // flags include `--json`, `-i <key>`, and `--no-bootstrap`. The
+    // `exec` subcommand additionally takes `--detach` and a `--`-separated
+    // command argv.
+    if matches!(
+        it.peek(),
+        Some(cmd) if cmd == "exec" || cmd == "jobs" || cmd == "attach" || cmd == "logs"
+    ) {
+        let sub = it.next().unwrap();
+        let raw_target = it
+            .next()
+            .ok_or_else(|| format!("{sub}: missing <target>"))?;
+
+        let mut identity: Option<String> = None;
+        let mut no_bootstrap = false;
+        let mut json = false;
+        let mut detach = false;
+        let mut positional: Vec<String> = Vec::new();
+        let mut command: Vec<String> = Vec::new();
+        let mut seen_dashdash = false;
+        // For exec: once we see the first bare positional, treat it as the
+        // start of the command argv — anything after (including things that
+        // look like flags, e.g. `ls -la`) is passed through unchanged.
+        // attach/logs/jobs stay in strict mode — they have fixed positional
+        // arity and a stray `-la` should be a clear error.
+        let exec_bare_tail = sub == "exec";
+        let mut in_command_tail = false;
+
+        while let Some(a) = it.next() {
+            if seen_dashdash || in_command_tail {
+                command.push(a);
+                continue;
+            }
+            match a.as_str() {
+                "--" => seen_dashdash = true,
+                "--json" => json = true,
+                "--detach" => detach = true,
+                "--no-bootstrap" => no_bootstrap = true,
+                "-i" => {
+                    identity = Some(
+                        it.next()
+                            .ok_or_else(|| "-i requires an argument".to_string())?,
+                    );
+                }
+                other if other.starts_with('-') => {
+                    return Err(format!("unknown flag for {sub}: {other} (try --help)"));
+                }
+                _ => {
+                    if exec_bare_tail {
+                        command.push(a);
+                        in_command_tail = true;
+                    } else {
+                        positional.push(a);
+                    }
+                }
+            }
+        }
+
+        return match sub.as_str() {
+            "exec" => {
+                if !seen_dashdash && command.is_empty() && !positional.is_empty() {
+                    // Defensive: exec_bare_tail should have steered here.
+                    command = positional;
+                }
+                if command.is_empty() {
+                    return Err("exec: missing command after '--'".to_string());
+                }
+                Ok(ParseOutcome::Run(CliMode::Exec {
+                    raw_target,
+                    identity_file: identity,
+                    no_bootstrap,
+                    json,
+                    detach,
+                    command,
+                }))
+            }
+            "jobs" => {
+                if detach {
+                    return Err("jobs: --detach is not valid here".to_string());
+                }
+                if !positional.is_empty() || !command.is_empty() {
+                    return Err(format!(
+                        "jobs: unexpected argument '{}'",
+                        positional
+                            .first()
+                            .or_else(|| command.first())
+                            .map(|s| s.as_str())
+                            .unwrap_or("")
+                    ));
+                }
+                Ok(ParseOutcome::Run(CliMode::Jobs {
+                    raw_target,
+                    identity_file: identity,
+                    no_bootstrap,
+                    json,
+                }))
+            }
+            "attach" | "logs" => {
+                if detach {
+                    return Err(format!("{sub}: --detach is not valid here"));
+                }
+                let job_id = positional
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| format!("{sub}: missing <job-id>"))?;
+                if !command.is_empty() {
+                    return Err(format!("{sub}: unexpected arguments after <job-id>"));
+                }
+                if sub == "attach" {
+                    Ok(ParseOutcome::Run(CliMode::Attach {
+                        raw_target,
+                        identity_file: identity,
+                        no_bootstrap,
+                        json,
+                        job_id,
+                    }))
+                } else {
+                    Ok(ParseOutcome::Run(CliMode::Logs {
+                        raw_target,
+                        identity_file: identity,
+                        no_bootstrap,
+                        json,
+                        job_id,
+                    }))
+                }
+            }
+            _ => unreachable!(),
+        };
     }
 
     let mut identity: Option<String> = None;
@@ -814,6 +974,10 @@ onyx — stable remote shell for unreliable networks (QUIC + SSH fallback)
 USAGE
   onyx [OPTIONS] [user@]<host>[:<quic-port>]       interactive shell
   onyx proxy <host> <port>                          SSH ProxyCommand transport
+  onyx exec   <target> [--json] [--detach] -- <cmd...>
+  onyx jobs   <target> [--json]
+  onyx attach <target> <job-id> [--json]
+  onyx logs   <target> <job-id> [--json]
   onyx --help | --version
 
 MODES
@@ -830,6 +994,14 @@ MODES
                   plain TCP bridge to <host> <port> unless --no-fallback
                   is set. The plain-TCP path cannot revive a QUIC-started
                   SSH session; it only replaces QUIC for new sessions.
+  Exec            Resumable remote command execution. The server owns
+                  the child process, buffers up to 4 MiB of output per
+                  job in a ring, and keeps the job alive across client
+                  disconnects. Reattach with `onyx attach`, snapshot
+                  output with `onyx logs`, enumerate with `onyx jobs`.
+                  Jobs survive client disconnects but NOT onyx-server
+                  restart or host reboot (in-memory). Finished jobs are
+                  retained for 1 hour.
 
 INSTALL MODEL
   onyx is a local CLI. On first connect to a host it provisions
@@ -846,6 +1018,9 @@ OPTIONS
                               (plain SSH exec for interactive, plain TCP
                                bridge for proxy mode)
   --low-bandwidth           smoother batching on poor links
+  --json                    (exec/jobs/attach/logs) structured output,
+                              one JSON object per line
+  --detach                  (exec) start the job and exit; reattach later
   -h, --help                show this help
   -V, --version             print version
 
@@ -855,6 +1030,12 @@ EXAMPLES
   onyx --forward 8888:8888 user@host
   onyx proxy host.example.com 22     # behind ProxyCommand in ssh_config
   onyx proxy --no-fallback host 22   # require QUIC for ProxyCommand
+  onyx exec prod -- deploy.sh
+  onyx exec gpu-box --detach -- python train.py
+  onyx exec ci --json -- cargo test --workspace
+  onyx jobs gpu-box
+  onyx attach gpu-box job_a1b2c3d4e5f60718
+  onyx logs  gpu-box job_a1b2c3d4e5f60718
 ";
 
 /// Real CLI entry point. Wraps `parse_args_from` and converts parse errors /
@@ -1029,12 +1210,170 @@ mod parse_args_tests {
             "proxy --no-fallback",
             "12 hours",
             "plain TCP bridge",
+            "onyx exec",
+            "onyx jobs",
+            "onyx attach",
+            "onyx logs",
+            "--json",
+            "--detach",
+            "Resumable remote command execution",
+            "1 hour",
         ] {
             assert!(
                 HELP_TEXT.contains(needle),
                 "HELP_TEXT missing '{needle}'"
             );
         }
+    }
+
+    // ───────── exec / jobs / attach / logs parsing ─────────
+
+    #[test]
+    fn exec_parses_basic_command_with_dashdash() {
+        let out = parse_args_from(s(&["exec", "host", "--", "docker", "build", "."])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Exec {
+                raw_target,
+                json,
+                detach,
+                command,
+                ..
+            }) => {
+                assert_eq!(raw_target, "host");
+                assert!(!json);
+                assert!(!detach);
+                assert_eq!(command, vec!["docker", "build", "."]);
+            }
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_accepts_flags_before_dashdash() {
+        let out = parse_args_from(s(&[
+            "exec",
+            "host",
+            "--json",
+            "--detach",
+            "--no-bootstrap",
+            "-i",
+            "/tmp/key",
+            "--",
+            "python",
+            "train.py",
+        ]))
+        .unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Exec {
+                json,
+                detach,
+                no_bootstrap,
+                identity_file,
+                command,
+                ..
+            }) => {
+                assert!(json);
+                assert!(detach);
+                assert!(no_bootstrap);
+                assert_eq!(identity_file.as_deref(), Some("/tmp/key"));
+                assert_eq!(command, vec!["python", "train.py"]);
+            }
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_accepts_bare_command_without_dashdash() {
+        // Friendly fallback: `onyx exec host ls -la` should still work.
+        let out = parse_args_from(s(&["exec", "host", "ls", "-la"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Exec { command, .. }) => {
+                assert_eq!(command, vec!["ls", "-la"]);
+            }
+            _ => panic!("expected Exec"),
+        }
+    }
+
+    #[test]
+    fn exec_empty_command_rejected() {
+        let err = parse_args_from(s(&["exec", "host", "--"])).unwrap_err();
+        assert!(
+            err.contains("missing command"),
+            "err was: {err}"
+        );
+    }
+
+    #[test]
+    fn exec_missing_target_rejected() {
+        let err = parse_args_from(s(&["exec"])).unwrap_err();
+        assert!(err.contains("missing <target>"), "err was: {err}");
+    }
+
+    #[test]
+    fn exec_rejects_unknown_flag_before_dashdash() {
+        let err = parse_args_from(s(&["exec", "host", "--bogus", "--", "x"])).unwrap_err();
+        assert!(err.contains("unknown flag"), "err was: {err}");
+    }
+
+    #[test]
+    fn jobs_parses_json_flag() {
+        let out = parse_args_from(s(&["jobs", "host", "--json"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Jobs {
+                raw_target, json, ..
+            }) => {
+                assert_eq!(raw_target, "host");
+                assert!(json);
+            }
+            _ => panic!("expected Jobs"),
+        }
+    }
+
+    #[test]
+    fn jobs_rejects_positional_args() {
+        let err = parse_args_from(s(&["jobs", "host", "extra"])).unwrap_err();
+        assert!(err.contains("unexpected"), "err was: {err}");
+    }
+
+    #[test]
+    fn attach_requires_job_id() {
+        let err = parse_args_from(s(&["attach", "host"])).unwrap_err();
+        assert!(err.contains("missing <job-id>"), "err was: {err}");
+
+        let out = parse_args_from(s(&["attach", "host", "job_abc", "--json"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Attach {
+                raw_target,
+                json,
+                job_id,
+                ..
+            }) => {
+                assert_eq!(raw_target, "host");
+                assert_eq!(job_id, "job_abc");
+                assert!(json);
+            }
+            _ => panic!("expected Attach"),
+        }
+    }
+
+    #[test]
+    fn logs_requires_job_id() {
+        let out = parse_args_from(s(&["logs", "host", "job_42"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Logs { job_id, json, .. }) => {
+                assert_eq!(job_id, "job_42");
+                assert!(!json);
+            }
+            _ => panic!("expected Logs"),
+        }
+    }
+
+    #[test]
+    fn attach_and_logs_reject_detach_flag() {
+        let err = parse_args_from(s(&["attach", "host", "--detach", "job_x"])).unwrap_err();
+        assert!(err.contains("--detach"), "err was: {err}");
+        let err = parse_args_from(s(&["logs", "host", "--detach", "job_x"])).unwrap_err();
+        assert!(err.contains("--detach"), "err was: {err}");
     }
 }
 
@@ -1130,6 +1469,49 @@ mod reliability_tests {
             b = std::cmp::min(b * 2, INTERACTIVE_BACKOFF_MAX);
         }
         assert_eq!(b, INTERACTIVE_BACKOFF_MAX);
+    }
+
+    // ───────── exec JSON helpers ─────────
+
+    #[test]
+    fn json_escape_handles_control_chars_and_quotes() {
+        let mut out = String::new();
+        json_escape_into(&mut out, "hi \"there\"\n\tbye\x01");
+        assert_eq!(out, "hi \\\"there\\\"\\n\\tbye\\u0001");
+    }
+
+    #[test]
+    fn jq_wraps_and_escapes() {
+        assert_eq!(jq("a\"b"), "\"a\\\"b\"");
+        assert_eq!(jq(""), "\"\"");
+    }
+
+    #[test]
+    fn job_status_str_is_lowercase_and_stable() {
+        // The landing page and any scripts keying off --json depend on
+        // these exact strings; lock them in.
+        assert_eq!(job_status_str(JobStatus::Running), "running");
+        assert_eq!(job_status_str(JobStatus::Detached), "detached");
+        assert_eq!(job_status_str(JobStatus::Succeeded), "succeeded");
+        assert_eq!(job_status_str(JobStatus::Failed), "failed");
+        assert_eq!(job_status_str(JobStatus::Expired), "expired");
+    }
+
+    #[test]
+    fn format_relative_time_covers_each_unit() {
+        assert_eq!(format_relative_time(100, 95), "5s ago");
+        assert_eq!(format_relative_time(3600, 3300), "5m ago");
+        assert_eq!(format_relative_time(100_000, 86_400), "3h ago");
+        assert_eq!(format_relative_time(10_000_000, 1), "115d ago");
+    }
+
+    #[test]
+    fn truncate_display_preserves_short_strings() {
+        assert_eq!(truncate_display("abc", 10), "abc");
+        let long = "a".repeat(30);
+        let truncated = truncate_display(&long, 10);
+        assert_eq!(truncated.chars().count(), 10);
+        assert!(truncated.ends_with('…'));
     }
 }
 
@@ -2251,6 +2633,470 @@ async fn run_proxy_mode(
 }
 
 // ---------------------------------------------------------------------------
+// Exec subcommands — resumable remote command execution
+// ---------------------------------------------------------------------------
+//
+// `onyx exec` is the first step toward positioning Onyx as a resilient
+// remote-execution layer rather than just a better SSH. The client is
+// intentionally thin: it opens one QUIC stream, sends an Exec/Attach/Logs/
+// JobsList message, and streams the server's responses. All job state
+// lives on the remote onyx-server.
+//
+// Output modes:
+//   * text (default): stdout chunks to stdout, stderr chunks to stderr,
+//     just like SSH. A ring-buffer-gap notice goes to stderr.
+//   * --json: one NDJSON event per line on stdout, regardless of stream.
+//     `data` is rendered as lossy UTF-8 (invalid sequences become U+FFFD).
+//     Users who need byte-exact binary output should use text mode.
+
+/// JSON-escape a str into an existing buffer. Avoids bringing in serde_json
+/// just for the four or five event shapes we emit.
+fn json_escape_into(out: &mut String, s: &str) {
+    out.reserve(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+}
+
+fn jq(s: &str) -> String {
+    let mut out = String::from("\"");
+    json_escape_into(&mut out, s);
+    out.push('"');
+    out
+}
+
+fn job_status_str(s: JobStatus) -> &'static str {
+    match s {
+        JobStatus::Running => "running",
+        JobStatus::Detached => "detached",
+        JobStatus::Succeeded => "succeeded",
+        JobStatus::Failed => "failed",
+        JobStatus::Expired => "expired",
+    }
+}
+
+fn emit_started_json(job_id: &str, started_at_unix: u64, command: &[String]) {
+    let joined = command.join(" ");
+    println!(
+        "{{\"type\":\"started\",\"job_id\":{},\"started_at_unix\":{},\"command\":{}}}",
+        jq(job_id),
+        started_at_unix,
+        jq(&joined),
+    );
+}
+
+fn emit_output_json(seq: u64, stream: StdStream, data: &[u8]) {
+    let text = String::from_utf8_lossy(data);
+    let kind = match stream {
+        StdStream::Stdout => "stdout",
+        StdStream::Stderr => "stderr",
+    };
+    println!(
+        "{{\"type\":{},\"seq\":{},\"data\":{}}}",
+        jq(kind),
+        seq,
+        jq(&text),
+    );
+}
+
+fn emit_gap_json(oldest_seq: u64) {
+    println!("{{\"type\":\"gap\",\"oldest_seq\":{oldest_seq}}}");
+}
+
+fn emit_finished_json(exit_code: Option<i32>, finished_at_unix: u64, started_at_unix: u64) {
+    let code = match exit_code {
+        Some(c) => c.to_string(),
+        None => "null".to_string(),
+    };
+    let duration_ms = finished_at_unix
+        .saturating_sub(started_at_unix)
+        .saturating_mul(1000);
+    println!(
+        "{{\"type\":\"finished\",\"exit_code\":{code},\"finished_at_unix\":{finished_at_unix},\"duration_ms\":{duration_ms}}}",
+    );
+}
+
+fn emit_error_json(reason: &str) {
+    println!("{{\"type\":\"error\",\"reason\":{}}}", jq(reason));
+}
+
+/// Shared target preparation used by every exec subcommand.
+async fn prepare_exec_target(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+) -> Result<(Endpoint, SocketAddr, String, FpCapture)> {
+    let target = build_target(&raw_target, identity_file)
+        .with_context(|| format!("resolving target '{raw_target}'"))?;
+
+    if target.ssh_mode && !no_bootstrap {
+        let ssh_target = target.ssh_target.clone();
+        let identity = target.identity_file.clone();
+        let port = target.quic_port;
+        tokio::task::spawn_blocking(move || bootstrap(&ssh_target, identity.as_deref(), port))
+            .await
+            .map_err(|e| anyhow::anyhow!("bootstrap task: {e}"))?
+            .context("bootstrap failed")?;
+    }
+
+    let server_addr: SocketAddr = {
+        use std::net::ToSocketAddrs;
+        let addr_str = format!("{}:{}", target.quic_host, target.quic_port);
+        addr_str
+            .to_socket_addrs()
+            .with_context(|| format!("DNS lookup for '{}'", target.quic_host))?
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no address resolved for {}", target.quic_host))?
+    };
+    let host_port = format!("{}:{}", target.quic_host, target.quic_port);
+    let capture: FpCapture = Arc::new(Mutex::new(None));
+    let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(make_client_config(capture.clone())?);
+    Ok((endpoint, server_addr, host_port, capture))
+}
+
+/// Drain an exec/attach QUIC stream: forward output, print gap/finish/error
+/// events in the chosen mode, and return the final exit code (if any).
+async fn drain_exec_stream(
+    recv: &mut quinn::RecvStream,
+    json: bool,
+    started_at_unix: u64,
+) -> Result<Option<i32>> {
+    let mut stdout = tokio::io::stdout();
+    let mut stderr = tokio::io::stderr();
+    loop {
+        let msg = recv_msg(recv).await?;
+        match msg {
+            Message::ExecOutput { seq, stream, data } => {
+                if json {
+                    emit_output_json(seq, stream, &data);
+                } else {
+                    match stream {
+                        StdStream::Stdout => {
+                            stdout.write_all(&data).await?;
+                            stdout.flush().await?;
+                        }
+                        StdStream::Stderr => {
+                            stderr.write_all(&data).await?;
+                            stderr.flush().await?;
+                        }
+                    }
+                }
+            }
+            Message::ExecGap { oldest_seq } => {
+                if json {
+                    emit_gap_json(oldest_seq);
+                } else {
+                    eprintln!(
+                        "[onyx] note: earlier output dropped from the job's ring buffer \
+                         (showing from seq {oldest_seq})"
+                    );
+                }
+            }
+            Message::ExecFinished {
+                exit_code,
+                finished_at_unix,
+            } => {
+                if json {
+                    emit_finished_json(exit_code, finished_at_unix, started_at_unix);
+                }
+                return Ok(exit_code);
+            }
+            Message::ExecError { reason } => {
+                if json {
+                    emit_error_json(&reason);
+                } else {
+                    eprintln!("onyx: {reason}");
+                }
+                anyhow::bail!("{reason}");
+            }
+            Message::Close { .. } => return Ok(None),
+            other => anyhow::bail!("unexpected exec response: {other:?}"),
+        }
+    }
+}
+
+async fn run_exec_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    detach: bool,
+    command: Vec<String>,
+) -> Result<()> {
+    let (endpoint, server_addr, host_port, capture) =
+        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        &endpoint,
+        &host_port,
+        &capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+
+    send_msg(
+        &mut send,
+        &Message::ExecStart {
+            command: command.clone(),
+        },
+    )
+    .await?;
+
+    let (job_id, started_at_unix) = match recv_msg(&mut recv).await? {
+        Message::ExecStarted {
+            job_id,
+            started_at_unix,
+        } => (job_id, started_at_unix),
+        Message::ExecError { reason } => {
+            if json {
+                emit_error_json(&reason);
+            } else {
+                eprintln!("onyx: {reason}");
+            }
+            return Err(anyhow::anyhow!("{reason}"));
+        }
+        other => anyhow::bail!("unexpected exec response: {other:?}"),
+    };
+
+    if json {
+        emit_started_json(&job_id, started_at_unix, &command);
+    } else if detach {
+        println!("{job_id}");
+        eprintln!(
+            "[onyx] detached; reattach with: onyx attach <target> {job_id}"
+        );
+    }
+
+    if detach {
+        // Drop our end of the stream; the job keeps running on the server.
+        let _ = send.finish();
+        drop(send);
+        drop(recv);
+        conn.close(0u32.into(), b"detach");
+        endpoint.wait_idle().await;
+        return Ok(());
+    }
+
+    let exit_code = drain_exec_stream(&mut recv, json, started_at_unix).await?;
+    conn.close(0u32.into(), b"bye");
+    endpoint.wait_idle().await;
+
+    // Exit with the child's exit code so shell pipelines see the right status.
+    match exit_code {
+        Some(c) => std::process::exit(c),
+        None => std::process::exit(137), // killed-by-signal convention
+    }
+}
+
+async fn run_attach_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    job_id: String,
+) -> Result<()> {
+    let (endpoint, server_addr, host_port, capture) =
+        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        &endpoint,
+        &host_port,
+        &capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+
+    // last_seq = 0 means "replay everything currently buffered". The server
+    // will report a gap if it already rotated anything out of the ring.
+    send_msg(
+        &mut send,
+        &Message::ExecAttach {
+            job_id: job_id.clone(),
+            last_seq: 0,
+        },
+    )
+    .await?;
+
+    // started_at_unix isn't known to the client on attach; use 0 so
+    // duration_ms in the JSON finish event is always non-negative even if
+    // we can't compute a meaningful duration.
+    let exit_code = drain_exec_stream(&mut recv, json, 0).await?;
+    conn.close(0u32.into(), b"bye");
+    endpoint.wait_idle().await;
+    match exit_code {
+        Some(c) => std::process::exit(c),
+        None => Ok(()), // still running or detached cleanly
+    }
+}
+
+async fn run_logs_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    job_id: String,
+) -> Result<()> {
+    let (endpoint, server_addr, host_port, capture) =
+        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        &endpoint,
+        &host_port,
+        &capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    send_msg(
+        &mut send,
+        &Message::ExecLogs {
+            job_id: job_id.clone(),
+        },
+    )
+    .await?;
+    let _ = drain_exec_stream(&mut recv, json, 0).await;
+    conn.close(0u32.into(), b"bye");
+    endpoint.wait_idle().await;
+    Ok(())
+}
+
+fn format_relative_time(now_unix: u64, t_unix: u64) -> String {
+    let delta = now_unix.saturating_sub(t_unix);
+    if delta < 60 {
+        format!("{delta}s ago")
+    } else if delta < 3600 {
+        format!("{}m ago", delta / 60)
+    } else if delta < 86400 {
+        format!("{}h ago", delta / 3600)
+    } else {
+        format!("{}d ago", delta / 86400)
+    }
+}
+
+fn truncate_display(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn print_jobs_table(jobs: &[JobSummary]) {
+    if jobs.is_empty() {
+        println!("no jobs");
+        return;
+    }
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    println!(
+        "{:<24}  {:<10}  {:<10}  {:<7}  COMMAND",
+        "JOB ID", "STATUS", "STARTED", "EXIT"
+    );
+    for j in jobs {
+        let exit = match j.exit_code {
+            Some(c) => c.to_string(),
+            None => "-".to_string(),
+        };
+        println!(
+            "{:<24}  {:<10}  {:<10}  {:<7}  {}",
+            truncate_display(&j.job_id, 24),
+            job_status_str(j.status),
+            format_relative_time(now_unix, j.started_at_unix),
+            exit,
+            truncate_display(&j.command, 60),
+        );
+    }
+}
+
+fn print_jobs_json(jobs: &[JobSummary]) {
+    for j in jobs {
+        let finished = match j.finished_at_unix {
+            Some(v) => v.to_string(),
+            None => "null".to_string(),
+        };
+        let exit = match j.exit_code {
+            Some(c) => c.to_string(),
+            None => "null".to_string(),
+        };
+        println!(
+            "{{\"type\":\"job\",\"job_id\":{},\"status\":{},\"command\":{},\
+             \"started_at_unix\":{},\"finished_at_unix\":{},\"exit_code\":{},\
+             \"attached\":{},\"buffered_bytes\":{}}}",
+            jq(&j.job_id),
+            jq(job_status_str(j.status)),
+            jq(&j.command),
+            j.started_at_unix,
+            finished,
+            exit,
+            j.attached,
+            j.buffered_bytes,
+        );
+    }
+}
+
+async fn run_jobs_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+) -> Result<()> {
+    let (endpoint, server_addr, host_port, capture) =
+        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        &endpoint,
+        &host_port,
+        &capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    send_msg(&mut send, &Message::JobsList).await?;
+    let msg = recv_msg(&mut recv).await?;
+    conn.close(0u32.into(), b"bye");
+    endpoint.wait_idle().await;
+
+    match msg {
+        Message::JobsListResponse { jobs } => {
+            if json {
+                print_jobs_json(&jobs);
+            } else {
+                print_jobs_table(&jobs);
+            }
+            Ok(())
+        }
+        Message::ExecError { reason } => {
+            if json {
+                emit_error_json(&reason);
+            } else {
+                eprintln!("onyx: {reason}");
+            }
+            Err(anyhow::anyhow!("{reason}"))
+        }
+        other => anyhow::bail!("unexpected jobs response: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Single connection attempt + I/O loop
 // ---------------------------------------------------------------------------
 
@@ -2509,13 +3355,53 @@ async fn main() -> Result<()> {
         .ok();
 
     let cli_mode = parse_args();
-    if let CliMode::Proxy {
-        target_host,
-        target_port,
-        no_fallback,
-    } = cli_mode
-    {
-        return run_proxy_mode(target_host, target_port, no_fallback).await;
+    match cli_mode {
+        CliMode::Proxy {
+            target_host,
+            target_port,
+            no_fallback,
+        } => return run_proxy_mode(target_host, target_port, no_fallback).await,
+        CliMode::Exec {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            detach,
+            command,
+        } => {
+            return run_exec_mode(
+                raw_target,
+                identity_file,
+                no_bootstrap,
+                json,
+                detach,
+                command,
+            )
+            .await
+        }
+        CliMode::Jobs {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+        } => return run_jobs_mode(raw_target, identity_file, no_bootstrap, json).await,
+        CliMode::Attach {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            job_id,
+        } => {
+            return run_attach_mode(raw_target, identity_file, no_bootstrap, json, job_id).await
+        }
+        CliMode::Logs {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            job_id,
+        } => return run_logs_mode(raw_target, identity_file, no_bootstrap, json, job_id).await,
+        CliMode::Interactive { .. } => {}
     }
 
     let CliMode::Interactive {
