@@ -11,10 +11,10 @@
 
   var terminalScenes = [
     { command: "onyx user@server", meta: "[mode] QUIC" },
-    { command: "onyx user@server", meta: "[session] resumed" },
-    { command: "onyx --forward 8888:8888 user@server", meta: "[forward] localhost:8888 -> remote:8888" },
-    { command: "ssh dev-onyx", meta: "[transport] ProxyCommand onyx proxy %h %p" },
-    { command: "ssh dev-onyx", meta: "[mode] SSH fallback" }
+    { command: "onyx user@server", meta: "[session] tmux-backed" },
+    { command: "onyx exec gpu-box --detach -- python train.py", meta: "[job] detached" },
+    { command: "onyx attach gpu-box job_a1b2c3d4", meta: "[job] reattached" },
+    { command: "ssh dev-onyx", meta: "[transport] ProxyCommand onyx proxy %h %p" }
   ];
 
   var flowScenes = [
@@ -152,8 +152,8 @@
   // animation is pre-scripted — no randomness, no perf work per frame —
   // so it stays restrained and deterministic.
 
-  var execPill = document.getElementById("exec-pill");
-  var execStages = Array.prototype.slice.call(document.querySelectorAll(".exec-stage"));
+  var execStatuses = Array.prototype.slice.call(document.querySelectorAll(".exec-status"));
+  var execCommandLine = document.getElementById("exec-command-line");
   var execLine1 = document.getElementById("exec-line-1");
   var execLine2 = document.getElementById("exec-line-2");
   var execLine3 = document.getElementById("exec-line-3");
@@ -165,6 +165,7 @@
   var execJobidLine = document.getElementById("exec-jobid-line");
   var execScene = document.getElementById("exec-scene");
   var execRevealLines = [
+    execCommandLine,
     execJobidLine,
     execLine1,
     execLine2,
@@ -175,36 +176,22 @@
     execLine5,
     execCompleteLine
   ];
-  var execStates = {
-    detached: "detached",
-    running: "running",
-    reconnecting: "reconnecting…",
-    reattached: "reattached",
-    completed: "completed"
-  };
   var execTimeline = [
-    { stage: 0, pill: "detached", show: [execJobidLine], delay: 880 },
-    { stage: 1, pill: "running", delay: 240 },
-    { show: [execLine1], delay: 620 },
-    { show: [execLine2], delay: 620 },
-    { show: [execLine3], delay: 760 },
-    { stage: 2, pill: "reconnecting", show: [execStatusLine], delay: 1280 },
-    { stage: 3, pill: "reattached", hide: [execStatusLine], show: [execReattachLine], delay: 640 },
-    { show: [execLine4], delay: 620 },
-    { show: [execLine5], delay: 760 },
-    { stage: 4, pill: "completed", show: [execCompleteLine], delay: 2400 }
+    { state: "running", show: [execCommandLine], delay: 580 },
+    { show: [execJobidLine], delay: 760 },
+    { show: [execLine1], delay: 860 },
+    { show: [execLine2], delay: 900 },
+    { show: [execLine3], delay: 1040 },
+    { state: "reconnecting", show: [execStatusLine], delay: 1400 },
+    { state: "reattached", hide: [execStatusLine], show: [execReattachLine], delay: 680 },
+    { show: [execLine4], delay: 860 },
+    { show: [execLine5], delay: 980 },
+    { state: "completed", show: [execCompleteLine], delay: 2400 }
   ];
 
-  function setExecPill(state) {
-    if (!execPill) return;
-    execPill.setAttribute("data-state", state);
-    execPill.textContent = execStates[state] || state;
-  }
-
-  function setExecStage(index) {
-    execStages.forEach(function (stage, stageIndex) {
-      stage.classList.toggle("is-active", stageIndex === index);
-      stage.classList.toggle("is-complete", stageIndex < index);
+  function setExecStatus(state) {
+    execStatuses.forEach(function (status) {
+      status.classList.toggle("is-active", status.getAttribute("data-exec-state") === state);
     });
   }
 
@@ -217,8 +204,7 @@
     execRevealLines.forEach(function (line) {
       toggleExecLine(line, false);
     });
-    setExecStage(0);
-    setExecPill("detached");
+    setExecStatus("running");
   }
 
   function runExecStep(i) {
@@ -229,8 +215,7 @@
     }
 
     var step = execTimeline[i];
-    if (typeof step.stage === "number") setExecStage(step.stage);
-    if (step.pill) setExecPill(step.pill);
+    if (step.state) setExecStatus(step.state);
     if (step.hide) {
       step.hide.forEach(function (line) {
         toggleExecLine(line, false);
@@ -245,7 +230,7 @@
   }
 
   function startExecDemo() {
-    if (!execScene || !execPill) return;
+    if (!execScene || !execStatuses.length) return;
     resetExecScene();
     setTimeout(function () {
       runExecStep(0);

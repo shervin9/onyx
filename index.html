@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Onyx — Stable remote shell for unreliable networks</title>
-  <meta name="description" content="Stable remote shell for unreliable networks. QUIC when available. SSH when it's not. Built for AI workflows and DevOps.">
+  <title>Onyx — Resilient remote shell and execution layer</title>
+  <meta name="description" content="Resilient remote shell and execution layer for unreliable networks. QUIC when available. SSH when it’s not. Shells and commands that survive network instability.">
   <meta name="theme-color" content="#090909">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -28,8 +28,11 @@
   <main>
     <section class="hero">
       <div class="badge">Open source</div>
-      <h1>Stable remote shell for unreliable networks.</h1>
-      <p class="sub">QUIC when available. SSH when it’s not. Built for AI workflows and DevOps.</p>
+      <h1>Your command should not die because your connection did.</h1>
+      <p class="sub">
+        <span class="sub-line">QUIC when available. SSH when it’s not.</span>
+        <span class="sub-line">Run shells and commands that survive unreliable networks.</span>
+      </p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>
@@ -38,9 +41,9 @@
       <div class="hero-grid">
         <div class="hero-copy">
           <div class="mini-points" aria-label="Product highlights">
-            <span>QUIC first</span>
+            <span>Shell sessions</span>
+            <span>Resumable exec</span>
             <span>SSH fallback</span>
-            <span>AI-friendly</span>
           </div>
         </div>
         <div class="terminal-shell hero-terminal" aria-label="Onyx terminal preview">
@@ -53,7 +56,7 @@
           <div class="terminal-body">
             <div class="terminal-line terminal-line-static">
               <span class="prompt">$</span>
-              <span class="terminal-text">stable remote shell for unreliable networks</span>
+              <span class="terminal-text">shells and commands survive unstable networks</span>
             </div>
             <div class="terminal-scene" id="terminal-scene">
               <div class="terminal-line">
@@ -70,18 +73,19 @@
     <section class="trust-strip" aria-label="Product highlights">
       <ul>
         <li>Open source</li>
+        <li>QUIC first</li>
         <li>SSH fallback</li>
-        <li>Session persistence</li>
+        <li>tmux-backed shell</li>
         <li>Resumable exec</li>
         <li>Port forwarding</li>
-        <li>ProxyCommand</li>
+        <li>JSON output</li>
       </ul>
     </section>
 
     <section class="install" id="install">
       <div class="section-head">
         <h2>Install the local client</h2>
-        <p>Installs the <code>onyx</code> client on your workstation. The remote <code>onyx-server</code> is provisioned automatically over SSH on first connect.</p>
+        <p>Onyx installs locally. The remote server is provisioned automatically over SSH.</p>
       </div>
       <div class="install-grid">
         <article class="install-card">
@@ -107,10 +111,10 @@
       </article>
     </section>
 
-    <section class="flow">
+    <section class="flow shell-feature" id="shell">
       <div class="section-head">
-        <h2>Connection flow</h2>
-        <p>Bootstrap over SSH, prefer QUIC, and keep forwarding or proxy workflows on the same path.</p>
+        <h2>Resilient remote shell</h2>
+        <p>Keep your session alive through unstable networks. Onyx replaces a fragile SSH hop with tmux-backed shells, QUIC-first transport, and clean fallback when UDP disappears.</p>
       </div>
       <div class="flow-shell">
         <div class="flow-track" aria-hidden="true">
@@ -133,86 +137,66 @@
           <article class="workflow-card flow-panel is-active" data-flow-step="0">
             <span class="workflow-kicker">Bootstrap</span>
             <pre><code>onyx user@server</code></pre>
-            <p class="workflow-copy">First connect provisions <code>onyx-server</code> on the remote over SSH.</p>
+            <p class="workflow-copy">Provision <code>onyx-server</code> automatically over SSH on first connect.</p>
           </article>
           <article class="workflow-card flow-panel" data-flow-step="1">
             <span class="workflow-kicker">Transport</span>
             <pre><code>onyx user@server</code></pre>
-            <p class="workflow-copy">QUIC when available, with SSH fallback if UDP is blocked.</p>
+            <p class="workflow-copy">Prefer QUIC. Fall back to SSH when UDP is blocked.</p>
             <div class="flow-meta" id="flow-meta">[mode] QUIC</div>
           </article>
           <article class="workflow-card flow-panel" data-flow-step="2">
             <span class="workflow-kicker">Forward / proxy</span>
             <pre><code>onyx --forward 8888:8888 user@server</code></pre>
-            <p class="workflow-copy">Forward local ports over the same QUIC connection, or use <code>onyx proxy %h %p</code> as an SSH <code>ProxyCommand</code>.</p>
+            <p class="workflow-copy">Forward ports or route SSH tools through <code>onyx proxy %h %p</code>.</p>
           </article>
         </div>
+      </div>
+      <div class="shell-notes">
+        <article class="shell-note">
+          <strong>tmux-backed sessions</strong>
+          <span>Reconnect without reopening the shell or losing scrollback.</span>
+        </article>
+        <article class="shell-note">
+          <strong>Forwarding stays on path</strong>
+          <span>Carry local port forwarding through the same Onyx connection.</span>
+        </article>
+        <article class="shell-note">
+          <strong>Drop-in SSH transport</strong>
+          <span>Use <code>onyx proxy %h %p</code> for <code>ProxyCommand</code>-based tools.</span>
+        </article>
       </div>
     </section>
 
     <section class="exec-feature" id="exec">
-      <div class="section-head">
-        <h2>More than a shell.</h2>
-        <p class="exec-intro">
-          <span class="exec-intro-title">Run commands that survive the network.</span>
-          <span class="exec-intro-copy"><code>onyx exec</code> keeps remote work detachable, resumable, reattachable, and scriptable for deploys, training jobs, and agent workflows.</span>
-        </p>
+      <div class="section-head exec-head">
+        <h2>Run commands that survive the network.</h2>
+        <p><code>onyx exec</code> turns remote commands into resumable jobs. Start detached, reconnect cleanly, and reattach without restarting the work.</p>
       </div>
 
-      <div class="exec-grid">
-        <div class="exec-copy">
-          <ul class="exec-points">
-            <li><strong>Resumable.</strong> The server keeps the process alive while your client disappears.</li>
-            <li><strong>Reattachable.</strong> <code>onyx attach</code> catches up and streams output again without restarting the job.</li>
-            <li><strong>Detachable.</strong> <code>--detach</code> returns a job id, exits cleanly, and lets the work keep moving.</li>
-            <li><strong>Scriptable.</strong> <code>--json</code> emits clean NDJSON events for CI, automation, and agents.</li>
-          </ul>
-          <div class="exec-usage">
-            <div class="exec-command-hero">
-              <span class="exec-command-kicker">Primary flow</span>
-              <code>onyx exec gpu-box --detach -- python train.py</code>
-              <p>Launch detached. Rejoin later. The job keeps going.</p>
-            </div>
-            <div class="exec-command-list" aria-label="Additional onyx exec commands">
-              <div class="exec-command-item">
-                <span>Reattach</span>
-                <code>onyx attach gpu-box job_a1b2c3d4</code>
-              </div>
-              <div class="exec-command-item">
-                <span>Logs</span>
-                <code>onyx logs gpu-box job_a1b2c3d4</code>
-              </div>
-              <div class="exec-command-item">
-                <span>Deploy</span>
-                <code>onyx exec prod -- deploy.sh</code>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="terminal-shell exec-terminal" aria-label="onyx exec resumable job animation">
-          <div class="terminal-top">
+      <div class="terminal-shell exec-terminal" aria-label="onyx exec resumable job animation">
+        <div class="terminal-top exec-terminal-top">
+          <div class="exec-terminal-meta">
             <div class="terminal-dots">
               <span></span><span></span><span></span>
             </div>
             <span class="terminal-label">onyx exec</span>
-            <span class="exec-pill" id="exec-pill" data-state="detached">detached</span>
           </div>
-          <div class="terminal-body exec-scene" id="exec-scene">
-            <div class="exec-stagebar" aria-hidden="true">
-              <span class="exec-stage is-active" data-exec-stage="0">start</span>
-              <span class="exec-stage" data-exec-stage="1">stream</span>
-              <span class="exec-stage" data-exec-stage="2">reconnect</span>
-              <span class="exec-stage" data-exec-stage="3">reattach</span>
-              <span class="exec-stage" data-exec-stage="4">complete</span>
-            </div>
-            <div class="terminal-line exec-command-line">
+          <div class="exec-status-track" aria-label="Execution status">
+            <div class="exec-status" data-exec-state="running">running</div>
+            <div class="exec-status" data-exec-state="reconnecting">reconnecting</div>
+            <div class="exec-status" data-exec-state="reattached">reattached</div>
+            <div class="exec-status" data-exec-state="completed">completed</div>
+          </div>
+        </div>
+        <div class="terminal-body exec-scene" id="exec-scene">
+            <div class="terminal-line exec-reveal" id="exec-command-line">
               <span class="prompt">$</span>
               <span class="terminal-text">onyx exec gpu-box --detach -- python train.py</span>
             </div>
             <div class="terminal-line terminal-line-muted exec-reveal" id="exec-jobid-line">
               <span class="exec-prefix">[job]</span>
-              <span class="terminal-text">job_a1b2c3d4e5f60718  detached  ring buffer live</span>
+              <span class="terminal-text">job_a1b2c3d4  detached  ring buffer live</span>
             </div>
             <div class="terminal-line exec-reveal" id="exec-line-1">
               <span class="exec-prefix">train</span>
@@ -228,13 +212,11 @@
             </div>
             <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-status-line">
               <span class="exec-prefix">[net]</span>
-              <span class="exec-line-pill" data-state="reconnecting">reconnecting…</span>
-              <span class="terminal-text">link dropped, resuming stream</span>
+              <span class="terminal-text">reconnecting…</span>
             </div>
             <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-reattach-line">
               <span class="exec-prefix">[job]</span>
-              <span class="exec-line-pill" data-state="reattached">reattached</span>
-              <span class="terminal-text">seq 4  output caught up</span>
+              <span class="terminal-text">reattached  seq 4</span>
             </div>
             <div class="terminal-line exec-reveal" id="exec-line-4">
               <span class="exec-prefix">train</span>
@@ -246,79 +228,84 @@
             </div>
             <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-complete-line">
               <span class="exec-prefix">[job]</span>
-              <span class="exec-line-pill" data-state="completed">completed</span>
-              <span class="terminal-text">best_loss=0.361  artifacts synced</span>
+              <span class="terminal-text">completed  artifacts synced</span>
             </div>
-          </div>
         </div>
+      </div>
+
+      <div class="exec-command-grid" aria-label="Onyx exec command examples">
+        <article class="exec-command-card">
+          <span class="exec-command-label">Run</span>
+          <code>onyx exec gpu-box --detach -- python train.py</code>
+        </article>
+        <article class="exec-command-card">
+          <span class="exec-command-label">Reattach</span>
+          <code>onyx attach gpu-box job_a1b2c3d4</code>
+        </article>
+        <article class="exec-command-card">
+          <span class="exec-command-label">Logs</span>
+          <code>onyx logs gpu-box job_a1b2c3d4</code>
+        </article>
       </div>
     </section>
 
     <section class="features">
       <div class="section-head">
-        <h2>Built for real remote work</h2>
+        <h2>Core capabilities</h2>
+        <p>Built around shells, jobs, and transport that hold up when the link does not.</p>
       </div>
       <div class="feature-grid">
         <article class="feature-card">
           <strong>QUIC + SSH fallback</strong>
-          <span>Prefer QUIC. Fall back cleanly when the network says otherwise.</span>
+          <span>Prefer QUIC for the fast path, then fall back to SSH when UDP is blocked.</span>
         </article>
         <article class="feature-card">
-          <strong>Session persistence</strong>
-          <span>tmux-backed sessions with smoother reconnect behavior and scrollback.</span>
+          <strong>Session persistence (tmux-backed)</strong>
+          <span>Keep interactive shells reattachable with scrollback instead of starting from scratch.</span>
+        </article>
+        <article class="feature-card">
+          <strong>Resumable exec</strong>
+          <span><code>onyx exec</code> keeps commands running after client disconnects and lets you attach later.</span>
         </article>
         <article class="feature-card">
           <strong>Port forwarding</strong>
-          <span>Forward local ports to remote services through the same Onyx connection.</span>
+          <span>Forward local ports to remote services through the same Onyx transport path.</span>
         </article>
         <article class="feature-card">
-          <strong>SSH ProxyCommand support</strong>
-          <span>Use Onyx as a transport layer for SSH-based tools and existing configs.</span>
+          <strong>ProxyCommand</strong>
+          <span>Use <code>onyx proxy %h %p</code> as a drop-in transport for SSH-based tools.</span>
         </article>
         <article class="feature-card">
-          <strong>Resumable remote exec</strong>
-          <span><code>onyx exec</code> runs commands as jobs that survive client disconnects. Reattach, tail, or capture JSON events later.</span>
-        </article>
-        <article class="feature-card">
-          <strong>AI-friendly workflows</strong>
-          <span>Structured <code>--json</code> output and long-lived job ids fit cleanly into agent loops and CI pipelines.</span>
-        </article>
-      </div>
-    </section>
-
-    <section class="how">
-      <div class="section-head">
-        <h2>How it works</h2>
-      </div>
-      <div class="how-grid">
-        <article class="how-step">
-          <span>01</span>
-          <strong>Bootstrap over SSH</strong>
-          <p>Upload and start the remote server automatically.</p>
-        </article>
-        <article class="how-step">
-          <span>02</span>
-          <strong>Connect over QUIC</strong>
-          <p>Use the faster path when UDP is available.</p>
-        </article>
-        <article class="how-step">
-          <span>03</span>
-          <strong>Fall back automatically</strong>
-          <p>Switch to SSH when UDP is blocked or unavailable.</p>
+          <strong>JSON output (<code>--json</code>)</strong>
+          <span>Emit structured NDJSON events for CI pipelines, agents, and log consumers.</span>
         </article>
       </div>
     </section>
 
     <section class="oss">
-      <div class="section-head">
-        <h2>Open source</h2>
+      <div class="section-head section-head-centered">
+        <h2>Open source. No lock-in.</h2>
+        <p>Self-host it, inspect it, and keep the protocol simple.</p>
       </div>
-      <p>Inspect the code, self-host it, and contribute on GitHub.</p>
+      <div class="oss-grid">
+        <article class="oss-item">
+          <strong>Self-hostable</strong>
+          <span>Run the client and server yourself without a managed control plane.</span>
+        </article>
+        <article class="oss-item">
+          <strong>Inspectable</strong>
+          <span>Audit the code, the trust model, and the transport behavior directly.</span>
+        </article>
+        <article class="oss-item">
+          <strong>Simple protocol</strong>
+          <span>Keep the transport story understandable instead of hiding it behind platform lock-in.</span>
+        </article>
+      </div>
       <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
     </section>
 
     <section class="final-cta">
-      <p>Install locally. Connect when the network cooperates. Fall back when it doesn’t.</p>
+      <p>Install locally. Keep shells and commands alive when the network slips.</p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>

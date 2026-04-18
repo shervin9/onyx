@@ -120,6 +120,12 @@ section {
   margin-bottom: 1.5rem;
 }
 
+.section-head-centered {
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+
 .hero {
   position: relative;
   padding-top: 8.75rem;
@@ -154,7 +160,7 @@ section {
 }
 
 h1 {
-  max-width: 12ch;
+  max-width: 15ch;
   margin: 0 auto 1.1rem;
   font-size: clamp(2.6rem, 7vw, 4.35rem);
   line-height: 1.02;
@@ -169,6 +175,10 @@ h1 {
   font-size: 1.05rem;
   line-height: 1.72;
   color: var(--dim);
+}
+
+.sub-line {
+  display: block;
 }
 
 .actions {
@@ -350,6 +360,7 @@ h1 {
 .trust-strip,
 .install,
 .flow,
+.exec-feature,
 .features,
 .how,
 .oss,
@@ -382,6 +393,7 @@ h1 {
 
 .install,
 .flow,
+.exec-feature,
 .features,
 .how,
 .oss,
@@ -633,6 +645,50 @@ button[id^="copy-"]:hover {
   font-size: 0.8rem;
 }
 
+.shell-notes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.1rem;
+}
+
+.shell-note,
+.exec-command-card,
+.oss-item {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.016)),
+    rgba(255, 255, 255, 0.014);
+}
+
+.shell-note {
+  padding: 1.1rem 1.15rem;
+}
+
+.shell-note strong,
+.oss-item strong {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.96rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.shell-note span,
+.oss-item span {
+  color: var(--dim);
+  font-size: 0.87rem;
+  line-height: 1.58;
+}
+
+.shell-note code,
+.oss-item code {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+}
+
 /* ─────── onyx exec feature block ─────── */
 
 .exec-feature {
@@ -640,266 +696,105 @@ button[id^="copy-"]:hover {
 }
 
 .exec-feature .section-head {
-  margin-bottom: 2.35rem;
+  margin-bottom: 2rem;
 }
 
-.exec-intro {
-  max-width: 46rem;
-}
-
-.exec-intro-title,
-.exec-intro-copy {
-  display: block;
-}
-
-.exec-intro-title {
-  margin-bottom: 0.5rem;
-  color: var(--text);
-  font-size: 1.02rem;
-  font-weight: 500;
-  letter-spacing: -0.02em;
-}
-
-.exec-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
-  gap: 2.25rem;
-  align-items: start;
-}
-
-.exec-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 1.6rem;
-}
-
-.exec-points {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-.exec-points li {
-  position: relative;
-  padding: 0.95rem 1rem 1rem 1.15rem;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0.012)),
-    rgba(255, 255, 255, 0.01);
-  color: var(--dim);
-  font-size: 0.91rem;
-  line-height: 1.6;
-}
-
-.exec-points li::before {
-  content: "";
-  position: absolute;
-  left: 0.78rem;
-  top: 1.34rem;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: rgba(214, 182, 92, 0.8);
-}
-
-.exec-points strong {
-  color: var(--text);
-  font-weight: 600;
-  letter-spacing: -0.005em;
-}
-
-.exec-usage {
-  display: flex;
-  flex-direction: column;
-  gap: 0.9rem;
-  padding: 1.05rem;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.012)),
-    rgba(255, 255, 255, 0.01);
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  border-radius: 18px;
-}
-
-.exec-command-hero {
-  padding: 1.05rem 1.05rem 1.1rem;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(110, 140, 255, 0.06), rgba(110, 140, 255, 0.02)),
-    rgba(255, 255, 255, 0.014);
-}
-
-.exec-command-kicker,
-.exec-command-item span {
-  display: block;
-  margin-bottom: 0.42rem;
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.exec-command-hero code {
-  display: block;
-  font-family: var(--mono);
-  font-size: 0.96rem;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  line-height: 1.75;
-  color: #eef0f6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.exec-command-hero p {
-  margin: 0.5rem 0 0;
-  color: var(--dim);
-  font-size: 0.85rem;
-  line-height: 1.55;
-}
-
-.exec-command-list {
-  display: grid;
-  gap: 0.7rem;
-}
-
-.exec-command-item {
-  padding: 0.82rem 0.9rem 0.88rem;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.012);
-}
-
-.exec-command-item code {
-  display: block;
-  font-family: var(--mono);
-  font-size: 0.82rem;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  line-height: 1.65;
-  color: #d4d7de;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.exec-usage code {
-  font-family: var(--mono);
+.exec-head {
+  max-width: 42rem;
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
 }
 
 .exec-terminal {
-  min-height: 428px;
-}
-
-.exec-terminal .terminal-top {
   position: relative;
-  padding-right: 5.8rem;
+  width: min(100%, 54rem);
+  min-height: 470px;
 }
 
-.exec-pill {
+.exec-terminal::after {
+  content: "";
   position: absolute;
-  right: 0.9rem;
-  top: 50%;
-  transform: translateY(-50%);
-  font-family: var(--mono);
-  font-size: 0.68rem;
-  font-weight: 500;
-  letter-spacing: 0.03em;
-  padding: 0.18rem 0.55rem;
+  inset: auto 10% -18% 10%;
+  height: 8rem;
+  background: radial-gradient(circle, rgba(110, 140, 255, 0.12), transparent 72%);
+  filter: blur(28px);
+  pointer-events: none;
+}
+
+.exec-terminal-top {
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.exec-terminal-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.exec-status-track {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  margin-left: auto;
+}
+
+.exec-status {
+  padding: 0.2rem 0.58rem;
   border-radius: 999px;
-  border: 1px solid rgba(150, 160, 200, 0.32);
-  background: rgba(150, 160, 200, 0.06);
-  color: #aeb6d2;
-  transition: color 240ms ease, background 240ms ease, border-color 240ms ease, opacity 240ms ease;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.018);
+  color: #767a87;
+  font-family: var(--mono);
+  font-size: 0.67rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  transition: color 220ms ease, border-color 220ms ease, background 220ms ease, box-shadow 220ms ease;
 }
 
-.exec-pill[data-state="detached"] {
-  border-color: rgba(150, 160, 200, 0.32);
-  background: rgba(150, 160, 200, 0.06);
-  color: #aeb6d2;
+.exec-status.is-active {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: 0 0 0 0.35rem rgba(255, 255, 255, 0.04);
 }
 
-.exec-pill[data-state="running"] {
-  border-color: rgba(100, 200, 160, 0.35);
-  background: rgba(100, 200, 160, 0.07);
-  color: #6fcf9f;
+.exec-status.is-active[data-exec-state="running"] {
+  color: #87dbb2;
+  border-color: rgba(100, 200, 160, 0.34);
+  background: rgba(100, 200, 160, 0.08);
+  box-shadow: 0 0 0 0.35rem rgba(100, 200, 160, 0.09);
 }
 
-.exec-pill[data-state="reconnecting"] {
-  border-color: rgba(214, 150, 92, 0.44);
-  background: rgba(214, 150, 92, 0.08);
-  color: #e3ad78;
-  animation: execPillPulse 1.7s ease-in-out infinite;
+.exec-status.is-active[data-exec-state="reconnecting"] {
+  color: #e2ac77;
+  border-color: rgba(214, 150, 92, 0.36);
+  background: rgba(214, 150, 92, 0.09);
+  box-shadow: 0 0 0 0.35rem rgba(214, 150, 92, 0.08);
 }
 
-.exec-pill[data-state="reattached"] {
-  border-color: rgba(176, 194, 210, 0.36);
+.exec-status.is-active[data-exec-state="reattached"] {
+  color: #c8d3e0;
+  border-color: rgba(176, 194, 210, 0.34);
   background: rgba(176, 194, 210, 0.08);
-  color: #c5d0de;
+  box-shadow: 0 0 0 0.35rem rgba(176, 194, 210, 0.07);
 }
 
-.exec-pill[data-state="completed"] {
-  border-color: rgba(100, 200, 160, 0.4);
+.exec-status.is-active[data-exec-state="completed"] {
+  color: #87dbb2;
+  border-color: rgba(100, 200, 160, 0.36);
   background: rgba(100, 200, 160, 0.09);
-  color: #6fcf9f;
-}
-
-@keyframes execPillPulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.68; }
+  box-shadow: 0 0 0 0.35rem rgba(100, 200, 160, 0.08);
 }
 
 .exec-scene {
-  min-height: 100%;
-}
-
-.exec-stagebar {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 0.45rem;
-  margin-bottom: 1rem;
-  padding-bottom: 0.95rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-}
-
-.exec-stage {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 1.85rem;
-  padding: 0.36rem 0.42rem;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.016);
-  color: #7f8390;
-  font-size: 0.67rem;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  transition: color 260ms ease, border-color 260ms ease, background 260ms ease, transform 260ms ease;
-}
-
-.exec-stage.is-active {
-  transform: translateY(-1px);
-  color: #d8dbe4;
-  border-color: rgba(110, 140, 255, 0.24);
-  background: rgba(110, 140, 255, 0.08);
-}
-
-.exec-stage.is-complete {
-  color: #a6adbf;
-  border-color: rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.03);
-}
-
-.exec-command-line {
-  opacity: 1;
-  transform: none;
-  filter: none;
+  min-height: 18.5rem;
+  padding-top: 1.35rem;
+  padding-bottom: 1.45rem;
 }
 
 .exec-prefix {
@@ -941,7 +836,7 @@ button[id^="copy-"]:hover {
   opacity: 1;
   max-height: 4.8rem;
   min-height: 1.45rem;
-  margin-top: 0.3rem;
+  margin-top: 0.32rem;
   transform: translateY(0);
   filter: blur(0);
 }
@@ -952,40 +847,7 @@ button[id^="copy-"]:hover {
 }
 
 .exec-event-line {
-  flex-wrap: wrap;
-  gap: 0.45rem;
-  align-items: center;
-}
-
-.exec-line-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.16rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  font-family: var(--mono);
-  font-size: 0.67rem;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-}
-
-.exec-line-pill[data-state="reconnecting"] {
-  border-color: rgba(214, 150, 92, 0.36);
-  background: rgba(214, 150, 92, 0.08);
-  color: #e3ad78;
-}
-
-.exec-line-pill[data-state="reattached"] {
-  border-color: rgba(176, 194, 210, 0.34);
-  background: rgba(176, 194, 210, 0.08);
-  color: #c5d0de;
-}
-
-.exec-line-pill[data-state="completed"] {
-  border-color: rgba(100, 200, 160, 0.36);
-  background: rgba(100, 200, 160, 0.09);
-  color: #6fcf9f;
+  color: var(--dim);
 }
 
 #exec-status-line {
@@ -998,6 +860,40 @@ button[id^="copy-"]:hover {
 
 #exec-complete-line {
   color: #86d6ad;
+}
+
+.exec-command-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1.3rem;
+}
+
+.exec-command-card {
+  padding: 1rem 1.05rem;
+  text-align: left;
+}
+
+.exec-command-label {
+  display: block;
+  margin-bottom: 0.48rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.exec-command-card code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.84rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.68;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #e0e2ea;
 }
 
 .feature-grid {
@@ -1063,6 +959,18 @@ button[id^="copy-"]:hover {
   font-size: 1rem;
 }
 
+.oss-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.oss-item {
+  padding: 1.15rem 1.2rem;
+  text-align: center;
+}
+
 .final-cta {
   padding-bottom: 6rem;
 }
@@ -1100,14 +1008,22 @@ footer a:hover { color: var(--dim); }
 @media (max-width: 900px) {
   .install-grid,
   .flow-panels,
+  .shell-notes,
   .feature-grid,
   .how-grid,
-  .exec-grid {
+  .exec-command-grid,
+  .oss-grid {
     grid-template-columns: 1fr;
   }
 
   .exec-terminal {
-    min-height: 396px;
+    min-height: 424px;
+  }
+
+  .exec-status-track {
+    width: 100%;
+    justify-content: flex-start;
+    margin-left: 0;
   }
 
   .compact-five .feature-card:last-child {
@@ -1178,7 +1094,7 @@ footer a:hover { color: var(--dim); }
   }
 
   h1 {
-    max-width: 11ch;
+    max-width: 13ch;
     font-size: clamp(2.2rem, 11vw, 3.2rem);
   }
 
@@ -1221,64 +1137,29 @@ footer a:hover { color: var(--dim); }
     gap: 0.45rem;
   }
 
-  .exec-intro-title {
-    font-size: 0.98rem;
-  }
-
-  .exec-points li {
-    padding: 0.88rem 0.92rem 0.92rem 1.05rem;
-  }
-
-  .exec-points li::before {
-    left: 0.72rem;
-  }
-
-  .exec-usage {
-    padding: 0.9rem;
-    border-radius: 16px;
-  }
-
-  .exec-command-hero {
-    padding: 0.92rem 0.92rem 0.98rem;
-  }
-
-  .exec-command-hero code {
-    font-size: 0.88rem;
-  }
-
-  .exec-command-item {
-    padding: 0.72rem 0.78rem 0.8rem;
-  }
-
-  .exec-command-item code {
-    font-size: 0.78rem;
-  }
-
   .exec-terminal {
-    min-height: 382px;
+    min-height: 388px;
   }
 
-  .exec-stagebar {
-    gap: 0.32rem;
-    margin-bottom: 0.9rem;
-    padding-bottom: 0.85rem;
+  .exec-terminal-top {
+    align-items: flex-start;
   }
 
-  .exec-stage {
-    min-height: 1.72rem;
-    padding: 0.3rem 0.18rem;
-    font-size: 0.55rem;
-    letter-spacing: 0.06em;
-  }
-
-  .exec-pill {
-    right: 0.82rem;
+  .exec-status {
     font-size: 0.62rem;
-    padding: 0.16rem 0.48rem;
   }
 
-  .exec-line-pill {
-    font-size: 0.62rem;
+  .exec-command-card {
+    padding: 0.92rem 0.95rem;
+  }
+
+  .exec-command-card code {
+    font-size: 0.79rem;
+  }
+
+  .shell-note,
+  .oss-item {
+    padding: 1rem;
   }
 
   .code-wrap {
@@ -1300,6 +1181,7 @@ footer a:hover { color: var(--dim); }
 
   .install,
   .flow,
+  .exec-feature,
   .features,
   .how,
   .oss,
