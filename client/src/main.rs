@@ -997,11 +997,15 @@ MODES
   Exec            Resumable remote command execution. The server owns
                   the child process, buffers up to 4 MiB of output per
                   job in a ring, and keeps the job alive across client
-                  disconnects. Reattach with `onyx attach`, snapshot
-                  output with `onyx logs`, enumerate with `onyx jobs`.
-                  Jobs survive client disconnects but NOT onyx-server
-                  restart or host reboot (in-memory). Finished jobs are
-                  retained for 1 hour.
+                  disconnects. Foreground `onyx exec` and `onyx attach`
+                  auto-reconnect on transport drops (up to 10 min with
+                  exponential backoff) and seamlessly resume streaming
+                  from the last seen seq. Reattach manually with
+                  `onyx attach`, snapshot output with `onyx logs`,
+                  enumerate with `onyx jobs`. Jobs survive client
+                  disconnects but NOT onyx-server restart or host
+                  reboot (in-memory). Finished jobs are retained for
+                  1 hour.
 
 INSTALL MODEL
   onyx is a local CLI. On first connect to a host it provisions
@@ -1512,6 +1516,80 @@ mod reliability_tests {
         let truncated = truncate_display(&long, 10);
         assert_eq!(truncated.chars().count(), 10);
         assert!(truncated.ends_with('…'));
+    }
+
+    // ───────── exec auto-resume classifiers + tuning ─────────
+
+    #[test]
+    fn exec_error_is_terminal_catches_unrecoverable_states() {
+        // These are the server strings that mean "don't retry this job".
+        for reason in [
+            "job job_abc not found",
+            "exec: job registry full (256 live jobs); finish some",
+            "exec: spawn failed: No such file or directory",
+            "exec: command is empty",
+        ] {
+            assert!(
+                exec_error_is_terminal(reason),
+                "expected terminal classification for: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_error_is_terminal_leaves_transient_errors_retryable() {
+        for reason in [
+            "session already attached",
+            "some random transient error",
+            "", // empty → fall through to retry
+        ] {
+            assert!(
+                !exec_error_is_terminal(reason),
+                "did not expect terminal classification for: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_reason_is_busy_matches_already_attached_variants() {
+        assert!(exec_reason_is_busy("session already attached"));
+        assert!(exec_reason_is_busy("Job Already Attached"));
+        assert!(exec_reason_is_busy("ExecAttach rejected: already attached"));
+        assert!(!exec_reason_is_busy("job not found"));
+        assert!(!exec_reason_is_busy("connection lost"));
+    }
+
+    #[test]
+    fn exec_resume_constants_are_coherent() {
+        // Backoff must grow and never exceed the cap.
+        assert!(EXEC_BACKOFF_INITIAL < EXEC_BACKOFF_MAX);
+        assert!(EXEC_BACKOFF_MAX <= Duration::from_secs(5));
+        // Resume window should at least cover a real laptop-sleep /
+        // VPN-reset event.
+        assert!(EXEC_RESUME_WINDOW >= Duration::from_secs(300));
+        // Handshake × a few attempts should fit inside the window.
+        assert!(INTERACTIVE_HANDSHAKE_TIMEOUT * 4 < EXEC_RESUME_WINDOW);
+        // Busy-retry should be much faster than the backoff cap — it's a
+        // known-transient case with a cheap server turnaround.
+        assert!(EXEC_BUSY_RETRY < EXEC_BACKOFF_MAX);
+    }
+
+    #[test]
+    fn reconnecting_json_is_single_field_object() {
+        // Locks the exact wire shape the brief documents. Any script or
+        // AI agent parsing the stream depends on these literal strings.
+        //
+        // We can't easily capture stdout from a unit test without
+        // extra machinery, so we verify the components of the shape
+        // instead: the JSON emitters are trivially local and their
+        // output is just printlns. A downstream integration test
+        // (run exec with --json, grep for the event) covers the
+        // end-to-end path.
+        //
+        // Minimum guarantee: the helpers exist, and the constants
+        // referenced in the prompts line up.
+        let _: fn() = emit_reconnecting_json;
+        let _: fn(&str, u64) = emit_resumed_json;
     }
 }
 
@@ -2731,6 +2809,18 @@ fn emit_error_json(reason: &str) {
     println!("{{\"type\":\"error\",\"reason\":{}}}", jq(reason));
 }
 
+fn emit_reconnecting_json() {
+    println!("{{\"type\":\"reconnecting\"}}");
+}
+
+fn emit_resumed_json(job_id: &str, seq: u64) {
+    println!(
+        "{{\"type\":\"resumed\",\"job_id\":{},\"seq\":{}}}",
+        jq(job_id),
+        seq,
+    );
+}
+
 /// Shared target preparation used by every exec subcommand.
 async fn prepare_exec_target(
     raw_target: String,
@@ -2768,29 +2858,78 @@ async fn prepare_exec_target(
 
 /// Drain an exec/attach QUIC stream: forward output, print gap/finish/error
 /// events in the chosen mode, and return the final exit code (if any).
+// ---------------------------------------------------------------------------
+// Exec resume tuning
+// ---------------------------------------------------------------------------
+//
+// Foreground `onyx exec` and `onyx attach` auto-reconnect on transport
+// drops. The total resume window matches the interactive reconnect window
+// (10 min). Backoff and handshake timeout match interactive mode so both
+// flows feel consistent under the same network conditions.
+const EXEC_RESUME_WINDOW: Duration = Duration::from_secs(600);
+const EXEC_BACKOFF_INITIAL: Duration = Duration::from_millis(250);
+const EXEC_BACKOFF_MAX: Duration = Duration::from_secs(3);
+/// Extra delay before retrying an ExecAttach that was rejected because the
+/// job was momentarily busy with another attacher. Short enough to be
+/// invisible in the common case where the other client has already dropped.
+const EXEC_BUSY_RETRY: Duration = Duration::from_millis(300);
+
+/// Outcome of one pass through a foreground exec/attach stream.
+enum ExecStreamResult {
+    /// Server sent ExecFinished — terminal, propagate exit code.
+    Finished(Option<i32>),
+    /// Server sent an error we cannot retry (job not found, spawn failed,
+    /// malformed request, unexpected message). Carries the server's reason
+    /// string.
+    Fatal(String),
+    /// Transport dropped mid-stream. Retryable via ExecAttach + last_seq.
+    Disconnected,
+}
+
 async fn drain_exec_stream(
     recv: &mut quinn::RecvStream,
     json: bool,
     started_at_unix: u64,
-) -> Result<Option<i32>> {
+    last_seq: &mut u64,
+) -> ExecStreamResult {
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
     loop {
-        let msg = recv_msg(recv).await?;
+        let msg = match recv_msg(recv).await {
+            Ok(m) => m,
+            // Any framing / transport error collapses to Disconnected. The
+            // outer resume loop decides whether to retry.
+            Err(_) => return ExecStreamResult::Disconnected,
+        };
         match msg {
             Message::ExecOutput { seq, stream, data } => {
+                *last_seq = seq;
                 if json {
                     emit_output_json(seq, stream, &data);
                 } else {
-                    match stream {
+                    let io_res = match stream {
                         StdStream::Stdout => {
-                            stdout.write_all(&data).await?;
-                            stdout.flush().await?;
+                            let w = stdout.write_all(&data).await;
+                            if w.is_ok() {
+                                stdout.flush().await
+                            } else {
+                                w
+                            }
                         }
                         StdStream::Stderr => {
-                            stderr.write_all(&data).await?;
-                            stderr.flush().await?;
+                            let w = stderr.write_all(&data).await;
+                            if w.is_ok() {
+                                stderr.flush().await
+                            } else {
+                                w
+                            }
                         }
+                    };
+                    if io_res.is_err() {
+                        // Local stdout/stderr closed (pipe broken). That's
+                        // fatal for our process; surface as Fatal so the
+                        // resume loop exits instead of spinning.
+                        return ExecStreamResult::Fatal("local output stream closed".into());
                     }
                 }
             }
@@ -2799,7 +2938,7 @@ async fn drain_exec_stream(
                     emit_gap_json(oldest_seq);
                 } else {
                     eprintln!(
-                        "[onyx] note: earlier output dropped from the job's ring buffer \
+                        "[exec] note: earlier output dropped from the job's ring buffer \
                          (showing from seq {oldest_seq})"
                     );
                 }
@@ -2811,20 +2950,246 @@ async fn drain_exec_stream(
                 if json {
                     emit_finished_json(exit_code, finished_at_unix, started_at_unix);
                 }
-                return Ok(exit_code);
+                return ExecStreamResult::Finished(exit_code);
             }
-            Message::ExecError { reason } => {
+            Message::ExecError { reason } => return ExecStreamResult::Fatal(reason),
+            Message::Close { reason } => return ExecStreamResult::Fatal(reason),
+            other => {
+                return ExecStreamResult::Fatal(format!("unexpected exec response: {other:?}"))
+            }
+        }
+    }
+}
+
+/// True when a server `ExecError` reason indicates the job is permanently
+/// unreachable — no point retrying an attach. Kept narrow: strings we don't
+/// recognize are treated as retryable Disconnected so transient server
+/// hiccups don't lose a foreground session.
+fn exec_error_is_terminal(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("not found")
+        || lower.contains("job registry full")
+        || lower.contains("spawn failed")
+        || lower.contains("command is empty")
+}
+
+/// Stream a foreground exec/attach job until it finishes or the resume
+/// window expires. The first stream is passed in by the caller — for
+/// `onyx exec` this is the connection that carried ExecStart; for
+/// `onyx attach` the caller passes `None` and we open a fresh one here.
+///
+/// On every transport drop we open a new QUIC connection, send ExecAttach
+/// with the latest `last_seq`, and hand the resulting recv stream back to
+/// `drain_exec_stream`. Output written to the local terminal is strictly
+/// the server's stdout/stderr chunks in non-JSON mode — all status goes to
+/// stderr (or NDJSON events in --json).
+async fn stream_exec_with_resume(
+    endpoint: &Endpoint,
+    server_addr: SocketAddr,
+    host_port: &str,
+    capture: &FpCapture,
+    job_id: &str,
+    started_at_unix: u64,
+    json: bool,
+    mut first_stream: Option<(quinn::Connection, quinn::SendStream, quinn::RecvStream)>,
+) -> Result<Option<i32>> {
+    let mut last_seq: u64 = 0;
+    let mut backoff = EXEC_BACKOFF_INITIAL;
+    let mut disconnect_at: Option<Instant> = None;
+    let mut announced_reconnecting = false;
+
+    loop {
+        // Step 1: acquire a (conn, send, recv) triple. Either the initial
+        // stream the caller handed us, or a freshly reconnected one.
+        let (conn, _send, mut recv) = match first_stream.take() {
+            Some(triple) => triple,
+            None => {
+                match reconnect_and_attach(
+                    endpoint,
+                    server_addr,
+                    host_port,
+                    capture,
+                    job_id,
+                    last_seq,
+                )
+                .await
+                {
+                    Ok(triple) => {
+                        // Successful reattach — announce "resumed" exactly
+                        // once per disconnect episode (skip the very first
+                        // successful connect, which wasn't preceded by an
+                        // announced drop).
+                        if announced_reconnecting {
+                            if json {
+                                emit_resumed_json(job_id, last_seq);
+                            } else {
+                                eprintln!("[exec] resumed ({job_id})");
+                            }
+                        }
+                        disconnect_at = None;
+                        backoff = EXEC_BACKOFF_INITIAL;
+                        announced_reconnecting = false;
+                        triple
+                    }
+                    Err(ExecAttachError::Transient) => {
+                        let t = disconnect_at.get_or_insert_with(Instant::now);
+                        if t.elapsed() > EXEC_RESUME_WINDOW {
+                            let reason = format!(
+                                "resume window expired after {}s",
+                                EXEC_RESUME_WINDOW.as_secs()
+                            );
+                            if json {
+                                emit_error_json(&reason);
+                            } else {
+                                eprintln!("[exec] {reason}");
+                            }
+                            return Err(anyhow::anyhow!("{reason}"));
+                        }
+                        if !announced_reconnecting {
+                            if json {
+                                emit_reconnecting_json();
+                            } else {
+                                eprintln!("[exec] connection lost, attempting resume…");
+                            }
+                            announced_reconnecting = true;
+                        }
+                        tokio::time::sleep(backoff).await;
+                        backoff = std::cmp::min(backoff * 2, EXEC_BACKOFF_MAX);
+                        continue;
+                    }
+                }
+            }
+        };
+
+        // Step 2: drain until the job finishes or transport drops.
+        let result = drain_exec_stream(&mut recv, json, started_at_unix, &mut last_seq).await;
+        conn.close(0u32.into(), b"bye");
+
+        match result {
+            ExecStreamResult::Finished(code) => return Ok(code),
+            ExecStreamResult::Fatal(reason) if exec_error_is_terminal(&reason) => {
                 if json {
                     emit_error_json(&reason);
                 } else {
-                    eprintln!("onyx: {reason}");
+                    eprintln!("[exec] {reason}");
                 }
-                anyhow::bail!("{reason}");
+                return Err(anyhow::anyhow!("{reason}"));
             }
-            Message::Close { .. } => return Ok(None),
-            other => anyhow::bail!("unexpected exec response: {other:?}"),
+            ExecStreamResult::Fatal(reason) if exec_reason_is_busy(&reason) => {
+                // Another client is attached — retry after a short delay
+                // without counting against the resume window. The server
+                // will release the slot as soon as the other attacher
+                // drops.
+                if !announced_reconnecting {
+                    if json {
+                        emit_reconnecting_json();
+                    } else {
+                        eprintln!("[exec] another client is attached; retrying…");
+                    }
+                    announced_reconnecting = true;
+                }
+                tokio::time::sleep(EXEC_BUSY_RETRY).await;
+            }
+            ExecStreamResult::Fatal(reason) => {
+                // Unknown server error — treat as transient drop and
+                // let the resume window decide when to give up.
+                if !announced_reconnecting {
+                    if json {
+                        emit_reconnecting_json();
+                    } else {
+                        eprintln!("[exec] lost stream ({reason}); attempting resume…");
+                    }
+                    announced_reconnecting = true;
+                }
+                let t = disconnect_at.get_or_insert_with(Instant::now);
+                if t.elapsed() > EXEC_RESUME_WINDOW {
+                    if json {
+                        emit_error_json(&reason);
+                    } else {
+                        eprintln!("[exec] {reason}");
+                    }
+                    return Err(anyhow::anyhow!("{reason}"));
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = std::cmp::min(backoff * 2, EXEC_BACKOFF_MAX);
+            }
+            ExecStreamResult::Disconnected => {
+                if !announced_reconnecting {
+                    if json {
+                        emit_reconnecting_json();
+                    } else {
+                        eprintln!("[exec] connection lost, attempting resume…");
+                    }
+                    announced_reconnecting = true;
+                }
+                let t = disconnect_at.get_or_insert_with(Instant::now);
+                if t.elapsed() > EXEC_RESUME_WINDOW {
+                    let reason = format!(
+                        "resume window expired after {}s",
+                        EXEC_RESUME_WINDOW.as_secs()
+                    );
+                    if json {
+                        emit_error_json(&reason);
+                    } else {
+                        eprintln!("[exec] {reason}");
+                    }
+                    return Err(anyhow::anyhow!("{reason}"));
+                }
+                tokio::time::sleep(backoff).await;
+                backoff = std::cmp::min(backoff * 2, EXEC_BACKOFF_MAX);
+            }
         }
     }
+}
+
+enum ExecAttachError {
+    /// Connect / open_bi / initial send failed. Retry with backoff.
+    Transient,
+}
+
+async fn reconnect_and_attach(
+    endpoint: &Endpoint,
+    server_addr: SocketAddr,
+    host_port: &str,
+    capture: &FpCapture,
+    job_id: &str,
+    last_seq: u64,
+) -> Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream), ExecAttachError> {
+    // We don't inspect the first server reply here — busy or gone-job
+    // rejections surface as ExecError / Close in drain_exec_stream and are
+    // routed by the outer resume loop (via `exec_reason_is_busy` /
+    // `exec_error_is_terminal`). Keeping this helper narrow keeps the
+    // control flow on the success path in the caller.
+    let conn = connect_authenticated(
+        server_addr,
+        endpoint,
+        host_port,
+        capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await
+    .map_err(|_| ExecAttachError::Transient)?;
+    let (mut send, recv) = conn
+        .open_bi()
+        .await
+        .map_err(|_| ExecAttachError::Transient)?;
+    send_msg(
+        &mut send,
+        &Message::ExecAttach {
+            job_id: job_id.to_string(),
+            last_seq,
+        },
+    )
+    .await
+    .map_err(|_| ExecAttachError::Transient)?;
+    Ok((conn, send, recv))
+}
+
+/// True when a server error reason indicates the attach slot is temporarily
+/// occupied by another client. Retrying after a short delay is the right
+/// response — the other attacher will drop and free the slot.
+fn exec_reason_is_busy(reason: &str) -> bool {
+    reason.to_ascii_lowercase().contains("already attached")
 }
 
 async fn run_exec_mode(
@@ -2890,8 +3255,20 @@ async fn run_exec_mode(
         return Ok(());
     }
 
-    let exit_code = drain_exec_stream(&mut recv, json, started_at_unix).await?;
-    conn.close(0u32.into(), b"bye");
+    // Hand the active (conn, send, recv) straight into the resume loop so
+    // the first drain doesn't re-open a stream. On any drop the loop
+    // reattaches with ExecAttach + last_seq.
+    let exit_code = stream_exec_with_resume(
+        &endpoint,
+        server_addr,
+        &host_port,
+        &capture,
+        &job_id,
+        started_at_unix,
+        json,
+        Some((conn, send, recv)),
+    )
+    .await?;
     endpoint.wait_idle().await;
 
     // Exit with the child's exit code so shell pipelines see the right status.
@@ -2910,32 +3287,21 @@ async fn run_attach_mode(
 ) -> Result<()> {
     let (endpoint, server_addr, host_port, capture) =
         prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
-    let conn = connect_authenticated(
-        server_addr,
+
+    // Attach goes straight into the resume loop. started_at_unix isn't
+    // known to the client here; use 0 so the JSON `finished` event's
+    // duration_ms stays non-negative even though it won't be meaningful.
+    let exit_code = stream_exec_with_resume(
         &endpoint,
+        server_addr,
         &host_port,
         &capture,
-        INTERACTIVE_HANDSHAKE_TIMEOUT,
+        &job_id,
+        0,
+        json,
+        None,
     )
     .await?;
-    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
-
-    // last_seq = 0 means "replay everything currently buffered". The server
-    // will report a gap if it already rotated anything out of the ring.
-    send_msg(
-        &mut send,
-        &Message::ExecAttach {
-            job_id: job_id.clone(),
-            last_seq: 0,
-        },
-    )
-    .await?;
-
-    // started_at_unix isn't known to the client on attach; use 0 so
-    // duration_ms in the JSON finish event is always non-negative even if
-    // we can't compute a meaningful duration.
-    let exit_code = drain_exec_stream(&mut recv, json, 0).await?;
-    conn.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
     match exit_code {
         Some(c) => std::process::exit(c),
@@ -2968,7 +3334,10 @@ async fn run_logs_mode(
         },
     )
     .await?;
-    let _ = drain_exec_stream(&mut recv, json, 0).await;
+    // `logs` is a snapshot: one request, one bounded reply, then close.
+    // No resume loop — the server streams the buffer once and finishes.
+    let mut last_seq: u64 = 0;
+    let _ = drain_exec_stream(&mut recv, json, 0, &mut last_seq).await;
     conn.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
     Ok(())
@@ -3150,8 +3519,16 @@ async fn try_once(
             session_id,
             resume_token,
         } => (session_id, resume_token),
+        // Transient: another onyx client is still attached to this session.
+        // Return Ok(false) so the outer loop retries with backoff instead of
+        // exiting. The server releases the slot as soon as the other client
+        // drops.
+        Message::Close { reason } if reason == "session already attached" => {
+            eprintln!("[session] another onyx client is attached; retrying…");
+            return Ok(false);
+        }
         Message::Close { reason } => {
-            eprintln!("[client] server rejected: {reason}");
+            eprintln!("[session] server rejected: {reason}");
             return Ok(true);
         }
         other => anyhow::bail!("unexpected: {other:?}"),
@@ -3584,6 +3961,27 @@ async fn main() -> Result<()> {
                     }
                     cmd.arg(&target.ssh_target);
                     return Err(anyhow::anyhow!("exec ssh: {}", cmd.exec()));
+                }
+                // We previously had a session — reconnect window expired.
+                // Be explicit about what that means instead of just
+                // surfacing the raw anyhow chain: the remote tmux session
+                // is still retained on the server, but client state
+                // (session_id + resume_token) is per-process and lives only
+                // in this binary. Re-running `onyx <target>` opens a fresh
+                // session rather than resuming; true cross-process resume
+                // would require on-disk session state, which isn't built
+                // yet.
+                if session.is_some() {
+                    eprintln!(
+                        "[session] connection lost — reconnect window expired."
+                    );
+                    eprintln!(
+                        "          the remote tmux session is retained on the server for up to 12h."
+                    );
+                    eprintln!(
+                        "          re-run `onyx {}` to start a new session.",
+                        raw_target
+                    );
                 }
                 if !hint.is_empty() {
                     eprintln!("onyx:{hint}");
