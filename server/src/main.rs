@@ -244,6 +244,25 @@ struct SessionMeta {
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Set when client disconnects; None while a client is attached.
     detached_at: Option<Instant>,
+    /// Forced-takeover channel: when a new Hello/Resume arrives, it
+    /// signals this to evict whatever handler currently owns the session
+    /// stream. The old handler exits without touching `detached_at` or
+    /// `takeover_tx` (those are now owned by the new handler), so a client
+    /// that reconnects after a transport drop can reclaim its session
+    /// immediately instead of waiting for the server to notice the dead
+    /// TCP path.
+    ///
+    /// This is what fixes the "stuck on session already attached" loop:
+    /// previously, if the old handler was blocked on `output_rx.recv()`
+    /// with no PTY output, it never set `detached_at`, and every Resume
+    /// was rejected. Takeover breaks that deadlock deterministically.
+    takeover_tx: Option<oneshot::Sender<()>>,
+    /// Monotonic attach counter. Each Hello/Resume bumps this and
+    /// captures its own value; on exit the handler only writes back to
+    /// `detached_at`/`takeover_tx` if it is still current (epoch
+    /// matches). Ensures an evicted old handler cannot race-overwrite
+    /// state owned by the new handler.
+    attach_epoch: u64,
 }
 
 type Sessions = Arc<Mutex<HashMap<String, SessionMeta>>>;
@@ -1440,6 +1459,11 @@ async fn run_session(
                     output_tx: out_tx,
                     shutdown_tx: Some(shut_tx),
                     detached_at: None,
+                    // Takeover channel + epoch are installed by the
+                    // common attach path below, so Hello and Resume share
+                    // one path for takeover semantics.
+                    takeover_tx: None,
+                    attach_epoch: 0,
                 },
             );
 
@@ -1467,24 +1491,19 @@ async fn run_session(
         } => {
             // Validate under the lock; never hold the guard across an await.
             //
-            // We reject a Resume when the session is still attached
-            // (detached_at == None and the previous stream is still live).
-            // Two concurrent streams on the same PTY would race input and
-            // fan out output twice — the user sees garbled terminal state.
-            // Clients always call Resume only after their previous stream
-            // has ended, so the common case is `detached_at.is_some()`.
+            // We no longer reject a Resume for "session already attached".
+            // Instead, the common attach block below always takes over —
+            // signals the previous handler's oneshot and claims the
+            // session. This makes reconnect after a transport drop
+            // deterministic and bounded, instead of waiting for the old
+            // handler (which may be blocked on output_rx.recv() with no
+            // PTY activity) to notice the dead connection.
             let reject: Option<String> = {
-                let mut locked = sessions.lock().unwrap();
-                match locked.get_mut(&session_id) {
+                let locked = sessions.lock().unwrap();
+                match locked.get(&session_id) {
                     None => Some("session not found".into()),
                     Some(meta) if meta.resume_token != resume_token => Some("invalid token".into()),
-                    Some(meta) if meta.detached_at.is_none() => {
-                        Some("session already attached".into())
-                    }
-                    Some(meta) => {
-                        meta.detached_at = None;
-                        None
-                    }
+                    Some(_) => None,
                 }
             }; // MutexGuard dropped here
 
@@ -1516,16 +1535,34 @@ async fn run_session(
         }
     };
 
-    // Get channels — same code path for Hello and Resume.
-    let (mut output_rx, cmd_tx, resume_token) = {
-        let locked = sessions.lock().unwrap();
+    // Common attach path: signal the previous attach handler to exit
+    // (forced takeover), install our takeover channel, bump the attach
+    // epoch, and capture channel handles. After this block we own the
+    // session's "currently attached" state until we either exit normally
+    // (at which point we clear it if we are still current) or are
+    // evicted by a newer attach (at which point we leave state alone).
+    let (takeover_tx, mut takeover_rx) = oneshot::channel::<()>();
+    let (mut output_rx, cmd_tx, resume_token, my_epoch) = {
+        let mut locked = sessions.lock().unwrap();
         let meta = locked
-            .get(&session_id)
+            .get_mut(&session_id)
             .ok_or_else(|| anyhow::anyhow!("session disappeared before handshake"))?;
+
+        // Evict the previous handler if one is attached.
+        if let Some(old) = meta.takeover_tx.take() {
+            let _ = old.send(());
+            println!("[session {session_id}] reclaimed (evicted previous attacher)");
+        }
+        meta.takeover_tx = Some(takeover_tx);
+        meta.attach_epoch = meta.attach_epoch.wrapping_add(1);
+        meta.detached_at = None;
+        let epoch = meta.attach_epoch;
+
         (
             meta.output_tx.subscribe(),
             meta.pty_cmd_tx.clone(),
             meta.resume_token.clone(),
+            epoch,
         )
     };
 
@@ -1539,7 +1576,7 @@ async fn run_session(
     .await?;
 
     // Client → PTY (runs in a separate task so we can drive the output loop here)
-    let input_task = tokio::spawn(async move {
+    let mut input_task = tokio::spawn(async move {
         loop {
             match recv_msg(&mut recv).await {
                 Ok(Message::Input { data }) => {
@@ -1558,43 +1595,88 @@ async fn run_session(
         }
     });
 
-    // PTY → client
-    loop {
-        match output_rx.recv().await {
-            Ok((seq, data)) => {
-                if send_msg(&mut send, &Message::Output { seq, data })
-                    .await
-                    .is_err()
-                {
-                    break; // client disconnected
-                }
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                // Shell exited; pty_task already removed the session.
-                send_msg(
-                    &mut send,
-                    &Message::Close {
-                        reason: "shell exited".into(),
-                    },
-                )
-                .await
-                .ok();
-                send.finish().ok();
+    // Three-way select: detect eviction by a newer attach, detect a dead
+    // client stream (input_task exits as soon as recv_msg errors — faster
+    // than waiting for the next PTY output to surface the failed send),
+    // and drive PTY→client output. The old single-loop on output_rx.recv()
+    // would hang forever on quiet shells after a transport drop; this
+    // fixes the "stuck on session already attached" root cause.
+    let exit_reason: &'static str = 'pump: loop {
+        tokio::select! {
+            biased;
+
+            _ = &mut takeover_rx => {
+                // Newer attach took over. Leave meta state alone — it is
+                // now owned by the new handler.
                 input_task.abort();
+                send.finish().ok();
+                println!(
+                    "[session {session_id}] attach epoch {my_epoch} evicted by newer attach"
+                );
                 return Ok(());
             }
-            Err(broadcast::error::RecvError::Lagged(_)) => {
-                // Client was too slow and some frames were dropped; keep going.
+
+            res = &mut input_task => {
+                // Client input stream closed — either a graceful Close or
+                // a broken transport. Fall through to the detached path.
+                let _ = res;
+                break 'pump "client stream closed";
+            }
+
+            msg = output_rx.recv() => {
+                match msg {
+                    Ok((seq, data)) => {
+                        if send_msg(&mut send, &Message::Output { seq, data })
+                            .await
+                            .is_err()
+                        {
+                            break 'pump "send to client failed";
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        // Shell exited; pty_task already removed the
+                        // session. Nothing to mark as detached.
+                        send_msg(
+                            &mut send,
+                            &Message::Close {
+                                reason: "shell exited".into(),
+                            },
+                        )
+                        .await
+                        .ok();
+                        send.finish().ok();
+                        input_task.abort();
+                        return Ok(());
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        // Client too slow; some frames dropped, keep going.
+                    }
+                }
             }
         }
-    }
+    };
 
-    // Client disconnected (send_msg failed above).
+    // Client disconnected. Only update meta if we are still the current
+    // attacher — otherwise a newer handler already owns the state and we
+    // would race-overwrite it.
     input_task.abort();
-    if let Some(meta) = sessions.lock().unwrap().get_mut(&session_id) {
-        meta.detached_at = Some(Instant::now());
-        let hrs = DETACHED_SESSION_TTL.as_secs() / 3600;
-        println!("[session {session_id}] detached (retention {hrs}h)");
+    {
+        let mut locked = sessions.lock().unwrap();
+        if let Some(meta) = locked.get_mut(&session_id) {
+            if meta.attach_epoch == my_epoch {
+                meta.detached_at = Some(Instant::now());
+                meta.takeover_tx = None;
+                let hrs = DETACHED_SESSION_TTL.as_secs() / 3600;
+                println!(
+                    "[session {session_id}] detached (retention {hrs}h, reason: {exit_reason})"
+                );
+            } else {
+                println!(
+                    "[session {session_id}] epoch {my_epoch} retired ({exit_reason}; current epoch {})",
+                    meta.attach_epoch
+                );
+            }
+        }
     }
     send.finish().ok();
     Ok(())
@@ -1868,5 +1950,97 @@ mod job_tests {
         assert!(evict_oldest_finished(&mut map));
         assert!(map.len() < JOB_REGISTRY_CAP);
         assert!(map.contains_key("job_running"));
+    }
+}
+
+#[cfg(test)]
+mod session_takeover_tests {
+    //! Pure-logic tests for the forced-takeover handshake on SessionMeta.
+    //! No real QUIC, no real PTY — these exercise the epoch / takeover_tx
+    //! state transitions under the mutex, which is where the
+    //! "stuck on session already attached" bug lived.
+    use super::*;
+
+    fn mk_session() -> SessionMeta {
+        // The channels themselves are not exercised by these tests; we
+        // only care about takeover_tx / attach_epoch / detached_at state.
+        let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(1);
+        let (out_tx, _out_rx) = broadcast::channel::<(u64, Vec<u8>)>(1);
+        let (shut_tx, _shut_rx) = oneshot::channel::<()>();
+        SessionMeta {
+            resume_token: "tok".into(),
+            pty_cmd_tx: pty_tx,
+            output_tx: out_tx,
+            shutdown_tx: Some(shut_tx),
+            detached_at: Some(Instant::now()),
+            takeover_tx: None,
+            attach_epoch: 0,
+        }
+    }
+
+    /// Simulates one run_session attach: evict previous takeover (if any),
+    /// install our own, bump epoch, clear detached_at. Returns our epoch
+    /// and the previous takeover_tx so the test can verify delivery.
+    fn do_attach(meta: &mut SessionMeta) -> (u64, oneshot::Receiver<()>) {
+        let (tx, rx) = oneshot::channel::<()>();
+        let evicted = meta.takeover_tx.take();
+        if let Some(evicted) = evicted {
+            let _ = evicted.send(());
+        }
+        meta.takeover_tx = Some(tx);
+        meta.attach_epoch = meta.attach_epoch.wrapping_add(1);
+        meta.detached_at = None;
+        (meta.attach_epoch, rx)
+    }
+
+    #[test]
+    fn second_attach_signals_first_via_takeover_channel() {
+        let mut meta = mk_session();
+        let (epoch_a, mut rx_a) = do_attach(&mut meta);
+        assert_eq!(epoch_a, 1);
+        assert!(meta.detached_at.is_none());
+        // rx_a not yet fired.
+        assert!(rx_a.try_recv().is_err());
+
+        let (epoch_b, _rx_b) = do_attach(&mut meta);
+        assert_eq!(epoch_b, 2);
+        // The previous attacher should now observe a takeover signal —
+        // exactly the wake-up that rescues the old run_session's
+        // blocked output_rx.recv() and lets it exit cleanly.
+        assert!(rx_a.try_recv().is_ok());
+    }
+
+    #[test]
+    fn old_attacher_exit_respects_epoch_and_leaves_newer_state_alone() {
+        let mut meta = mk_session();
+        let (epoch_a, _rx_a) = do_attach(&mut meta);
+        let (epoch_b, _rx_b) = do_attach(&mut meta);
+        assert_ne!(epoch_a, epoch_b);
+
+        // Old attacher (epoch_a) now trying to mark detached must find
+        // that it's no longer current and leave state alone. Simulate the
+        // epoch check from run_session's exit path:
+        if meta.attach_epoch == epoch_a {
+            panic!("old attacher should not still be current");
+        }
+        // Takeover is owned by the newer attacher; detached_at stays None.
+        assert!(meta.takeover_tx.is_some());
+        assert!(meta.detached_at.is_none());
+    }
+
+    #[test]
+    fn epoch_wraps_monotonically_and_never_collides_in_practice() {
+        // We use wrapping_add to avoid panic on overflow — even at one
+        // attach/s this would take 500 billion years to roll over, so a
+        // real collision is astronomically unlikely, but it's worth
+        // locking in the shape of the counter anyway.
+        let mut meta = mk_session();
+        meta.attach_epoch = u64::MAX - 1;
+        let (e0, _) = do_attach(&mut meta);
+        let (e1, _) = do_attach(&mut meta);
+        let (e2, _) = do_attach(&mut meta);
+        assert_eq!(e0, u64::MAX);
+        assert_eq!(e1, 0);
+        assert_eq!(e2, 1);
     }
 }

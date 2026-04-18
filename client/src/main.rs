@@ -12,7 +12,7 @@ use std::{
     net::SocketAddr,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -524,6 +524,20 @@ fn get_terminal_size() -> (u16, u16) {
     (ws.ws_col, ws.ws_row)
 }
 
+/// Escape sequences emitted on RawMode drop to clean up terminal modes that
+/// tmux on the remote side may have enabled. Without these, a transport drop
+/// would leave the local terminal in mouse-tracking mode: mouse moves and
+/// clicks get echoed as `^[[<32;54;57M…` once the terminal is back in cooked
+/// mode, because the shell below us has no idea those modes were set.
+///
+/// Order matches what tmux emits on its own clean exit. Individual sequences:
+///   `?1000l / ?1002l / ?1003l`  disable X10 / button-event / any-event mouse
+///   `?1006l`                    disable SGR extended mouse
+///   `?2004l`                    disable bracketed paste
+///   `?25h`                      show cursor (tmux may have hidden it mid-redraw)
+const RAWMODE_TERMINAL_CLEANUP: &[u8] =
+    b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?25h";
+
 struct RawMode {
     saved: libc::termios,
 }
@@ -543,6 +557,14 @@ impl RawMode {
 
 impl Drop for RawMode {
     fn drop(&mut self) {
+        // Emit terminal cleanup BEFORE restoring termios — otherwise, if
+        // the terminal is still in raw mode, the cleanup bytes go through
+        // cleanly; after restore, a cooked-mode echo of any leftover mouse
+        // sequences would leak as garbled input.
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(RAWMODE_TERMINAL_CLEANUP);
+        let _ = out.flush();
         unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.saved) };
     }
 }
@@ -650,6 +672,14 @@ const INTERACTIVE_BACKOFF_MAX: Duration = Duration::from_secs(3);
 /// QUIC handshake timeout for proxy mode. Kept the same as interactive so
 /// the fallback decision happens on a similar cadence.
 const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Throttle flag for the legacy "session already attached" Close reason.
+/// Set the first time an episode fires, cleared on the next successful
+/// Welcome. Prevents the one-line-per-retry spam that was the original
+/// symptom of the stuck-reconnect bug. Process-global because the flag
+/// ties to the user-visible display, which is itself process-global.
+static SESSION_BUSY_LOGGED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 // ---------------------------------------------------------------------------
 // Target resolution
@@ -3518,13 +3548,22 @@ async fn try_once(
         Message::Welcome {
             session_id,
             resume_token,
-        } => (session_id, resume_token),
-        // Transient: another onyx client is still attached to this session.
-        // Return Ok(false) so the outer loop retries with backoff instead of
-        // exiting. The server releases the slot as soon as the other client
-        // drops.
+        } => {
+            // Successful reclaim — clear the throttle flag so a future
+            // disconnect episode can print the message once again.
+            SESSION_BUSY_LOGGED.store(false, Ordering::Relaxed);
+            (session_id, resume_token)
+        }
+        // Transient: the previous attacher is still considered live by the
+        // server. With a current onyx-server this should basically never
+        // fire — the server now uses forced takeover on attach. Kept for
+        // back-compat with older servers; the message is throttled to one
+        // line per disconnect episode instead of one per retry tick so
+        // the user isn't spammed.
         Message::Close { reason } if reason == "session already attached" => {
-            eprintln!("[session] another onyx client is attached; retrying…");
+            if !SESSION_BUSY_LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!("[session] previous client may be stale; waiting to reclaim…");
+            }
             return Ok(false);
         }
         Message::Close { reason } => {
@@ -3555,7 +3594,10 @@ async fn try_once(
     let (cols, rows) = get_terminal_size();
     send_msg(&mut send, &Message::Resize { cols, rows }).await?;
 
-    let _raw = RawMode::enter();
+    // NOTE: raw mode is entered ONCE in main() before the reconnect loop,
+    // not per try_once call. This prevents mouse-tracking escape sequences
+    // (enabled by the remote tmux) from being echoed in cooked mode during
+    // the brief gap between a drop and the next reconnect attempt.
 
     let mut stdin_jh = tokio::spawn(async move {
         use tokio::signal::unix::SignalKind;
@@ -3844,6 +3886,15 @@ async fn main() -> Result<()> {
     // Exponential backoff between reconnect attempts. Resets after every
     // successful reconnect (via try_once returning Ok).
     let mut backoff = INTERACTIVE_BACKOFF_INITIAL;
+
+    // Enter raw mode ONCE for the entire reconnect loop. Previously this
+    // was scoped to each try_once call, so between attempts the terminal
+    // briefly restored to cooked mode — long enough for mouse-tracking
+    // escapes from tmux to echo as garbage like `^[[<32;54;57M`. Keeping
+    // raw mode persistent, combined with the mouse-disable on Drop, means
+    // stdin is silent during gaps and the terminal is cleanly restored
+    // on exit.
+    let _raw = RawMode::enter();
 
     loop {
         // Erase any live banner line before entering raw terminal mode so it
