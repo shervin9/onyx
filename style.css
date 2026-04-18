@@ -640,20 +640,37 @@ button[id^="copy-"]:hover {
 }
 
 .exec-feature .section-head {
-  margin-bottom: 2.2rem;
+  margin-bottom: 2.35rem;
+}
+
+.exec-intro {
+  max-width: 46rem;
+}
+
+.exec-intro-title,
+.exec-intro-copy {
+  display: block;
+}
+
+.exec-intro-title {
+  margin-bottom: 0.5rem;
+  color: var(--text);
+  font-size: 1.02rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
 }
 
 .exec-grid {
   display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
-  gap: 2rem;
-  align-items: stretch;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  gap: 2.25rem;
+  align-items: start;
 }
 
 .exec-copy {
   display: flex;
   flex-direction: column;
-  gap: 1.5rem;
+  gap: 1.6rem;
 }
 
 .exec-points {
@@ -662,22 +679,27 @@ button[id^="copy-"]:hover {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
+  gap: 0.75rem;
 }
 
 .exec-points li {
   position: relative;
-  padding-left: 1rem;
+  padding: 0.95rem 1rem 1rem 1.15rem;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0.012)),
+    rgba(255, 255, 255, 0.01);
   color: var(--dim);
-  font-size: 0.92rem;
-  line-height: 1.55;
+  font-size: 0.91rem;
+  line-height: 1.6;
 }
 
 .exec-points li::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: 0.62rem;
+  left: 0.78rem;
+  top: 1.34rem;
   width: 4px;
   height: 4px;
   border-radius: 50%;
@@ -693,29 +715,89 @@ button[id^="copy-"]:hover {
 .exec-usage {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
-  padding: 0.9rem 1rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
+  gap: 0.9rem;
+  padding: 1.05rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.012)),
+    rgba(255, 255, 255, 0.01);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 18px;
+}
+
+.exec-command-hero {
+  padding: 1.05rem 1.05rem 1.1rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(110, 140, 255, 0.06), rgba(110, 140, 255, 0.02)),
+    rgba(255, 255, 255, 0.014);
+}
+
+.exec-command-kicker,
+.exec-command-item span {
+  display: block;
+  margin-bottom: 0.42rem;
+  font-size: 0.68rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.exec-command-hero code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.96rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.75;
+  color: #eef0f6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.exec-command-hero p {
+  margin: 0.5rem 0 0;
+  color: var(--dim);
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.exec-command-list {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.exec-command-item {
+  padding: 0.82rem 0.9rem 0.88rem;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.012);
+}
+
+.exec-command-item code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.65;
+  color: #d4d7de;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .exec-usage code {
   font-family: var(--mono);
-  font-size: 0.83rem;
-  font-weight: 500;
-  letter-spacing: -0.005em;
-  color: #d6d7dc;
-  line-height: 1.7;
-  word-break: break-word;
 }
 
 .exec-terminal {
-  min-height: 360px;
+  min-height: 428px;
 }
 
 .exec-terminal .terminal-top {
   position: relative;
+  padding-right: 5.8rem;
 }
 
 .exec-pill {
@@ -726,14 +808,19 @@ button[id^="copy-"]:hover {
   font-family: var(--mono);
   font-size: 0.68rem;
   font-weight: 500;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
   padding: 0.18rem 0.55rem;
   border-radius: 999px;
-  border: 1px solid rgba(214, 182, 92, 0.35);
-  background: rgba(214, 182, 92, 0.07);
-  color: #d8b877;
-  text-transform: uppercase;
-  transition: color 180ms ease, background 180ms ease, border-color 180ms ease;
+  border: 1px solid rgba(150, 160, 200, 0.32);
+  background: rgba(150, 160, 200, 0.06);
+  color: #aeb6d2;
+  transition: color 240ms ease, background 240ms ease, border-color 240ms ease, opacity 240ms ease;
+}
+
+.exec-pill[data-state="detached"] {
+  border-color: rgba(150, 160, 200, 0.32);
+  background: rgba(150, 160, 200, 0.06);
+  color: #aeb6d2;
 }
 
 .exec-pill[data-state="running"] {
@@ -742,20 +829,20 @@ button[id^="copy-"]:hover {
   color: #6fcf9f;
 }
 
-.exec-pill[data-state="disconnected"] {
-  border-color: rgba(214, 125, 70, 0.4);
-  background: rgba(214, 125, 70, 0.08);
-  color: #e29164;
-  animation: execPillPulse 1.1s ease-in-out infinite;
+.exec-pill[data-state="reconnecting"] {
+  border-color: rgba(214, 150, 92, 0.44);
+  background: rgba(214, 150, 92, 0.08);
+  color: #e3ad78;
+  animation: execPillPulse 1.7s ease-in-out infinite;
 }
 
-.exec-pill[data-state="detached"] {
-  border-color: rgba(150, 160, 200, 0.32);
-  background: rgba(150, 160, 200, 0.06);
-  color: #a4accb;
+.exec-pill[data-state="reattached"] {
+  border-color: rgba(176, 194, 210, 0.36);
+  background: rgba(176, 194, 210, 0.08);
+  color: #c5d0de;
 }
 
-.exec-pill[data-state="finished"] {
+.exec-pill[data-state="completed"] {
   border-color: rgba(100, 200, 160, 0.4);
   background: rgba(100, 200, 160, 0.09);
   color: #6fcf9f;
@@ -763,17 +850,100 @@ button[id^="copy-"]:hover {
 
 @keyframes execPillPulse {
   0%, 100% { opacity: 1; }
-  50%      { opacity: 0.55; }
+  50%      { opacity: 0.68; }
+}
+
+.exec-scene {
+  min-height: 100%;
+}
+
+.exec-stagebar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.95rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.exec-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 1.85rem;
+  padding: 0.36rem 0.42rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.016);
+  color: #7f8390;
+  font-size: 0.67rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  transition: color 260ms ease, border-color 260ms ease, background 260ms ease, transform 260ms ease;
+}
+
+.exec-stage.is-active {
+  transform: translateY(-1px);
+  color: #d8dbe4;
+  border-color: rgba(110, 140, 255, 0.24);
+  background: rgba(110, 140, 255, 0.08);
+}
+
+.exec-stage.is-complete {
+  color: #a6adbf;
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.exec-command-line {
+  opacity: 1;
+  transform: none;
+  filter: none;
+}
+
+.exec-prefix {
+  flex: 0 0 auto;
+  color: #666b78;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .exec-scene .terminal-line {
-  min-height: 1.3rem;
-  opacity: 0;
-  transition: opacity 260ms ease;
+  align-items: flex-start;
 }
 
-.exec-scene .terminal-line.is-visible {
+.exec-scene .terminal-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.exec-scene .exec-reveal {
+  opacity: 0;
+  max-height: 0;
+  min-height: 0;
+  margin-top: 0;
+  overflow: hidden;
+  transform: translateY(7px);
+  filter: blur(4px);
+  transition:
+    opacity 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    max-height 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-height 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    margin-top 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 380ms cubic-bezier(0.22, 1, 0.36, 1),
+    filter 380ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.exec-scene .exec-reveal.is-visible {
   opacity: 1;
+  max-height: 4.8rem;
+  min-height: 1.45rem;
+  margin-top: 0.3rem;
+  transform: translateY(0);
+  filter: blur(0);
 }
 
 .exec-scene .terminal-line-muted {
@@ -781,16 +951,53 @@ button[id^="copy-"]:hover {
   font-size: 0.82rem;
 }
 
-#exec-status-line {
-  color: #e29164;
+.exec-event-line {
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.exec-line-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
   font-family: var(--mono);
-  font-size: 0.82rem;
+  font-size: 0.67rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.exec-line-pill[data-state="reconnecting"] {
+  border-color: rgba(214, 150, 92, 0.36);
+  background: rgba(214, 150, 92, 0.08);
+  color: #e3ad78;
+}
+
+.exec-line-pill[data-state="reattached"] {
+  border-color: rgba(176, 194, 210, 0.34);
+  background: rgba(176, 194, 210, 0.08);
+  color: #c5d0de;
+}
+
+.exec-line-pill[data-state="completed"] {
+  border-color: rgba(100, 200, 160, 0.36);
+  background: rgba(100, 200, 160, 0.09);
+  color: #6fcf9f;
+}
+
+#exec-status-line {
+  color: #d8a675;
 }
 
 #exec-reattach-line {
-  color: #6fcf9f;
-  font-family: var(--mono);
-  font-size: 0.82rem;
+  color: #c5d0de;
+}
+
+#exec-complete-line {
+  color: #86d6ad;
 }
 
 .feature-grid {
@@ -900,7 +1107,7 @@ footer a:hover { color: var(--dim); }
   }
 
   .exec-terminal {
-    min-height: 320px;
+    min-height: 396px;
   }
 
   .compact-five .feature-card:last-child {
@@ -1012,6 +1219,66 @@ footer a:hover { color: var(--dim); }
   .terminal-line {
     font-size: 0.83rem;
     gap: 0.45rem;
+  }
+
+  .exec-intro-title {
+    font-size: 0.98rem;
+  }
+
+  .exec-points li {
+    padding: 0.88rem 0.92rem 0.92rem 1.05rem;
+  }
+
+  .exec-points li::before {
+    left: 0.72rem;
+  }
+
+  .exec-usage {
+    padding: 0.9rem;
+    border-radius: 16px;
+  }
+
+  .exec-command-hero {
+    padding: 0.92rem 0.92rem 0.98rem;
+  }
+
+  .exec-command-hero code {
+    font-size: 0.88rem;
+  }
+
+  .exec-command-item {
+    padding: 0.72rem 0.78rem 0.8rem;
+  }
+
+  .exec-command-item code {
+    font-size: 0.78rem;
+  }
+
+  .exec-terminal {
+    min-height: 382px;
+  }
+
+  .exec-stagebar {
+    gap: 0.32rem;
+    margin-bottom: 0.9rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .exec-stage {
+    min-height: 1.72rem;
+    padding: 0.3rem 0.18rem;
+    font-size: 0.55rem;
+    letter-spacing: 0.06em;
+  }
+
+  .exec-pill {
+    right: 0.82rem;
+    font-size: 0.62rem;
+    padding: 0.16rem 0.48rem;
+  }
+
+  .exec-line-pill {
+    font-size: 0.62rem;
   }
 
   .code-wrap {

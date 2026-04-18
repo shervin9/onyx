@@ -85,7 +85,7 @@
       </div>
       <div class="install-grid">
         <article class="install-card">
-          <span class="install-kicker">Homebrew · coming soon</span>
+          <span class="install-kicker">Homebrew</span>
           <div class="code-wrap">
             <code id="brew-cmd">brew install shervin9/onyx/onyx</code>
             <button id="copy-brew-btn" type="button" data-copy-target="brew-cmd">Copy</button>
@@ -153,22 +153,40 @@
     <section class="exec-feature" id="exec">
       <div class="section-head">
         <h2>More than a shell.</h2>
-        <p>Run commands that survive the network. <code>onyx exec</code> makes remote execution resumable, inspectable, and scriptable — useful for deploys, training runs, and AI-driven tooling that can't afford to lose state to a flaky Wi-Fi hop.</p>
+        <p class="exec-intro">
+          <span class="exec-intro-title">Run commands that survive the network.</span>
+          <span class="exec-intro-copy"><code>onyx exec</code> keeps remote work detachable, resumable, reattachable, and scriptable for deploys, training jobs, and agent workflows.</span>
+        </p>
       </div>
 
       <div class="exec-grid">
         <div class="exec-copy">
           <ul class="exec-points">
-            <li><strong>Resumable.</strong> The server owns the child process; your laptop can sleep, reconnect, or die — the job keeps running.</li>
-            <li><strong>Reattachable.</strong> <code>onyx attach</code> replays the ring buffer and streams live output. <code>onyx logs</code> snapshots what's captured.</li>
-            <li><strong>Detachable.</strong> <code>--detach</code> prints the job id and exits. Pick it up again from any machine.</li>
-            <li><strong>Scriptable.</strong> <code>--json</code> emits one NDJSON event per line — clean input for CI pipelines and AI agents.</li>
+            <li><strong>Resumable.</strong> The server keeps the process alive while your client disappears.</li>
+            <li><strong>Reattachable.</strong> <code>onyx attach</code> catches up and streams output again without restarting the job.</li>
+            <li><strong>Detachable.</strong> <code>--detach</code> returns a job id, exits cleanly, and lets the work keep moving.</li>
+            <li><strong>Scriptable.</strong> <code>--json</code> emits clean NDJSON events for CI, automation, and agents.</li>
           </ul>
           <div class="exec-usage">
-            <code>onyx exec prod -- deploy.sh</code>
-            <code>onyx exec gpu-box --detach -- python train.py</code>
-            <code>onyx attach gpu-box job_a1b2c3d4</code>
-            <code>onyx logs gpu-box job_a1b2c3d4</code>
+            <div class="exec-command-hero">
+              <span class="exec-command-kicker">Primary flow</span>
+              <code>onyx exec gpu-box --detach -- python train.py</code>
+              <p>Launch detached. Rejoin later. The job keeps going.</p>
+            </div>
+            <div class="exec-command-list" aria-label="Additional onyx exec commands">
+              <div class="exec-command-item">
+                <span>Reattach</span>
+                <code>onyx attach gpu-box job_a1b2c3d4</code>
+              </div>
+              <div class="exec-command-item">
+                <span>Logs</span>
+                <code>onyx logs gpu-box job_a1b2c3d4</code>
+              </div>
+              <div class="exec-command-item">
+                <span>Deploy</span>
+                <code>onyx exec prod -- deploy.sh</code>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -178,28 +196,59 @@
               <span></span><span></span><span></span>
             </div>
             <span class="terminal-label">onyx exec</span>
-            <span class="exec-pill" id="exec-pill" data-state="running">running</span>
+            <span class="exec-pill" id="exec-pill" data-state="detached">detached</span>
           </div>
           <div class="terminal-body exec-scene" id="exec-scene">
-            <div class="terminal-line">
+            <div class="exec-stagebar" aria-hidden="true">
+              <span class="exec-stage is-active" data-exec-stage="0">start</span>
+              <span class="exec-stage" data-exec-stage="1">stream</span>
+              <span class="exec-stage" data-exec-stage="2">reconnect</span>
+              <span class="exec-stage" data-exec-stage="3">reattach</span>
+              <span class="exec-stage" data-exec-stage="4">complete</span>
+            </div>
+            <div class="terminal-line exec-command-line">
               <span class="prompt">$</span>
               <span class="terminal-text">onyx exec gpu-box --detach -- python train.py</span>
             </div>
-            <div class="terminal-line terminal-line-muted" id="exec-jobid-line">
-              <span>job_a1b2c3d4e5f60718</span>
+            <div class="terminal-line terminal-line-muted exec-reveal" id="exec-jobid-line">
+              <span class="exec-prefix">[job]</span>
+              <span class="terminal-text">job_a1b2c3d4e5f60718  detached  ring buffer live</span>
             </div>
-            <div class="terminal-line" id="exec-line-1"></div>
-            <div class="terminal-line" id="exec-line-2"></div>
-            <div class="terminal-line" id="exec-line-3"></div>
-            <div class="terminal-line terminal-line-muted" id="exec-status-line">
-              <span id="exec-status-text">[onyx] connection lost · reconnecting…</span>
+            <div class="terminal-line exec-reveal" id="exec-line-1">
+              <span class="exec-prefix">train</span>
+              <span class="terminal-text">epoch 1  loss=0.912  samples=4096</span>
             </div>
-            <div class="terminal-line" id="exec-line-4"></div>
-            <div class="terminal-line" id="exec-line-5"></div>
-            <div class="terminal-line terminal-line-muted" id="exec-reattach-line">
-              <span>[onyx] reattached · seq 4</span>
+            <div class="terminal-line exec-reveal" id="exec-line-2">
+              <span class="exec-prefix">train</span>
+              <span class="terminal-text">epoch 2  loss=0.734  samples=8192</span>
             </div>
-            <div class="terminal-line" id="exec-line-6"></div>
+            <div class="terminal-line exec-reveal" id="exec-line-3">
+              <span class="exec-prefix">train</span>
+              <span class="terminal-text">epoch 3  loss=0.581  samples=12288</span>
+            </div>
+            <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-status-line">
+              <span class="exec-prefix">[net]</span>
+              <span class="exec-line-pill" data-state="reconnecting">reconnecting…</span>
+              <span class="terminal-text">link dropped, resuming stream</span>
+            </div>
+            <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-reattach-line">
+              <span class="exec-prefix">[job]</span>
+              <span class="exec-line-pill" data-state="reattached">reattached</span>
+              <span class="terminal-text">seq 4  output caught up</span>
+            </div>
+            <div class="terminal-line exec-reveal" id="exec-line-4">
+              <span class="exec-prefix">train</span>
+              <span class="terminal-text">epoch 4  loss=0.448  samples=16384</span>
+            </div>
+            <div class="terminal-line exec-reveal" id="exec-line-5">
+              <span class="exec-prefix">train</span>
+              <span class="terminal-text">epoch 5  loss=0.361  checkpoint=best.pt</span>
+            </div>
+            <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-complete-line">
+              <span class="exec-prefix">[job]</span>
+              <span class="exec-line-pill" data-state="completed">completed</span>
+              <span class="terminal-text">best_loss=0.361  artifacts synced</span>
+            </div>
           </div>
         </div>
       </div>
