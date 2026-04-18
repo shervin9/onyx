@@ -19,6 +19,7 @@
   <nav>
     <a href="./" class="logo">onyx</a>
     <div class="nav-actions">
+      <a href="#exec" class="nav-link">Exec</a>
       <a href="#install" class="nav-link">Install</a>
       <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
     </div>
@@ -71,9 +72,9 @@
         <li>Open source</li>
         <li>SSH fallback</li>
         <li>Session persistence</li>
+        <li>Resumable exec</li>
         <li>Port forwarding</li>
-        <li>ProxyCommand support</li>
-        <li>AI-friendly</li>
+        <li>ProxyCommand</li>
       </ul>
     </section>
 
@@ -149,11 +150,66 @@
       </div>
     </section>
 
+    <section class="exec-feature" id="exec">
+      <div class="section-head">
+        <h2>More than a shell.</h2>
+        <p>Run commands that survive the network. <code>onyx exec</code> makes remote execution resumable, inspectable, and scriptable — useful for deploys, training runs, and AI-driven tooling that can't afford to lose state to a flaky Wi-Fi hop.</p>
+      </div>
+
+      <div class="exec-grid">
+        <div class="exec-copy">
+          <ul class="exec-points">
+            <li><strong>Resumable.</strong> The server owns the child process; your laptop can sleep, reconnect, or die — the job keeps running.</li>
+            <li><strong>Reattachable.</strong> <code>onyx attach</code> replays the ring buffer and streams live output. <code>onyx logs</code> snapshots what's captured.</li>
+            <li><strong>Detachable.</strong> <code>--detach</code> prints the job id and exits. Pick it up again from any machine.</li>
+            <li><strong>Scriptable.</strong> <code>--json</code> emits one NDJSON event per line — clean input for CI pipelines and AI agents.</li>
+          </ul>
+          <div class="exec-usage">
+            <code>onyx exec prod -- deploy.sh</code>
+            <code>onyx exec gpu-box --detach -- python train.py</code>
+            <code>onyx attach gpu-box job_a1b2c3d4</code>
+            <code>onyx logs gpu-box job_a1b2c3d4</code>
+          </div>
+        </div>
+
+        <div class="terminal-shell exec-terminal" aria-label="onyx exec resumable job animation">
+          <div class="terminal-top">
+            <div class="terminal-dots">
+              <span></span><span></span><span></span>
+            </div>
+            <span class="terminal-label">onyx exec</span>
+            <span class="exec-pill" id="exec-pill" data-state="running">running</span>
+          </div>
+          <div class="terminal-body exec-scene" id="exec-scene">
+            <div class="terminal-line">
+              <span class="prompt">$</span>
+              <span class="terminal-text">onyx exec gpu-box --detach -- python train.py</span>
+            </div>
+            <div class="terminal-line terminal-line-muted" id="exec-jobid-line">
+              <span>job_a1b2c3d4e5f60718</span>
+            </div>
+            <div class="terminal-line" id="exec-line-1"></div>
+            <div class="terminal-line" id="exec-line-2"></div>
+            <div class="terminal-line" id="exec-line-3"></div>
+            <div class="terminal-line terminal-line-muted" id="exec-status-line">
+              <span id="exec-status-text">[onyx] connection lost · reconnecting…</span>
+            </div>
+            <div class="terminal-line" id="exec-line-4"></div>
+            <div class="terminal-line" id="exec-line-5"></div>
+            <div class="terminal-line terminal-line-muted" id="exec-reattach-line">
+              <span>[onyx] reattached · seq 4</span>
+            </div>
+            <div class="terminal-line" id="exec-line-6"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="features">
       <div class="section-head">
         <h2>Built for real remote work</h2>
       </div>
-      <div class="feature-grid compact-five">
+      <div class="feature-grid">
         <article class="feature-card">
           <strong>QUIC + SSH fallback</strong>
           <span>Prefer QUIC. Fall back cleanly when the network says otherwise.</span>
@@ -171,8 +227,12 @@
           <span>Use Onyx as a transport layer for SSH-based tools and existing configs.</span>
         </article>
         <article class="feature-card">
+          <strong>Resumable remote exec</strong>
+          <span><code>onyx exec</code> runs commands as jobs that survive client disconnects. Reattach, tail, or capture JSON events later.</span>
+        </article>
+        <article class="feature-card">
           <strong>AI-friendly workflows</strong>
-          <span>Designed for remote CLI work on unstable links without extra ceremony.</span>
+          <span>Structured <code>--json</code> output and long-lived job ids fit cleanly into agent loops and CI pipelines.</span>
         </article>
       </div>
     </section>
