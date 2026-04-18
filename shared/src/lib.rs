@@ -3,6 +3,48 @@ use serde::{Deserialize, Serialize};
 /// Default QUIC port for onyx.
 pub const DEFAULT_PORT: u16 = 7272;
 
+/// Which standard stream an exec output chunk came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StdStream {
+    Stdout,
+    Stderr,
+}
+
+/// Lifecycle of an `onyx exec` job.
+///
+/// - `Running`: process is live, client may or may not be attached.
+/// - `Detached`: process is live, no client is attached. (Same semantics as
+///   `Running` for scheduling purposes; exposed as a distinct state because
+///   users care about the difference.)
+/// - `Succeeded` / `Failed`: process exited (0 / non-zero). Output remains
+///   readable via `onyx logs` until retention expires.
+/// - `Expired`: GC'd. Only surfaces if a client asks about a job after the
+///   retention window.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JobStatus {
+    Running,
+    Detached,
+    Succeeded,
+    Failed,
+    Expired,
+}
+
+/// One row in `onyx jobs <target>`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobSummary {
+    pub job_id: String,
+    /// Reconstructed command line for display — the argv joined with spaces.
+    pub command: String,
+    pub status: JobStatus,
+    pub started_at_unix: u64,
+    pub finished_at_unix: Option<u64>,
+    pub exit_code: Option<i32>,
+    /// True when some client is currently streaming output.
+    pub attached: bool,
+    /// Current size of the per-job output ring buffer, in bytes.
+    pub buffered_bytes: u64,
+}
+
 /// All messages exchanged between client and server over QUIC streams.
 /// Each stream carries exactly one request/response pair (Step 1).
 /// Later steps will extend this to a continuous bidirectional stream.
@@ -49,6 +91,50 @@ pub enum Message {
     ForwardAck,
     /// Server → Client: tunnel rejected (port unreachable, refused, etc.).
     ForwardError { reason: String },
+
+    // ──── onyx exec ─────────────────────────────────────────────────────
+    //
+    // Resumable remote command execution. The server runs `sh -c <argv
+    // joined>` (so pipes/redirects work like SSH), buffers output in a
+    // bounded ring per job, and broadcasts chunks to any currently-attached
+    // client. A client disconnect does NOT kill the job; the user can
+    // reattach with `onyx attach` or read captured output with `onyx logs`.
+    //
+    /// Client → Server: start a new job. The server allocates a job_id.
+    ExecStart { command: Vec<String> },
+    /// Client → Server: attach to an existing job. Server replays any
+    /// buffered output with seq > last_seq, then streams new chunks.
+    ExecAttach { job_id: String, last_seq: u64 },
+    /// Client → Server: snapshot-dump the job's full buffered output and
+    /// final status, then close. Does not subscribe to live output.
+    ExecLogs { job_id: String },
+    /// Client → Server: enumerate jobs known to this server.
+    JobsList,
+    /// Server → Client: job accepted and started.
+    ExecStarted {
+        job_id: String,
+        started_at_unix: u64,
+    },
+    /// Server → Client: one chunk of captured output.
+    ExecOutput {
+        seq: u64,
+        stream: StdStream,
+        data: Vec<u8>,
+    },
+    /// Server → Client: replay buffer truncated below the requested
+    /// last_seq. The oldest currently-buffered seq is supplied so the
+    /// client can decide how to frame the gap for the user.
+    ExecGap { oldest_seq: u64 },
+    /// Server → Client: job finished. `exit_code` is None when the process
+    /// was killed by a signal (e.g. OOM, kill -9).
+    ExecFinished {
+        exit_code: Option<i32>,
+        finished_at_unix: u64,
+    },
+    /// Server → Client: response to JobsList.
+    JobsListResponse { jobs: Vec<JobSummary> },
+    /// Server → Client: exec-layer error (job not found, spawn failed, ...).
+    ExecError { reason: String },
 }
 
 /// Serialize a message to bytes (length-prefix framing is caller's job).
