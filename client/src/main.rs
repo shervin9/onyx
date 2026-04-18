@@ -19,6 +19,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+mod mcp;
+
 // ---------------------------------------------------------------------------
 // Source files embedded at compile time for remote bootstrap.
 // ---------------------------------------------------------------------------
@@ -751,6 +753,7 @@ enum CliMode {
         json: bool,
         job_id: String,
     },
+    Mcp {},
 }
 
 /// Outcome of parsing argv. Separate from `CliMode` so `--help` / `--version`
@@ -776,6 +779,20 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             "--help" | "-h" => return Ok(ParseOutcome::Help),
             "--version" | "-V" => return Ok(ParseOutcome::Version),
             _ => {}
+        }
+    }
+
+    if matches!(it.peek(), Some(cmd) if cmd == "mcp") {
+        it.next();
+        match it.next().as_deref() {
+            Some("serve") => {
+                if let Some(extra) = it.next() {
+                    return Err(format!("mcp serve: unexpected argument: {extra}"));
+                }
+                return Ok(ParseOutcome::Run(CliMode::Mcp {}));
+            }
+            Some(other) => return Err(format!("mcp: unknown subcommand '{other}' (try: onyx mcp serve)")),
+            None => return Err("mcp: missing subcommand (try: onyx mcp serve)".to_string()),
         }
     }
 
@@ -1008,6 +1025,7 @@ USAGE
   onyx jobs   <target> [--json]
   onyx attach <target> <job-id> [--json]
   onyx logs   <target> <job-id> [--json]
+  onyx mcp serve                                    stdio MCP server (for AI agents)
   onyx --help | --version
 
 MODES
@@ -3820,6 +3838,7 @@ async fn main() -> Result<()> {
             json,
             job_id,
         } => return run_logs_mode(raw_target, identity_file, no_bootstrap, json, job_id).await,
+        CliMode::Mcp {} => return mcp::run_mcp_serve().await,
         CliMode::Interactive { .. } => {}
     }
 
