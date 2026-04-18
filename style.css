@@ -391,6 +391,7 @@ h1 {
 }
 
 .trust-section,
+.mcp-section,
 .install,
 .flow,
 .exec-feature,
@@ -402,6 +403,7 @@ h1 {
 }
 
 .trust-section,
+.mcp-section,
 .install,
 .flow,
 .exec-feature,
@@ -930,6 +932,145 @@ button[id^="copy-"]:hover {
   text-align: center;
 }
 
+.mcp-head {
+  max-width: 36rem;
+}
+
+.mcp-diagram {
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+.mcp-rail {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.8rem;
+  align-items: start;
+  padding: 0.8rem 0 0;
+}
+
+.mcp-line {
+  position: absolute;
+  left: var(--mcp-line-left, 16%);
+  width: var(--mcp-line-width, 68%);
+  top: var(--mcp-line-top, 0.8rem);
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-50%);
+}
+
+.mcp-pulse {
+  position: absolute;
+  top: var(--mcp-pulse-top, 0.8rem);
+  left: var(--mcp-pulse-left, 16%);
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  background: rgba(237, 237, 239, 0.92);
+  transition:
+    left 1.05s cubic-bezier(0.22, 1, 0.36, 1),
+    top 1.05s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+
+.mcp-node {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 1.25rem;
+  color: var(--muted);
+  transition: color 0.22s ease;
+}
+
+.mcp-dot {
+  position: absolute;
+  top: 0.8rem;
+  left: 50%;
+  width: 0.58rem;
+  height: 0.58rem;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: background 0.22s ease, border-color 0.22s ease;
+}
+
+.mcp-node.is-active {
+  color: var(--text);
+}
+
+.mcp-node.is-active .mcp-dot {
+  background: rgba(237, 237, 239, 0.82);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.mcp-node-label {
+  font-size: 0.87rem;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.mcp-capability-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.9rem;
+  max-width: 44rem;
+  margin: 1.8rem auto 0;
+}
+
+.mcp-capability {
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.012);
+  text-align: left;
+}
+
+.mcp-capability-title {
+  display: block;
+  margin-bottom: 0.42rem;
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.mcp-capability code {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.83rem;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.mcp-capability p {
+  margin-top: 0.45rem;
+  color: var(--dim);
+  font-size: 0.84rem;
+  line-height: 1.52;
+}
+
+.mcp-sample {
+  max-width: 26rem;
+  margin: 0.9rem auto 0;
+  padding: 0.85rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.01);
+  color: var(--dim);
+  text-align: left;
+}
+
+.mcp-sample code {
+  font-family: var(--mono);
+  font-size: 0.79rem;
+  line-height: 1.65;
+}
+
 .feature-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1041,6 +1182,7 @@ footer a:hover { color: var(--dim); }
 
 @media (max-width: 900px) {
   .install-grid,
+  .mcp-capability-grid,
   .flow-panels,
   .shell-notes,
   .feature-grid,
@@ -1150,6 +1292,14 @@ footer a:hover { color: var(--dim); }
     font-size: 0.75rem;
   }
 
+  .mcp-rail {
+    gap: 0.5rem;
+  }
+
+  .mcp-node-label {
+    font-size: 0.78rem;
+  }
+
   .repo-meta-link {
     max-width: 100%;
     font-size: 0.76rem;
@@ -1221,6 +1371,7 @@ footer a:hover { color: var(--dim); }
   }
 
   .trust-section,
+  .mcp-section,
   .install,
   .flow,
   .exec-feature,

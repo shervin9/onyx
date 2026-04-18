@@ -208,6 +208,53 @@
       <p class="exec-support-copy"><code>onyx jobs gpu-box --json</code> emits NDJSON job records for scripts, CI, and AI agents.</p>
     </section>
 
+    <section class="mcp-section" id="mcp">
+      <div class="section-head section-head-centered mcp-head">
+        <h2>Local MCP for remote execution</h2>
+        <p>Agents talk local. Onyx runs remote.</p>
+      </div>
+
+      <div class="mcp-diagram" aria-label="Agent to Onyx MCP to remote host">
+        <div class="mcp-rail" id="mcp-rail">
+          <div class="mcp-line" aria-hidden="true"></div>
+          <div class="mcp-node is-active">
+            <span class="mcp-dot" aria-hidden="true"></span>
+            <span class="mcp-node-label">Agent</span>
+          </div>
+          <div class="mcp-node">
+            <span class="mcp-dot" aria-hidden="true"></span>
+            <span class="mcp-node-label">Onyx MCP</span>
+          </div>
+          <div class="mcp-node">
+            <span class="mcp-dot" aria-hidden="true"></span>
+            <span class="mcp-node-label">Remote host</span>
+          </div>
+          <div class="mcp-pulse" aria-hidden="true"></div>
+        </div>
+      </div>
+
+      <div class="mcp-capability-grid">
+        <article class="mcp-capability">
+          <span class="mcp-capability-title">Exec</span>
+          <code>onyx_exec</code>
+          <p>Run commands on a remote target.</p>
+        </article>
+        <article class="mcp-capability">
+          <span class="mcp-capability-title">Jobs</span>
+          <code>onyx_jobs</code>
+          <p>Inspect resumable work.</p>
+        </article>
+        <article class="mcp-capability">
+          <span class="mcp-capability-title">Logs</span>
+          <code>onyx_logs</code>
+          <p>Read buffered output later.</p>
+        </article>
+      </div>
+
+      <pre class="mcp-sample"><code>target=hetzner-dev
+command=["git","status"]</code></pre>
+    </section>
+
     <section class="features">
       <div class="section-head">
         <h2>For people and automation.</h2>

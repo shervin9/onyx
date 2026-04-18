@@ -8,6 +8,11 @@
   var flowDots = Array.prototype.slice.call(document.querySelectorAll(".flow-dot"));
   var flowPanels = Array.prototype.slice.call(document.querySelectorAll(".flow-panel"));
   var flowMeta = document.getElementById("flow-meta");
+  var mcpRail = document.getElementById("mcp-rail");
+  var mcpLine = document.querySelector(".mcp-line");
+  var mcpPulse = document.querySelector(".mcp-pulse");
+  var mcpNodes = Array.prototype.slice.call(document.querySelectorAll(".mcp-node"));
+  var mcpDots = Array.prototype.slice.call(document.querySelectorAll(".mcp-dot"));
   var repoMetaStrip = document.getElementById("repo-meta-strip");
   var repoMetaText = document.getElementById("repo-meta-text");
 
@@ -148,6 +153,68 @@
       if (node.classList.contains("active")) activeIndex = index;
     });
     placePulse(activeIndex, true);
+  }
+
+  function setMcpStep(stepIndex) {
+    mcpNodes.forEach(function (node, index) {
+      node.classList.toggle("is-active", index === stepIndex);
+    });
+  }
+
+  function measureMcpRail() {
+    if (!mcpRail || !mcpDots.length || !mcpLine) return;
+
+    var railRect = mcpRail.getBoundingClientRect();
+    var first = dotCenter(mcpDots[0], railRect);
+    var last = dotCenter(mcpDots[mcpDots.length - 1], railRect);
+
+    mcpRail.style.setProperty("--mcp-line-left", first.x + "px");
+    mcpRail.style.setProperty("--mcp-line-width", Math.max(last.x - first.x, 0) + "px");
+    mcpRail.style.setProperty("--mcp-line-top", first.y + "px");
+  }
+
+  function placeMcpPulse(stepIndex, instant) {
+    if (!mcpRail || !mcpPulse || !mcpDots.length) return;
+    var dot = mcpDots[stepIndex];
+    if (!dot) return;
+
+    var railRect = mcpRail.getBoundingClientRect();
+    var center = dotCenter(dot, railRect);
+
+    if (instant) {
+      mcpPulse.style.transition = "none";
+    } else {
+      mcpPulse.style.transition =
+        "left 1.05s cubic-bezier(0.22, 1, 0.36, 1), top 1.05s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
+    }
+
+    mcpRail.style.setProperty("--mcp-pulse-left", center.x + "px");
+    mcpRail.style.setProperty("--mcp-pulse-top", center.y + "px");
+
+    if (instant) {
+      mcpPulse.getBoundingClientRect();
+      mcpPulse.style.transition =
+        "left 1.05s cubic-bezier(0.22, 1, 0.36, 1), top 1.05s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
+    }
+  }
+
+  function loopMcp(index) {
+    if (!mcpNodes.length) return;
+    measureMcpRail();
+    setMcpStep(index);
+    placeMcpPulse(index, false);
+    setTimeout(function () {
+      loopMcp((index + 1) % mcpNodes.length);
+    }, 1800);
+  }
+
+  function refreshMcpLayout() {
+    measureMcpRail();
+    var activeIndex = 0;
+    mcpNodes.forEach(function (node, index) {
+      if (node.classList.contains("is-active")) activeIndex = index;
+    });
+    placeMcpPulse(activeIndex, true);
   }
 
   function fetchJson(url) {
@@ -295,13 +362,17 @@
 
   setTimeout(function () {
     refreshFlowLayout();
+    refreshMcpLayout();
     loopTerminal(0);
     loopFlow(0);
+    loopMcp(0);
     startExecDemo();
   }, 700);
 
   window.addEventListener("resize", refreshFlowLayout);
   window.addEventListener("orientationchange", refreshFlowLayout);
+  window.addEventListener("resize", refreshMcpLayout);
+  window.addEventListener("orientationchange", refreshMcpLayout);
 })();
 
 function copyText(targetId, button) {
