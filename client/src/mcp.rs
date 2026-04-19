@@ -15,7 +15,7 @@ use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 // ---------------------------------------------------------------------------
@@ -41,8 +41,17 @@ pub async fn run_mcp_serve() -> Result<()> {
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(response) = handle_message(trimmed, &onyx_bin).await {
-            let mut out = response.to_string();
+
+        // Streaming tool calls write progress notifications directly to stdout
+        // before the final response. Non-streaming calls use the standard path.
+        let response = if is_streaming_call(trimmed) {
+            streaming_call(trimmed, &onyx_bin, &mut stdout).await
+        } else {
+            handle_message(trimmed, &onyx_bin).await
+        };
+
+        if let Some(resp) = response {
+            let mut out = resp.to_string();
             out.push('\n');
             stdout.write_all(out.as_bytes()).await?;
             stdout.flush().await?;
@@ -185,6 +194,10 @@ fn tools_schema() -> Value {
                     "timeout_ms": {
                         "type": "integer",
                         "description": "Kill the job after this many milliseconds. Client receives exit code 124."
+                    },
+                    "stream": {
+                        "type": "boolean",
+                        "description": "Emit incremental events via notifications/progress instead of buffering. Each stdout/stderr chunk arrives as a separate MCP notification."
                     }
                 },
                 "required": ["target", "command"]
@@ -211,7 +224,8 @@ fn tools_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "target": {"type": "string", "description": "Remote host or SSH config alias"},
-                    "job_id": {"type": "string", "description": "Job ID from onyx_exec (detach:true) or onyx_jobs"}
+                    "job_id": {"type": "string", "description": "Job ID from onyx_exec (detach:true) or onyx_jobs"},
+                    "stream": {"type": "boolean", "description": "Emit incremental events via notifications/progress."}
                 },
                 "required": ["target", "job_id"]
             }
@@ -223,7 +237,8 @@ fn tools_schema() -> Value {
                 "type": "object",
                 "properties": {
                     "target": {"type": "string", "description": "Remote host or SSH config alias"},
-                    "job_id": {"type": "string", "description": "Job ID from onyx_exec (detach:true) or onyx_jobs"}
+                    "job_id": {"type": "string", "description": "Job ID from onyx_exec (detach:true) or onyx_jobs"},
+                    "stream": {"type": "boolean", "description": "Emit incremental events via notifications/progress."}
                 },
                 "required": ["target", "job_id"]
             }
@@ -259,38 +274,133 @@ async fn call_tool(name: &str, args: &Value, onyx_bin: &PathBuf) -> Result<Value
 }
 
 // ---------------------------------------------------------------------------
+// Streaming: detection + routing
+// ---------------------------------------------------------------------------
+
+/// True when the JSON-RPC line is a tools/call with `arguments.stream: true`.
+fn is_streaming_call(line: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<Value>(line) else {
+        return false;
+    };
+    v["method"].as_str() == Some("tools/call")
+        && v["params"]["arguments"]["stream"].as_bool() == Some(true)
+}
+
+/// Handle a streaming tool call: write `notifications/progress` events to
+/// `stdout` as the subprocess produces output, then return the final
+/// JSON-RPC response (same shape as the buffered path).
+async fn streaming_call(
+    line: &str,
+    onyx_bin: &PathBuf,
+    stdout: &mut tokio::io::Stdout,
+) -> Option<Value> {
+    let request: Value = serde_json::from_str(line).ok()?;
+    let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let params = request.get("params").cloned().unwrap_or(json!({}));
+    let tool_name = params["name"].as_str()?.to_string();
+    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    let (result, is_error) =
+        match stream_exec_tool(&tool_name, &args, onyx_bin, &id, stdout).await {
+            Ok(v) => (v, false),
+            Err(e) => (mk_error("exec_failed", &e.to_string()), true),
+        };
+
+    Some(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "content": [{"type": "text", "text": result.to_string()}],
+            "isError": is_error
+        }
+    }))
+}
+
+/// Route a streaming tool call: exec/attach/logs get `capture_streaming`;
+/// everything else falls back to the normal buffered `call_tool`.
+async fn stream_exec_tool(
+    tool_name: &str,
+    args: &Value,
+    onyx_bin: &PathBuf,
+    request_id: &Value,
+    stdout: &mut tokio::io::Stdout,
+) -> Result<Value> {
+    match tool_name {
+        "onyx_exec" | "onyx_attach" | "onyx_logs" => {
+            let mut cmd = build_exec_cmd(tool_name, args, onyx_bin)?;
+            let mut result = capture_streaming(&mut cmd, request_id, stdout).await?;
+            // attach/logs don't emit a started event; fill job_id from args.
+            if result["job_id"].is_null() {
+                if let Some(jid) = args["job_id"].as_str() {
+                    result["job_id"] = json!(jid);
+                }
+            }
+            Ok(result)
+        }
+        _ => call_tool(tool_name, args, onyx_bin).await,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-async fn exec_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
-    let target = require_str(args, "target")?;
-    let command = require_str_array(args, "command")?;
-    let detach = args["detach"].as_bool().unwrap_or(false);
-
-    let mut cmd = Command::new(onyx_bin);
-    cmd.arg("exec").arg(target).arg("--json");
-    if detach {
-        cmd.arg("--detach");
-    }
-    if let Some(cwd) = args["cwd"].as_str() {
-        cmd.arg("--cwd").arg(cwd);
-    }
-    if let Some(env_map) = args["env"].as_object() {
-        for (k, v) in env_map {
-            if let Some(val) = v.as_str() {
-                cmd.arg("--env").arg(format!("{k}={val}"));
+/// Build the `onyx <sub>` command for exec/attach/logs tools.
+/// Extracted so both the buffered and streaming paths share one code path.
+fn build_exec_cmd(tool_name: &str, args: &Value, onyx_bin: &PathBuf) -> Result<Command> {
+    match tool_name {
+        "onyx_exec" => {
+            let target = require_str(args, "target")?;
+            let command = require_str_array(args, "command")?;
+            let detach = args["detach"].as_bool().unwrap_or(false);
+            let mut cmd = Command::new(onyx_bin);
+            cmd.arg("exec").arg(target).arg("--json");
+            if detach {
+                cmd.arg("--detach");
             }
+            if let Some(cwd) = args["cwd"].as_str() {
+                cmd.arg("--cwd").arg(cwd);
+            }
+            if let Some(env_map) = args["env"].as_object() {
+                for (k, v) in env_map {
+                    if let Some(val) = v.as_str() {
+                        cmd.arg("--env").arg(format!("{k}={val}"));
+                    }
+                }
+            }
+            if let Some(timeout_ms) = args["timeout_ms"].as_u64() {
+                let secs = (timeout_ms + 999) / 1000;
+                cmd.arg("--timeout").arg(format!("{secs}s"));
+            }
+            cmd.arg("--");
+            for s in command {
+                cmd.arg(s);
+            }
+            Ok(cmd)
         }
+        "onyx_attach" => {
+            let target = require_str(args, "target")?;
+            let job_id = require_str(args, "job_id")?;
+            let mut cmd = Command::new(onyx_bin);
+            cmd.args(["attach", target, job_id, "--json"]);
+            Ok(cmd)
+        }
+        "onyx_logs" => {
+            let target = require_str(args, "target")?;
+            let job_id = require_str(args, "job_id")?;
+            let mut cmd = Command::new(onyx_bin);
+            cmd.args(["logs", target, job_id, "--json"]);
+            Ok(cmd)
+        }
+        _ => Err(anyhow::anyhow!("no exec command for tool: {tool_name}")),
     }
-    if let Some(timeout_ms) = args["timeout_ms"].as_u64() {
-        let secs = (timeout_ms + 999) / 1000; // ceil to seconds
-        cmd.arg("--timeout").arg(format!("{secs}s"));
-    }
-    cmd.arg("--");
-    cmd.args(&command);
+}
 
+async fn exec_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
+    let mut cmd = build_exec_cmd("onyx_exec", args, onyx_bin)?;
     let (ndjson, diagnostics) = capture(&mut cmd).await?;
 
+    let detach = args["detach"].as_bool().unwrap_or(false);
     if detach {
         let job_id = ndjson
             .lines()
@@ -303,7 +413,6 @@ async fn exec_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
                 }
             })
             .unwrap_or_default();
-
         return Ok(json!({
             "job_id": job_id,
             "status": "detached",
@@ -332,15 +441,10 @@ async fn jobs_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
 }
 
 async fn attach_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
-    let target = require_str(args, "target")?;
     let job_id = require_str(args, "job_id")?;
-
-    let mut cmd = Command::new(onyx_bin);
-    cmd.args(["attach", target, job_id, "--json"]);
-
+    let mut cmd = build_exec_cmd("onyx_attach", args, onyx_bin)?;
     let (ndjson, diagnostics) = capture(&mut cmd).await?;
     let mut result = parse_exec_stream(&ndjson);
-    // attach doesn't emit a "started" event, so fill job_id from args
     if result["job_id"].is_null() {
         result["job_id"] = json!(job_id);
     }
@@ -349,12 +453,8 @@ async fn attach_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
 }
 
 async fn logs_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
-    let target = require_str(args, "target")?;
     let job_id = require_str(args, "job_id")?;
-
-    let mut cmd = Command::new(onyx_bin);
-    cmd.args(["logs", target, job_id, "--json"]);
-
+    let mut cmd = build_exec_cmd("onyx_logs", args, onyx_bin)?;
     let (ndjson, diagnostics) = capture(&mut cmd).await?;
     let mut result = parse_exec_stream(&ndjson);
     if result["job_id"].is_null() {
@@ -424,6 +524,106 @@ async fn capture(cmd: &mut Command) -> Result<(String, String)> {
     }
 
     Ok((stdout, stderr))
+}
+
+/// Like `capture` but reads subprocess stdout line-by-line, writing a
+/// `notifications/progress` JSON-RPC notification for every meaningful event.
+/// Stderr is collected concurrently to prevent deadlock on a full pipe.
+/// Returns the same aggregated result as `parse_exec_stream` would.
+async fn capture_streaming<W: AsyncWriteExt + Unpin>(
+    cmd: &mut Command,
+    request_id: &Value,
+    writer: &mut W,
+) -> Result<Value> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let child_stdout = child.stdout.take().expect("piped");
+    let child_stderr = child.stderr.take().expect("piped");
+
+    // Drain stderr in a background task so a full stderr pipe never blocks
+    // the stdout reader and causes a deadlock.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let mut stderr = child_stderr;
+        stderr.read_to_string(&mut buf).await.ok();
+        buf
+    });
+
+    let mut reader = BufReader::new(child_stdout);
+    let mut line = String::new();
+    let mut seq: u64 = 0;
+    let mut ndjson_buf = String::new();
+
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        ndjson_buf.push_str(trimmed);
+        ndjson_buf.push('\n');
+
+        // Forward every meaningful event as a progress notification so the
+        // MCP client sees output incrementally rather than after completion.
+        if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
+            if event["type"].as_str().map_or(false, is_streamable_event) {
+                let notif = json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/progress",
+                    "params": {
+                        "progressToken": request_id,
+                        "progress": seq,
+                        // The event JSON is embedded as a string so the
+                        // client can parse it if it wants structured data.
+                        "message": trimmed
+                    }
+                });
+                seq += 1;
+                let mut out = notif.to_string();
+                out.push('\n');
+                writer.write_all(out.as_bytes()).await?;
+                writer.flush().await?;
+            }
+        }
+    }
+
+    let _ = child.wait().await;
+    let stderr_str = stderr_task.await.unwrap_or_default().trim().to_string();
+
+    if ndjson_buf.trim().is_empty() {
+        let msg = if stderr_str.is_empty() {
+            "onyx produced no output".to_string()
+        } else {
+            classify_error(&stderr_str)
+        };
+        return Err(anyhow::anyhow!("{msg}"));
+    }
+
+    let mut result = parse_exec_stream(&ndjson_buf);
+    result["diagnostics"] = json!(stderr_str);
+    Ok(result)
+}
+
+/// Events that are meaningful to forward incrementally. Informational events
+/// like "reconnecting"/"resumed" are included so the client can show progress;
+/// internal events ("job", etc.) are excluded.
+pub fn is_streamable_event(t: &str) -> bool {
+    matches!(
+        t,
+        "started"
+            | "stdout"
+            | "stderr"
+            | "finished"
+            | "timeout"
+            | "reconnecting"
+            | "resumed"
+            | "gap"
+            | "error"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -803,6 +1003,30 @@ not json at all
         let e = mk_error("job_not_found", "no such job: job_xyz");
         assert_eq!(e["error"], "job_not_found");
         assert_eq!(e["message"], "no such job: job_xyz");
+    }
+
+    // -- streaming helpers ---------------------------------------------------
+
+    #[test]
+    fn streamable_event_covers_all_meaningful_types() {
+        for t in ["started", "stdout", "stderr", "finished", "timeout",
+                  "reconnecting", "resumed", "gap", "error"] {
+            assert!(is_streamable_event(t), "{t} should be streamable");
+        }
+        assert!(!is_streamable_event("job"), "job list events are not exec events");
+        assert!(!is_streamable_event("kill_result"));
+        assert!(!is_streamable_event("unknown_type"));
+    }
+
+    #[test]
+    fn streaming_call_detects_stream_flag() {
+        let streaming = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"onyx_exec","arguments":{"target":"h","command":["ls"],"stream":true}}}"#;
+        let buffered  = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"onyx_exec","arguments":{"target":"h","command":["ls"]}}}"#;
+        let other     = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#;
+        assert!(is_streaming_call(streaming));
+        assert!(!is_streaming_call(buffered));
+        assert!(!is_streaming_call(other));
+        assert!(!is_streaming_call("not json {{{"));
     }
 
     // -- protocol layer (no subprocess) -------------------------------------
