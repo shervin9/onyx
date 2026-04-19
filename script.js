@@ -5,6 +5,7 @@
   var mcpLine = document.querySelector(".mcp-line");
   var mcpPulse = document.querySelector(".mcp-pulse");
   var mcpCards = Array.prototype.slice.call(document.querySelectorAll(".mcp-card"));
+  var repoMetaStrip = document.getElementById("repo-meta-strip");
   var repoMetaText = document.getElementById("repo-meta-text");
 
   var execStatusBadge = document.getElementById("exec-status-badge");
@@ -21,13 +22,12 @@
 
   var repoApiUrl = "https://api.github.com/repos/shervin9/onyx";
   var latestReleaseApiUrl = "https://api.github.com/repos/shervin9/onyx/releases/latest";
-  var fallbackReleaseTag = "v0.2.5";
 
   var terminalScenes = [
     { command: "onyx user@host", meta: "[shell] auto-reconnect + tmux" },
-    { command: "onyx exec prod --cwd /srv/app -- ./deploy.sh", meta: "[exec] resumable remote job" },
+    { command: "onyx exec prod -- ./deploy.sh", meta: "[exec] resumable remote job" },
     { command: "onyx exec gpu-box --detach -- python train.py", meta: "[job] detach now, attach later" },
-    { command: "onyx jobs gpu-box --json", meta: "[json] structured job state" },
+    { command: "onyx logs gpu-box job_xxx", meta: "[logs] inspect output later" },
     { command: "onyx mcp serve", meta: "[mcp] local stdio tools for agents" }
   ];
 
@@ -191,8 +191,12 @@
   }
 
   function renderRepoMeta(releaseTag, stars, forks) {
-    if (!repoMetaText) return;
-    var parts = ["Latest " + (releaseTag || fallbackReleaseTag)];
+    if (!repoMetaText || !repoMetaStrip) return;
+    var parts = [];
+
+    if (typeof releaseTag === "string" && releaseTag.trim()) {
+      parts.push("Latest " + releaseTag.trim());
+    }
 
     if (typeof stars === "number") {
       parts.push(formatCount(stars) + " stars");
@@ -202,12 +206,18 @@
       parts.push(formatCount(forks) + " forks");
     }
 
+    if (!parts.length) {
+      repoMetaText.textContent = "";
+      repoMetaStrip.hidden = true;
+      return;
+    }
+
     repoMetaText.textContent = parts.join(" · ");
+    repoMetaStrip.hidden = false;
   }
 
   function loadRepoMeta() {
-    renderRepoMeta(fallbackReleaseTag);
-    if (!repoMetaText || !window.fetch) return;
+    if (!repoMetaText || !repoMetaStrip || !window.fetch) return;
 
     Promise.all([
       fetchJson(repoApiUrl).catch(function () { return null; }),
@@ -215,7 +225,7 @@
     ]).then(function (results) {
       var repo = results[0];
       var release = results[1];
-      var releaseTag = fallbackReleaseTag;
+      var releaseTag;
 
       if (release && typeof release.tag_name === "string" && release.tag_name.trim()) {
         releaseTag = release.tag_name.trim();
@@ -227,7 +237,7 @@
         repo && typeof repo.forks_count === "number" ? repo.forks_count : undefined
       );
     }).catch(function () {
-      renderRepoMeta(fallbackReleaseTag);
+      repoMetaStrip.hidden = true;
     });
   }
 

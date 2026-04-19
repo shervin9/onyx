@@ -21,14 +21,14 @@
     <div class="nav-actions">
       <a href="#shell" class="nav-link">Shell</a>
       <a href="#exec" class="nav-link">Exec</a>
-      <a href="#mcp" class="nav-link">MCP</a>
+      <a href="./docs/" class="nav-link">Docs</a>
       <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
     </div>
   </nav>
 
   <main>
     <section class="hero">
-      <div class="repo-meta-strip" id="repo-meta-strip">
+      <div class="repo-meta-strip" id="repo-meta-strip" hidden>
         <a
           href="https://github.com/shervin9/onyx"
           target="_blank"
@@ -36,12 +36,11 @@
           class="repo-meta-link"
           aria-label="Onyx GitHub metadata"
         >
-          <span id="repo-meta-text">Latest v0.2.5</span>
+          <span id="repo-meta-text"></span>
         </a>
       </div>
-      <div class="badge">v0.2.5</div>
       <h1>Remote work that survives the network.</h1>
-      <p class="sub">Run shells, commands, and agent-driven jobs that keep going — even when your connection doesn’t.</p>
+      <p class="sub">Run shells, jobs, and agent work that keep going through disconnects.</p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>
@@ -77,41 +76,16 @@
       </div>
     </section>
 
-    <section class="trust-section">
-      <div class="section-head">
-        <h2>Built for real network conditions.</h2>
-        <p>Packet loss, flaky Wi-Fi, and blocked UDP are normal. Onyx keeps the remote side running and gives you a clean way back in.</p>
-      </div>
-      <div class="feature-grid trust-grid">
-        <article class="feature-card">
-          <strong>Handles packet loss</strong>
-          <span>Reconnect and resume are part of the normal path instead of a last-resort recovery flow.</span>
-        </article>
-        <article class="feature-card">
-          <strong>Resumes after short drops</strong>
-          <span>Interactive shells and foreground exec flows recover across brief transport loss without starting over.</span>
-        </article>
-        <article class="feature-card">
-          <strong>Falls back to SSH automatically</strong>
-          <span>Prefer QUIC when UDP works. Use SSH when it does not.</span>
-        </article>
-        <article class="feature-card">
-          <strong>Keeps jobs server-side</strong>
-          <span><code>onyx exec</code> keeps remote work running even when the client disconnects or sleeps.</span>
-        </article>
-      </div>
-    </section>
-
     <section class="flow shell-feature" id="shell">
       <div class="section-head">
         <h2>Stable interactive sessions.</h2>
-        <p>Use Onyx like a normal shell target. It auto-reconnects, keeps the session under tmux, retains remote state server-side, and falls back to SSH when needed.</p>
+        <p>Connect like a normal shell target. Reconnect cleanly when the link drops.</p>
       </div>
       <div class="shell-stack">
         <article class="workflow-card shell-command-card">
           <span class="workflow-kicker">Interactive shell</span>
           <pre><code>onyx user@host</code></pre>
-          <p class="workflow-copy">Connect with QUIC first, fall back to SSH when needed, and use <code>onyx user@host:7373</code> when the remote listens on a custom port.</p>
+          <p class="workflow-copy">Auto-reconnect, tmux-backed state, and SSH fallback when needed.</p>
         </article>
       </div>
       <div class="shell-notes">
@@ -122,10 +96,6 @@
         <article class="shell-note">
           <strong>tmux-backed</strong>
           <span>Keep shell state and scrollback on the server instead of treating the session as disposable.</span>
-        </article>
-        <article class="shell-note">
-          <strong>Retains the remote session</strong>
-          <span>Reconnect to the same shell state instead of opening a fresh session after every brief drop.</span>
         </article>
         <article class="shell-note">
           <strong>Falls back to SSH</strong>
@@ -191,26 +161,21 @@
       <div class="exec-command-grid" aria-label="Onyx exec command examples">
         <article class="exec-command-card">
           <span class="exec-command-label">Run</span>
-          <code>onyx exec prod --cwd /srv/app -- ./deploy.sh</code>
-          <p>Run in a remote working directory and stay attached to live output.</p>
+          <code>onyx exec prod -- ./deploy.sh</code>
+          <p>Start a remote command and stay attached.</p>
         </article>
         <article class="exec-command-card">
           <span class="exec-command-label">Detach</span>
           <code>onyx exec gpu-box --detach -- python train.py</code>
-          <p>Start a job, get a job id immediately, and let it keep running server-side.</p>
+          <p>Start once. Attach later.</p>
         </article>
         <article class="exec-command-card">
           <span class="exec-command-label">Logs</span>
           <code>onyx logs gpu-box job_xxx</code>
-          <p>Read buffered output later without taking over the running job.</p>
-        </article>
-        <article class="exec-command-card">
-          <span class="exec-command-label">Kill</span>
-          <code>onyx kill gpu-box job_xxx</code>
-          <p>Stop a running job explicitly when the work should end.</p>
+          <p>Check output without taking over the job.</p>
         </article>
       </div>
-      <p class="exec-support-copy">Resume live output with <code>onyx attach gpu-box job_xxx</code>. For automation, <code>onyx jobs prod --json</code> and <code>onyx exec prod --env RUST_LOG=info --timeout 60s -- cargo test</code> keep state explicit.</p>
+      <p class="exec-support-copy">Attach later. Kill when needed. <a href="./docs/exec.html" class="inline-link">Full CLI and MCP reference → Docs</a></p>
     </section>
 
     <section class="mcp-section" id="mcp">
@@ -238,63 +203,22 @@
         </div>
       </div>
 
-      <div class="mcp-capability-grid">
-        <article class="mcp-capability">
-          <span class="mcp-capability-title">Run</span>
-          <code>onyx_exec</code>
-          <p>Run remote commands with <code>cwd</code>, <code>env</code>, and <code>timeout_ms</code>. Use <code>onyx_attach</code> to rejoin live output.</p>
-        </article>
-        <article class="mcp-capability">
-          <span class="mcp-capability-title">Jobs</span>
-          <code>onyx_jobs</code>
-          <p>Inspect running and finished jobs from the local agent side.</p>
-        </article>
-        <article class="mcp-capability">
-          <span class="mcp-capability-title">Logs</span>
-          <code>onyx_logs</code>
-          <p>Read buffered output later without attaching to the live stream.</p>
-        </article>
-        <article class="mcp-capability">
-          <span class="mcp-capability-title">Kill</span>
-          <code>onyx_kill</code>
-          <p>Stop a remote job when the agent decides the work should end.</p>
-        </article>
+      <div class="mcp-tool-grid" aria-label="Onyx MCP tools">
+        <article class="mcp-tool"><code>onyx_exec</code></article>
+        <article class="mcp-tool"><code>onyx_jobs</code></article>
+        <article class="mcp-tool"><code>onyx_attach</code></article>
+        <article class="mcp-tool"><code>onyx_logs</code></article>
+        <article class="mcp-tool"><code>onyx_kill</code></article>
       </div>
 
-      <pre class="mcp-sample"><code>target=hetzner-dev
-command=["git","status"]</code></pre>
-      <p class="mcp-support-copy"><code>onyx mcp serve</code> exposes a local stdio MCP server for agent clients today.</p>
-    </section>
-
-    <section class="features">
-      <div class="section-head">
-        <h2>One surface for people, scripts, and agents.</h2>
-        <p>Interactive shells, resumable jobs, and local MCP access all ride the same remote execution layer.</p>
-      </div>
-      <div class="feature-grid">
-        <article class="feature-card">
-          <strong>Interactive shell</strong>
-          <span>Use <code>onyx user@host</code> for a normal shell flow with reconnect and tmux-backed state.</span>
-        </article>
-        <article class="feature-card">
-          <strong>Exec lifecycle</strong>
-          <span>Run once, detach, attach later, read logs, list jobs, or kill work explicitly.</span>
-        </article>
-        <article class="feature-card">
-          <strong>Local MCP backend</strong>
-          <span>Expose remote execution as local MCP tools for AI agents without exposing a network service.</span>
-        </article>
-        <article class="feature-card">
-          <strong>Structured output</strong>
-          <span><code>--json</code> emits NDJSON events that fit scripts, CI, and agent workflows.</span>
-        </article>
-      </div>
+      <pre class="mcp-sample"><code>onyx mcp serve</code></pre>
+      <p class="mcp-support-copy">Run it locally. Let agents talk to remote hosts through Onyx.</p>
     </section>
 
     <section class="install" id="install">
       <div class="section-head">
         <h2>Install</h2>
-        <p>Install or update the client. Then connect.</p>
+        <p>Install the client. Update it later. Connect when ready.</p>
       </div>
       <div class="install-grid">
         <article class="install-card">
@@ -318,7 +242,7 @@ command=["git","status"]</code></pre>
           <code id="connect-cmd">onyx user@host</code>
         </div>
       </article>
-      <p class="install-support-copy">Installs the local client. The remote server is provisioned automatically over SSH when needed. <a href="https://github.com/shervin9/onyx#quickstart" target="_blank" rel="noopener noreferrer" class="inline-link">Docs</a></p>
+      <p class="install-support-copy"><a href="./docs/" class="inline-link">Full CLI and MCP reference → Docs</a></p>
     </section>
 
     <section class="oss">
@@ -354,7 +278,7 @@ command=["git","status"]</code></pre>
 
   <footer>
     <span class="logo">onyx</span>
-    <span>MIT licensed · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></span>
+    <span>MIT licensed · <a href="./docs/">Docs</a> · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></span>
   </footer>
 
   <script src="script.js"></script>

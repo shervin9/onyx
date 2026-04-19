@@ -692,7 +692,7 @@ button[id^="copy-"]:hover {
 
 .shell-notes {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1rem;
   margin-top: 1.1rem;
 }
@@ -898,7 +898,7 @@ button[id^="copy-"]:hover {
 
 .exec-command-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1rem;
   margin-top: 1.3rem;
 }
@@ -1036,42 +1036,30 @@ button[id^="copy-"]:hover {
   color: var(--dim);
 }
 
-.mcp-capability-grid {
+.mcp-tool-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.9rem;
-  max-width: 54rem;
+  max-width: 52rem;
   margin: 1.8rem auto 0;
 }
 
-.mcp-capability {
-  padding: 0.95rem 1rem;
-  text-align: left;
+.mcp-tool {
+  padding: 0.9rem 0.95rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.016)),
+    rgba(255, 255, 255, 0.014);
+  text-align: center;
 }
 
-.mcp-capability-title {
-  display: block;
-  margin-bottom: 0.42rem;
-  font-size: 0.72rem;
-  font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.mcp-capability code {
-  display: block;
+.mcp-tool code {
+  display: inline-block;
   font-family: var(--mono);
   font-size: 0.83rem;
   font-weight: 500;
   color: var(--text);
-}
-
-.mcp-capability p {
-  margin-top: 0.45rem;
-  color: var(--dim);
-  font-size: 0.84rem;
-  line-height: 1.52;
 }
 
 .mcp-sample {
@@ -1223,7 +1211,7 @@ footer a:hover { color: var(--dim); }
 
 @media (max-width: 900px) {
   .install-grid,
-  .mcp-capability-grid,
+  .mcp-tool-grid,
   .flow-panels,
   .shell-notes,
   .feature-grid,

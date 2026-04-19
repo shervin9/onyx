@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Onyx Docs - MCP</title>
+  <meta name="description" content="Run Onyx as a local MCP backend for agent clients.">
+  <meta name="theme-color" content="#090909">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./docs.css">
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <nav>
+    <a href="../" class="logo">onyx</a>
+    <div class="nav-actions">
+      <a href="../" class="nav-link">Home</a>
+      <a href="./" class="nav-link is-active">Docs</a>
+      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="doc-hero">
+      <span class="doc-eyebrow">MCP</span>
+      <h1>Local MCP</h1>
+      <p class="doc-subhead">Agents talk local. Onyx executes remote.</p>
+      <div class="docs-tabs">
+        <a href="./index.html" class="docs-tab">Overview</a>
+        <a href="./install.html" class="docs-tab">Install</a>
+        <a href="./shell.html" class="docs-tab">Shell</a>
+        <a href="./exec.html" class="docs-tab">Exec</a>
+        <a href="./mcp.html" class="docs-tab is-active">MCP</a>
+      </div>
+    </section>
+
+    <section class="doc-section">
+      <h2>Run the server</h2>
+      <p>Start the local stdio server, then point your agent client at it.</p>
+      <div class="card-grid">
+        <article class="code-panel">
+          <div class="panel-head">Start</div>
+          <pre><code>onyx mcp serve</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="doc-section">
+      <h2>Tools</h2>
+      <p>The MCP server exposes a small remote execution surface.</p>
+      <div class="tool-grid">
+        <article class="tool-card"><code>onyx_exec</code></article>
+        <article class="tool-card"><code>onyx_jobs</code></article>
+        <article class="tool-card"><code>onyx_attach</code></article>
+        <article class="tool-card"><code>onyx_logs</code></article>
+        <article class="tool-card"><code>onyx_kill</code></article>
+      </div>
+    </section>
+
+    <section class="doc-section">
+      <h2>JSON examples</h2>
+      <p>Keep requests local. Onyx handles the remote hop.</p>
+      <div class="card-grid">
+        <article class="code-panel">
+          <div class="panel-head">onyx_exec</div>
+          <pre><code>{
+  "name": "onyx_exec",
+  "arguments": {
+    "target": "hetzner-dev",
+    "command": ["git", "status"],
+    "cwd": "/srv/app",
+    "timeout_ms": 30000
+  }
+}</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">onyx_logs</div>
+          <pre><code>{
+  "name": "onyx_logs",
+  "arguments": {
+    "target": "gpu-box",
+    "job_id": "job_xxx"
+  }
+}</code></pre>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span class="logo">onyx</span>
+    <span><a href="../">Home</a> · <a href="./">Docs</a> · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a></span>
+  </footer>
+</body>
+</html>

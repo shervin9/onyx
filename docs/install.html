@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Onyx Docs - Install</title>
+  <meta name="description" content="Install and update Onyx, then connect to a host.">
+  <meta name="theme-color" content="#090909">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="./docs.css">
+</head>
+<body>
+  <div class="ambient ambient-a" aria-hidden="true"></div>
+  <div class="ambient ambient-b" aria-hidden="true"></div>
+
+  <nav>
+    <a href="../" class="logo">onyx</a>
+    <div class="nav-actions">
+      <a href="../" class="nav-link">Home</a>
+      <a href="./" class="nav-link is-active">Docs</a>
+      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
+    </div>
+  </nav>
+
+  <main>
+    <section class="doc-hero">
+      <span class="doc-eyebrow">Install</span>
+      <h1>Install Onyx</h1>
+      <p class="doc-subhead">Install the local client, then connect to a host. Onyx provisions the remote server over SSH when needed.</p>
+      <div class="docs-tabs">
+        <a href="./index.html" class="docs-tab">Overview</a>
+        <a href="./install.html" class="docs-tab is-active">Install</a>
+        <a href="./shell.html" class="docs-tab">Shell</a>
+        <a href="./exec.html" class="docs-tab">Exec</a>
+        <a href="./mcp.html" class="docs-tab">MCP</a>
+      </div>
+    </section>
+
+    <section class="doc-section">
+      <h2>Quickstart</h2>
+      <p>Homebrew installs and updates the local client. Connect with the same host syntax you already use.</p>
+      <div class="card-grid">
+        <article class="code-panel">
+          <div class="panel-head">Install</div>
+          <pre><code>brew install shervin9/onyx/onyx --formula</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">Update</div>
+          <pre><code>brew upgrade shervin9/onyx/onyx --formula</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">Connect</div>
+          <pre><code>onyx user@host</code></pre>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span class="logo">onyx</span>
+    <span><a href="../">Home</a> · <a href="./">Docs</a> · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a></span>
+  </footer>
+</body>
+</html>
