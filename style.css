@@ -655,6 +655,17 @@ button[id^="copy-"]:hover {
   line-height: 1.6;
 }
 
+.workflow-copy code,
+.exec-support-copy code,
+.mcp-capability p code,
+.mcp-support-copy code,
+.install-support-copy code,
+.feature-card code {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--text);
+}
+
 .flow-meta {
   margin-top: 0.7rem;
   color: #aeb4c8;
@@ -681,7 +692,7 @@ button[id^="copy-"]:hover {
 
 .shell-notes {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 1rem;
   margin-top: 1.1rem;
 }
@@ -958,7 +969,7 @@ button[id^="copy-"]:hover {
   width: var(--mcp-line-width, 68%);
   top: var(--mcp-line-top, 50%);
   height: 1px;
-  background: rgba(255, 255, 255, 0.08);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(110, 140, 255, 0.18), rgba(255, 255, 255, 0.08));
   transform: translateY(-50%);
   z-index: 0;
 }
@@ -999,11 +1010,11 @@ button[id^="copy-"]:hover {
 
 .mcp-card.is-active {
   color: var(--text);
-  border-color: rgba(110, 140, 255, 0.2);
+  border-color: rgba(110, 140, 255, 0.24);
   background:
-    linear-gradient(180deg, rgba(110, 140, 255, 0.04), rgba(255, 255, 255, 0.018)),
-    rgba(255, 255, 255, 0.018);
-  box-shadow: 0 0 0 0.24rem rgba(110, 140, 255, 0.03);
+    linear-gradient(180deg, rgba(110, 140, 255, 0.05), rgba(255, 255, 255, 0.02)),
+    rgba(255, 255, 255, 0.02);
+  box-shadow: 0 0 0 0.24rem rgba(110, 140, 255, 0.035);
 }
 
 .mcp-card-title {
@@ -1027,9 +1038,9 @@ button[id^="copy-"]:hover {
 
 .mcp-capability-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.9rem;
-  max-width: 44rem;
+  max-width: 54rem;
   margin: 1.8rem auto 0;
 }
 
@@ -1078,6 +1089,27 @@ button[id^="copy-"]:hover {
   font-family: var(--mono);
   font-size: 0.79rem;
   line-height: 1.65;
+}
+
+.mcp-support-copy,
+.install-support-copy {
+  max-width: 40rem;
+  margin: 1rem auto 0;
+  color: var(--dim);
+  font-size: 0.88rem;
+  text-align: center;
+}
+
+.inline-link {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  transition: color 0.16s ease, border-color 0.16s ease;
+}
+
+.inline-link:hover {
+  color: var(--white);
+  border-color: rgba(255, 255, 255, 0.28);
 }
 
 .feature-grid {
