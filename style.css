@@ -313,18 +313,19 @@ h1 {
   position: relative;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
+  gap: 0.75rem;
   padding: 0.85rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.018);
-  text-align: center;
+  text-align: left;
 }
 
 .terminal-dots {
   display: flex;
   gap: 0.4rem;
-  position: absolute;
-  left: 1rem;
+  position: static;
+  left: auto;
 }
 
 .terminal-dots span {
@@ -339,11 +340,12 @@ h1 {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted);
+  text-align: left;
 }
 
 .terminal-body {
   padding: 1.2rem 1.25rem 1.3rem;
-  text-align: center;
+  text-align: left;
   font-family: var(--mono);
   font-weight: 500;
   letter-spacing: -0.01em;
@@ -352,12 +354,12 @@ h1 {
 .terminal-line {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 0.65rem;
   min-height: 1.65rem;
   font-size: 0.9rem;
   color: var(--text);
-  text-align: center;
+  text-align: left;
 }
 
 .terminal-line + .terminal-line { margin-top: 0.25rem; }
@@ -380,7 +382,7 @@ h1 {
 .terminal-text {
   white-space: pre-wrap;
   word-break: break-word;
-  text-align: center;
+  text-align: left;
 }
 
 .caret {
@@ -762,13 +764,12 @@ button[id^="copy-"]:hover {
 .exec-status-bar {
   display: flex;
   align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
+  justify-content: flex-start;
   gap: 0.7rem;
   padding: 0.82rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.014);
-  text-align: center;
+  text-align: left;
 }
 
 .exec-status-label {
@@ -818,12 +819,11 @@ button[id^="copy-"]:hover {
 }
 
 .exec-status-meta {
-  width: 100%;
   margin-left: 0;
   font-family: var(--mono);
   font-size: 0.78rem;
   color: #9da2af;
-  text-align: center;
+  text-align: left;
 }
 
 .exec-scene {
@@ -842,7 +842,7 @@ button[id^="copy-"]:hover {
 }
 
 .exec-scene .terminal-line {
-  align-items: center;
+  align-items: flex-start;
 }
 
 .exec-scene .terminal-text {
@@ -1379,7 +1379,7 @@ footer a:hover { color: var(--dim); }
 
   .exec-status-bar {
     flex-wrap: wrap;
-    align-items: center;
+    align-items: flex-start;
   }
 
   .exec-status-badge,
@@ -1391,6 +1391,7 @@ footer a:hover { color: var(--dim); }
     width: 100%;
     margin-left: 0;
     font-size: 0.74rem;
+    text-align: left;
   }
 
   .exec-command-card {
