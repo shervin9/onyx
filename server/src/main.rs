@@ -1396,7 +1396,7 @@ async fn run_session(
                      conf=~/.config/onyx/tmux.conf; \
                      if [ ! -f \"$conf\" ]; then \
                          mkdir -p ~/.config/onyx; \
-                         printf 'set -g mouse on\\nset -g history-limit 50000\\n' > \"$conf\"; \
+                         printf 'set -g mouse on\\nset -g history-limit 50000\\nset -g status-style bg=colour234,fg=colour240\\nset -g pane-border-style fg=colour236\\nset -g pane-active-border-style fg=colour240\\n' > \"$conf\"; \
                      fi; \
                      tmux -f \"$conf\" new-session -A -s \"onyx-{session_id}\" -e ONYX_MODE=quic; \
                  else \
@@ -1817,7 +1817,22 @@ async fn main() -> Result<()> {
         jobs.clone(),
     ));
 
-    let addr: SocketAddr = format!("0.0.0.0:{DEFAULT_PORT}").parse()?;
+    let quic_port: u16 = {
+        let mut args = std::env::args().skip(1);
+        let mut port = None;
+        while let Some(a) = args.next() {
+            if a == "--port" {
+                port = args.next().and_then(|v| v.parse::<u16>().ok());
+            }
+        }
+        port.or_else(|| {
+            std::env::var("ONYX_PORT")
+                .ok()
+                .and_then(|v| v.trim().parse::<u16>().ok())
+        })
+        .unwrap_or(DEFAULT_PORT)
+    };
+    let addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse()?;
     let (server_cfg, fingerprint) = make_server_config()?;
     let endpoint = Endpoint::server(server_cfg, addr)?;
     let bound = endpoint.local_addr()?;

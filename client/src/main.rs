@@ -61,17 +61,38 @@ set -g set-titles-string '#(~/.config/onyx/status.sh title "#{pane_current_path}
 set -g automatic-rename on
 set -g automatic-rename-format '#(~/.config/onyx/status.sh window "#{pane_current_path}" "#{pane_current_command}")'
 
-# Status bar — onyx brand, minimal
-set -g status-style                'bg=colour235,fg=colour250'
-set -g status-interval             5
-set -g status-left                 '#[fg=colour214,bold][onyx:#{E:ONYX_MODE}]#[fg=colour240] '
-set -g status-left-length          20
-set -g status-right                '#[fg=colour244]#(~/.config/onyx/status.sh right "#{pane_current_path}" "#{pane_current_command}")'
-set -g status-right-length         120
-set -g window-status-current-style 'fg=colour214,bold'
-set -g pane-border-style           'fg=colour238'
-set -g pane-active-border-style    'fg=colour214'
-set -g message-style               'bg=colour235,fg=colour214'
+# ── Status bar ────────────────────────────────────────────────────────────────
+# Near-black surface; minimal visual weight when healthy.
+# colour234 = #1c1c1c   colour240 = #585858   colour241 = #626262
+# colour238 = #444444   colour248 = #a8a8a8
+set -g status-style    'bg=colour234,fg=colour240'
+set -g status-interval 5
+
+# Left: one state dot + transport label — no brackets, no bold, no full-bar color.
+# Dot color encodes connection state (all via tmux built-ins, no extra scripts):
+#   ● muted green  = QUIC, client attached
+#   ● gold         = SSH fallback, client attached
+#   ● amber        = no client attached (reconnecting or session idle)
+set -g status-left-length 20
+set -g status-left '#{?#{==:#{session_attached},0},#[fg=colour208],#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178],#[fg=colour71]}}●#[fg=colour242,nobold] #{E:ONYX_MODE} '
+
+# Right: path · branch · cmd — dim, secondary info, no color pop
+set -g status-right-length 100
+set -g status-right '#[fg=colour241]#(~/.config/onyx/status.sh right "#{pane_current_path}" "#{pane_current_command}")'
+
+# Window tabs — dim when inactive, barely lighter when active; no highlight slab
+set -g window-status-style         'fg=colour238,bg=colour234'
+set -g window-status-current-style 'fg=colour248,bg=colour234,bold'
+set -g window-status-format         '#W'
+set -g window-status-current-format '#W'
+set -g window-status-separator      '  '
+
+# Pane borders — very subtle, no accent color
+set -g pane-border-style        'fg=colour236'
+set -g pane-active-border-style 'fg=colour240'
+
+# Command/message prompt — neutral
+set -g message-style 'bg=colour234,fg=colour248'
 "##;
 
 /// Context script called from tmux. Dispatch on $1:
@@ -719,6 +740,7 @@ enum CliMode {
         no_bootstrap: bool,
         low_bandwidth: bool,
         forwards: Vec<(u16, u16)>,
+        port_override: Option<u16>,
     },
     Proxy {
         target_host: String,
@@ -754,6 +776,10 @@ enum CliMode {
         job_id: String,
     },
     Mcp {},
+    Doctor {
+        raw_target: String,
+        identity_file: Option<String>,
+    },
 }
 
 /// Outcome of parsing argv. Separate from `CliMode` so `--help` / `--version`
@@ -818,6 +844,29 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             target_host,
             target_port,
             no_fallback,
+        }));
+    }
+
+    if matches!(it.peek(), Some(cmd) if cmd == "doctor") {
+        it.next();
+        let raw_target = it
+            .next()
+            .ok_or_else(|| "doctor: missing <target>".to_string())?;
+        let mut identity: Option<String> = None;
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "-i" => {
+                    identity = Some(
+                        it.next()
+                            .ok_or_else(|| "-i requires an argument".to_string())?,
+                    );
+                }
+                other => return Err(format!("doctor: unexpected argument: {other} (try --help)")),
+            }
+        }
+        return Ok(ParseOutcome::Run(CliMode::Doctor {
+            raw_target,
+            identity_file: identity,
         }));
     }
 
@@ -959,6 +1008,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     let mut no_bootstrap = false;
     let mut low_bandwidth = false;
     let mut forwards: Vec<(u16, u16)> = Vec::new();
+    let mut port_override: Option<u16> = None;
 
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -971,6 +1021,15 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             "--no-fallback" => no_fallback = true,
             "--no-bootstrap" => no_bootstrap = true,
             "--low-bandwidth" => low_bandwidth = true,
+            "--port" => {
+                let val = it
+                    .next()
+                    .ok_or_else(|| "--port requires an argument".to_string())?;
+                port_override = Some(
+                    val.parse::<u16>()
+                        .map_err(|_| "--port: port must be 0-65535".to_string())?,
+                );
+            }
             "--forward" | "-L" => {
                 let spec = it
                     .next()
@@ -999,6 +1058,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         no_bootstrap,
         low_bandwidth,
         forwards,
+        port_override,
     }))
 }
 
@@ -1025,6 +1085,7 @@ USAGE
   onyx jobs   <target> [--json]
   onyx attach <target> <job-id> [--json]
   onyx logs   <target> <job-id> [--json]
+  onyx doctor <target>                              run diagnostics for a target
   onyx mcp serve                                    stdio MCP server (for AI agents)
   onyx --help | --version
 
@@ -1065,6 +1126,9 @@ INSTALL MODEL
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
+  --port <port>             QUIC port on the remote (default: 7272).
+                              Also: ONYX_PORT=<port> env var (all modes).
+                              Alternative: append :<port> to the target.
   --no-bootstrap            skip remote install/start checks
   --no-fallback             exit on QUIC failure instead of falling back
                               (plain SSH exec for interactive, plain TCP
@@ -1080,6 +1144,8 @@ EXAMPLES
   onyx user@host
   onyx dev-server                    # SSH alias from ~/.ssh/config
   onyx --forward 8888:8888 user@host
+  onyx --port 443 user@host          # custom QUIC port
+  ONYX_PORT=443 onyx exec host -- cmd
   onyx proxy host.example.com 22     # behind ProxyCommand in ssh_config
   onyx proxy --no-fallback host 22   # require QUIC for ProxyCommand
   onyx exec prod -- deploy.sh
@@ -1088,6 +1154,7 @@ EXAMPLES
   onyx jobs gpu-box
   onyx attach gpu-box job_a1b2c3d4e5f60718
   onyx logs  gpu-box job_a1b2c3d4e5f60718
+  onyx doctor user@host              # diagnose connectivity
 ";
 
 /// Real CLI entry point. Wraps `parse_args_from` and converts parse errors /
@@ -1258,6 +1325,8 @@ mod parse_args_tests {
             "--no-fallback",
             "--no-bootstrap",
             "--low-bandwidth",
+            "--port",
+            "ONYX_PORT",
             "proxy <host> <port>",
             "proxy --no-fallback",
             "12 hours",
@@ -1266,6 +1335,7 @@ mod parse_args_tests {
             "onyx jobs",
             "onyx attach",
             "onyx logs",
+            "onyx doctor",
             "--json",
             "--detach",
             "Resumable remote command execution",
@@ -1684,13 +1754,23 @@ fn resolve_via_ssh_config(ssh_target: &str, identity: Option<&str>) -> Result<(S
 }
 
 /// Build a fully-resolved OnyxTarget from raw CLI args.
-fn build_target(raw: &str, identity: Option<String>) -> Result<OnyxTarget> {
+/// Port resolution order: explicit `port_override` → `ONYX_PORT` env → `:port` suffix → DEFAULT_PORT.
+fn build_target(raw: &str, identity: Option<String>, port_override: Option<u16>) -> Result<OnyxTarget> {
     // Strip optional `:quic_port` suffix (rightmost colon followed by digits).
     let (ssh_part, quic_port) = match raw.rfind(':') {
         Some(i) if raw[i + 1..].parse::<u16>().is_ok() => {
             (raw[..i].to_string(), raw[i + 1..].parse::<u16>().unwrap())
         }
-        _ => (raw.to_string(), DEFAULT_PORT),
+        _ => {
+            let port = port_override
+                .or_else(|| {
+                    std::env::var("ONYX_PORT")
+                        .ok()
+                        .and_then(|v| v.trim().parse::<u16>().ok())
+                })
+                .unwrap_or(DEFAULT_PORT);
+            (raw.to_string(), port)
+        }
     };
 
     // Determine the bare host (strip leading user@).
@@ -2015,7 +2095,7 @@ fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths
 // ---------------------------------------------------------------------------
 
 fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
-    eprintln!("  installing Rust via rustup...");
+    eprintln!("[onyx] installing Rust via rustup…");
     ssh_show(
         target,
         identity,
@@ -2023,7 +2103,7 @@ fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
          | sh -s -- -y --no-modify-path",
     )
     .context("Rust installation failed on remote")?;
-    eprintln!("  Rust installed");
+    eprintln!("[onyx] Rust installed");
     Ok(())
 }
 
@@ -2088,7 +2168,7 @@ fn upload_and_build(
     identity: Option<&str>,
     paths: &RemotePaths,
 ) -> Result<()> {
-    eprintln!("  uploading source...");
+    eprintln!("[onyx] uploading source…");
     ssh_show(
         target,
         identity,
@@ -2129,7 +2209,7 @@ fn upload_and_build(
         SERVER_MAIN_RS.as_bytes(),
     )?;
 
-    eprintln!("  building onyx-server (this takes a minute on first run)...");
+    eprintln!("[onyx] building on remote (first run, ~1 min)…");
     // Build into the workspace's target/ as usual, then stage the resulting
     // binary at onyx-server.new. We deliberately do NOT overwrite the live
     // onyx-server path here — that triggers ETXTBSY ("Text file busy") if
@@ -2144,7 +2224,7 @@ fn upload_and_build(
             shell_quote(&paths.remote_dir)
         ),
     )?;
-    eprintln!("  build complete");
+    eprintln!("[onyx] build complete");
     Ok(())
 }
 
@@ -2159,7 +2239,7 @@ fn upload_prebuilt_server(
     };
 
     let binary_name = server_artifact_name(remote_arch).unwrap_or("onyx-server");
-    eprintln!("  uploading prebuilt onyx-server ({binary_name})...");
+    eprintln!("[onyx] installing prebuilt server ({binary_name})…");
     let bytes = fs::read(&local_binary).with_context(|| {
         format!(
             "reading local prebuilt server binary {}",
@@ -2294,7 +2374,7 @@ fn start_server(
             "startup failed: port appears busy but server.pid does not point to a healthy onyx-server"
         );
     } else {
-        eprintln!("  starting onyx-server...");
+        eprintln!("[onyx] starting server…");
     }
 
     // Kill stale instance + give OS a moment to release the UDP socket.
@@ -2318,21 +2398,27 @@ fn start_server(
         &format!(": > {} 2>/dev/null; true", shell_quote(&server_log)),
     );
 
+    let port_arg = if quic_port == DEFAULT_PORT {
+        String::new()
+    } else {
+        format!(" --port {quic_port}")
+    };
     ssh_show(
         target,
         identity,
         &format!(
-            "nohup {remote_dir}/onyx-server \
+            "nohup {remote_dir}/onyx-server{port_arg} \
          >{server_log} 2>&1 </dev/null & \
          printf %s \"$!\" > {server_pid} && \
          chmod 600 {server_pid} {server_log}",
             server_pid = shell_quote(&server_pid),
             server_log = shell_quote(&server_log),
-            remote_dir = remote_dir
+            remote_dir = remote_dir,
+            port_arg = port_arg,
         ),
     )?;
 
-    // Poll server.log for "listening on" — confirms the UDP socket is bound.
+    // Poll server.log for "listening on :<port>" — confirms the UDP socket is bound.
     // Checks every 500 ms for up to 10 s.
     let ready = (0..20).any(|_| {
         std::thread::sleep(Duration::from_millis(500));
@@ -2340,7 +2426,7 @@ fn start_server(
             target,
             identity,
             &format!(
-                "grep -q 'listening on' {} 2>/dev/null && echo yes",
+                "grep -q 'listening on .*:{quic_port}' {} 2>/dev/null && echo yes",
                 shell_quote(&server_log)
             ),
         )
@@ -2379,6 +2465,127 @@ fn start_server(
 }
 
 // ---------------------------------------------------------------------------
+// Doctor — lightweight pre-flight diagnostics
+// ---------------------------------------------------------------------------
+
+async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> Result<()> {
+    use std::net::ToSocketAddrs;
+
+    let identity = identity_file.as_deref();
+    eprintln!("[onyx doctor] target: {raw_target}");
+
+    // Determine effective port.
+    let quic_port: u16 = std::env::var("ONYX_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse::<u16>().ok())
+        .unwrap_or(DEFAULT_PORT);
+    eprintln!("[onyx doctor] port:   {quic_port}");
+
+    // Resolve through SSH config.
+    let quic_host = match resolve_via_ssh_config(&raw_target, identity) {
+        Ok((h, _)) => {
+            eprintln!("[onyx doctor] resolves to: {h}");
+            h
+        }
+        Err(e) => {
+            eprintln!("[onyx doctor] ✗ SSH resolution failed: {e:#}");
+            eprintln!("[onyx doctor]   check your SSH config or try a full user@host address");
+            return Ok(());
+        }
+    };
+
+    // DNS.
+    let server_addr = match format!("{quic_host}:{quic_port}").to_socket_addrs() {
+        Ok(mut it) => match it.next() {
+            Some(a) => {
+                eprintln!("[onyx doctor] DNS:       OK ({a})");
+                a
+            }
+            None => {
+                eprintln!("[onyx doctor] ✗ DNS resolved to no addresses for {quic_host}");
+                return Ok(());
+            }
+        },
+        Err(e) => {
+            eprintln!("[onyx doctor] ✗ DNS lookup failed: {e}");
+            return Ok(());
+        }
+    };
+
+    // SSH reachability + remote status.
+    match tokio::task::spawn_blocking({
+        let raw_target = raw_target.clone();
+        let identity_file = identity_file.clone();
+        move || -> Result<RemoteStatus> {
+            let identity = identity_file.as_deref();
+            let paths =
+                resolve_remote_paths(&raw_target, identity).context("resolving remote paths")?;
+            let hash = format!("{:016x}", source_hash());
+            remote_status(&raw_target, identity, &hash, quic_port, &paths)
+        }
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("task: {e}"))
+    .and_then(|r| r)
+    {
+        Ok(st) => {
+            eprintln!("[onyx doctor] SSH:       OK");
+            eprintln!(
+                "[onyx doctor] server binary: {}",
+                if st.hash_ok { "up to date" } else { "stale or missing" }
+            );
+            eprintln!(
+                "[onyx doctor] server running: {}",
+                if st.running { "yes" } else { "no" }
+            );
+            eprintln!(
+                "[onyx doctor] server healthy: {}",
+                if st.healthy { "yes (QUIC port bound)" } else { "no" }
+            );
+            eprintln!("[onyx doctor] remote arch:    {}", st.arch);
+            if !st.healthy {
+                eprintln!("[onyx doctor]   tip: run `onyx {raw_target}` to bootstrap");
+            }
+        }
+        Err(e) => {
+            eprintln!("[onyx doctor] ✗ SSH failed: {e:#}");
+            eprintln!("[onyx doctor]   check SSH access: ssh {raw_target} echo ok");
+        }
+    }
+
+    // QUIC / UDP reachability.
+    let capture: FpCapture = Arc::new(Mutex::new(None));
+    let mut endpoint = match Endpoint::client("0.0.0.0:0".parse().unwrap()) {
+        Ok(ep) => ep,
+        Err(e) => {
+            eprintln!("[onyx doctor] ✗ could not create QUIC endpoint: {e}");
+            return Ok(());
+        }
+    };
+    endpoint.set_default_client_config(make_client_config(capture.clone())?);
+    let connecting = match endpoint.connect(server_addr, "localhost") {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[onyx doctor] ✗ QUIC connect setup failed: {e}");
+            return Ok(());
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(5), connecting).await {
+        Ok(Ok(_)) => eprintln!("[onyx doctor] QUIC:      reachable (UDP/{quic_port} open)"),
+        Ok(Err(e)) => eprintln!(
+            "[onyx doctor] QUIC:      handshake error — {e:#}\n\
+             [onyx doctor]   (server reachable but handshake failed; check TOFU trust)"
+        ),
+        Err(_) => eprintln!(
+            "[onyx doctor] QUIC:      timeout — UDP/{quic_port} appears blocked\n\
+             [onyx doctor]   open UDP {quic_port} in your firewall, or use --port / ONYX_PORT"
+        ),
+    }
+    endpoint.wait_idle().await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Bootstrap — entry point called once before the QUIC loop
 // ---------------------------------------------------------------------------
 
@@ -2411,7 +2618,7 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
 
         if !used_prebuilt {
             eprintln!(
-                "  no local prebuilt onyx-server for remote arch {}; falling back to cargo build",
+                "[onyx] no local prebuilt for {}; falling back to source build",
                 status.arch
             );
             if !status.has_cargo {
@@ -2575,7 +2782,7 @@ async fn run_proxy_mode(
     target_port: u16,
     no_fallback: bool,
 ) -> Result<()> {
-    let target = build_target(&target_host, None)
+    let target = build_target(&target_host, None, None)
         .with_context(|| format!("resolving target '{target_host}'"))?;
     let server_addr: SocketAddr = match {
         use std::net::ToSocketAddrs;
@@ -2875,7 +3082,7 @@ async fn prepare_exec_target(
     identity_file: Option<String>,
     no_bootstrap: bool,
 ) -> Result<(Endpoint, SocketAddr, String, FpCapture)> {
-    let target = build_target(&raw_target, identity_file)
+    let target = build_target(&raw_target, identity_file, None)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
 
     if target.ssh_mode && !no_bootstrap {
@@ -3839,6 +4046,10 @@ async fn main() -> Result<()> {
             job_id,
         } => return run_logs_mode(raw_target, identity_file, no_bootstrap, json, job_id).await,
         CliMode::Mcp {} => return mcp::run_mcp_serve().await,
+        CliMode::Doctor {
+            raw_target,
+            identity_file,
+        } => return run_doctor_mode(raw_target, identity_file).await,
         CliMode::Interactive { .. } => {}
     }
 
@@ -3849,6 +4060,7 @@ async fn main() -> Result<()> {
         no_bootstrap,
         low_bandwidth,
         forwards,
+        port_override,
     } = cli_mode
     else {
         unreachable!();
@@ -3861,7 +4073,7 @@ async fn main() -> Result<()> {
 
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
-    let target = build_target(&raw_target, identity_file)
+    let target = build_target(&raw_target, identity_file, port_override)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
 
     // SSH bootstrap (blocking, single SSH call on fast path).
@@ -4023,7 +4235,8 @@ async fn main() -> Result<()> {
                     if no_fallback {
                         return Err(e);
                     }
-                    eprintln!("  falling back to plain SSH…");
+                    eprintln!("[onyx] UDP unavailable — falling back to SSH");
+                    eprintln!("       tip: use --no-fallback to require QUIC, or --port / ONYX_PORT for a custom port");
                     let mut cmd = std::process::Command::new("ssh");
                     cmd.args(["-tt", "-q", "-o", "SetEnv ONYX_MODE=ssh"]);
                     if let Some(id) = &target.identity_file {
