@@ -101,7 +101,15 @@ pub enum Message {
     // reattach with `onyx attach` or read captured output with `onyx logs`.
     //
     /// Client → Server: start a new job. The server allocates a job_id.
-    ExecStart { command: Vec<String> },
+    ExecStart {
+        command: Vec<String>,
+        /// Optional working directory on the remote host.
+        cwd: Option<String>,
+        /// Extra environment variables for this job only (KEY, VALUE pairs).
+        env: Vec<(String, String)>,
+        /// Kill the job after this many seconds (None = no limit).
+        timeout_secs: Option<u64>,
+    },
     /// Client → Server: attach to an existing job. Server replays any
     /// buffered output with seq > last_seq, then streams new chunks.
     ExecAttach { job_id: String, last_seq: u64 },
@@ -135,6 +143,16 @@ pub enum Message {
     JobsListResponse { jobs: Vec<JobSummary> },
     /// Server → Client: exec-layer error (job not found, spawn failed, ...).
     ExecError { reason: String },
+    /// Server → Client: job was killed by the server-side timeout.
+    ExecTimedOut,
+    /// Client → Server: kill a running job.
+    Kill { job_id: String },
+    /// Server → Client: result of a Kill request.
+    KillResult {
+        job_id: String,
+        killed: bool,
+        message: String,
+    },
 }
 
 /// Serialize a message to bytes (length-prefix framing is caller's job).

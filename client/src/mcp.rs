@@ -156,7 +156,7 @@ fn tools_schema() -> Value {
     json!([
         {
             "name": "onyx_exec",
-            "description": "Execute a command on a remote Onyx target. Returns structured stdout, stderr, exit_code, and duration_ms. Use detach:true for long-running jobs (returns job_id immediately).",
+            "description": "Execute a command on a remote Onyx target. Returns structured stdout, stderr, exit_code, and duration_ms. Use detach:true for long-running jobs (returns job_id immediately). Exit code 124 means the server-side timeout fired.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -172,6 +172,19 @@ fn tools_schema() -> Value {
                     "detach": {
                         "type": "boolean",
                         "description": "Start job in background; returns job_id. Retrieve output with onyx_attach or onyx_logs."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory on the remote host."
+                    },
+                    "env": {
+                        "type": "object",
+                        "description": "Extra environment variables as a KEY→VALUE map.",
+                        "additionalProperties": {"type": "string"}
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "Kill the job after this many milliseconds. Client receives exit code 124."
                     }
                 },
                 "required": ["target", "command"]
@@ -214,6 +227,18 @@ fn tools_schema() -> Value {
                 },
                 "required": ["target", "job_id"]
             }
+        },
+        {
+            "name": "onyx_kill",
+            "description": "Kill a running job on a remote Onyx target. Returns {killed: true} if the signal was sent, {killed: false} if the job was already finished or not found.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Remote host or SSH config alias"},
+                    "job_id": {"type": "string", "description": "Job ID to kill"}
+                },
+                "required": ["target", "job_id"]
+            }
         }
     ])
 }
@@ -228,6 +253,7 @@ async fn call_tool(name: &str, args: &Value, onyx_bin: &PathBuf) -> Result<Value
         "onyx_jobs" => jobs_tool(args, onyx_bin).await,
         "onyx_attach" => attach_tool(args, onyx_bin).await,
         "onyx_logs" => logs_tool(args, onyx_bin).await,
+        "onyx_kill" => kill_tool(args, onyx_bin).await,
         _ => Err(anyhow::anyhow!("unknown tool: {name}")),
     }
 }
@@ -245,6 +271,20 @@ async fn exec_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
     cmd.arg("exec").arg(target).arg("--json");
     if detach {
         cmd.arg("--detach");
+    }
+    if let Some(cwd) = args["cwd"].as_str() {
+        cmd.arg("--cwd").arg(cwd);
+    }
+    if let Some(env_map) = args["env"].as_object() {
+        for (k, v) in env_map {
+            if let Some(val) = v.as_str() {
+                cmd.arg("--env").arg(format!("{k}={val}"));
+            }
+        }
+    }
+    if let Some(timeout_ms) = args["timeout_ms"].as_u64() {
+        let secs = (timeout_ms + 999) / 1000; // ceil to seconds
+        cmd.arg("--timeout").arg(format!("{secs}s"));
     }
     cmd.arg("--");
     cmd.args(&command);
@@ -322,6 +362,34 @@ async fn logs_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
     }
     result["diagnostics"] = json!(diagnostics);
     Ok(result)
+}
+
+async fn kill_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
+    let target = require_str(args, "target")?;
+    let job_id = require_str(args, "job_id")?;
+
+    let mut cmd = Command::new(onyx_bin);
+    cmd.args(["kill", target, job_id, "--json"]);
+
+    let (ndjson, diagnostics) = capture(&mut cmd).await?;
+
+    let killed = ndjson
+        .lines()
+        .find_map(|l| {
+            let v: Value = serde_json::from_str(l.trim()).ok()?;
+            if v["type"].as_str() == Some("kill_result") {
+                Some(v["killed"].as_bool().unwrap_or(false))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false);
+
+    Ok(json!({
+        "job_id": job_id,
+        "killed": killed,
+        "diagnostics": diagnostics
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +489,9 @@ pub fn parse_exec_stream(ndjson: &str) -> Value {
                     Some(_) => "failed",
                     None => "killed",
                 };
+            }
+            Some("timeout") => {
+                status = "timed_out";
             }
             Some("error") => {
                 error = v["reason"].as_str().map(String::from);
@@ -752,7 +823,7 @@ not json at all
         let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
         let resp = handle_message(req, &dummy).await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 4);
+        assert_eq!(tools.len(), 5);
         let names: Vec<&str> = tools
             .iter()
             .map(|t| t["name"].as_str().unwrap())
@@ -761,6 +832,7 @@ not json at all
         assert!(names.contains(&"onyx_jobs"));
         assert!(names.contains(&"onyx_attach"));
         assert!(names.contains(&"onyx_logs"));
+        assert!(names.contains(&"onyx_kill"));
         // Each tool must have inputSchema with required fields
         for tool in tools {
             assert!(tool["inputSchema"]["properties"]["target"].is_object());

@@ -754,6 +754,16 @@ enum CliMode {
         json: bool,
         detach: bool,
         command: Vec<String>,
+        cwd: Option<String>,
+        env: Vec<(String, String)>,
+        timeout_secs: Option<u64>,
+    },
+    Kill {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        job_id: String,
     },
     Jobs {
         raw_target: String,
@@ -789,6 +799,19 @@ enum ParseOutcome {
     Run(CliMode),
     Help,
     Version,
+}
+
+/// Parse a human duration string like "30s", "5m", "2h" into seconds.
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    if let Some(n) = s.strip_suffix('s') {
+        n.parse::<u64>().ok()
+    } else if let Some(n) = s.strip_suffix('m') {
+        n.parse::<u64>().ok().map(|v| v * 60)
+    } else if let Some(n) = s.strip_suffix('h') {
+        n.parse::<u64>().ok().map(|v| v * 3600)
+    } else {
+        s.parse::<u64>().ok()
+    }
 }
 
 /// Pure parser used by both the real CLI entry point and unit tests.
@@ -878,7 +901,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     // command argv.
     if matches!(
         it.peek(),
-        Some(cmd) if cmd == "exec" || cmd == "jobs" || cmd == "attach" || cmd == "logs"
+        Some(cmd) if cmd == "exec" || cmd == "jobs" || cmd == "attach" || cmd == "logs" || cmd == "kill"
     ) {
         let sub = it.next().unwrap();
         let raw_target = it
@@ -892,10 +915,13 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         let mut positional: Vec<String> = Vec::new();
         let mut command: Vec<String> = Vec::new();
         let mut seen_dashdash = false;
+        let mut cwd: Option<String> = None;
+        let mut env: Vec<(String, String)> = Vec::new();
+        let mut timeout_secs: Option<u64> = None;
         // For exec: once we see the first bare positional, treat it as the
         // start of the command argv — anything after (including things that
         // look like flags, e.g. `ls -la`) is passed through unchanged.
-        // attach/logs/jobs stay in strict mode — they have fixed positional
+        // attach/logs/jobs/kill stay in strict mode — they have fixed positional
         // arity and a stray `-la` should be a clear error.
         let exec_bare_tail = sub == "exec";
         let mut in_command_tail = false;
@@ -914,6 +940,30 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                     identity = Some(
                         it.next()
                             .ok_or_else(|| "-i requires an argument".to_string())?,
+                    );
+                }
+                "--cwd" => {
+                    cwd = Some(
+                        it.next()
+                            .ok_or_else(|| "--cwd requires an argument".to_string())?,
+                    );
+                }
+                "--env" => {
+                    let kv = it
+                        .next()
+                        .ok_or_else(|| "--env requires KEY=VALUE".to_string())?;
+                    let (k, v) = kv
+                        .split_once('=')
+                        .ok_or_else(|| format!("--env: expected KEY=VALUE, got '{kv}'"))?;
+                    env.push((k.to_string(), v.to_string()));
+                }
+                "--timeout" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| "--timeout requires a duration (e.g. 30s, 5m)".to_string())?;
+                    timeout_secs = Some(
+                        parse_duration_secs(&raw)
+                            .ok_or_else(|| format!("--timeout: invalid duration '{raw}' (use e.g. 30s, 5m, 2h)"))?
                     );
                 }
                 other if other.starts_with('-') => {
@@ -946,6 +996,22 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                     json,
                     detach,
                     command,
+                    cwd,
+                    env,
+                    timeout_secs,
+                }))
+            }
+            "kill" => {
+                let job_id = positional
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| "kill: missing <job-id>".to_string())?;
+                Ok(ParseOutcome::Run(CliMode::Kill {
+                    raw_target,
+                    identity_file: identity,
+                    no_bootstrap,
+                    json,
+                    job_id,
                 }))
             }
             "jobs" => {
@@ -1081,10 +1147,11 @@ onyx — stable remote shell for unreliable networks (QUIC + SSH fallback)
 USAGE
   onyx [OPTIONS] [user@]<host>[:<quic-port>]       interactive shell
   onyx proxy <host> <port>                          SSH ProxyCommand transport
-  onyx exec   <target> [--json] [--detach] -- <cmd...>
+  onyx exec   <target> [--json] [--detach] [--cwd <dir>] [--env K=V]... [--timeout <dur>] -- <cmd...>
   onyx jobs   <target> [--json]
   onyx attach <target> <job-id> [--json]
   onyx logs   <target> <job-id> [--json]
+  onyx kill   <target> <job-id> [--json]
   onyx doctor <target>                              run diagnostics for a target
   onyx mcp serve                                    stdio MCP server (for AI agents)
   onyx --help | --version
@@ -1134,9 +1201,13 @@ OPTIONS
                               (plain SSH exec for interactive, plain TCP
                                bridge for proxy mode)
   --low-bandwidth           smoother batching on poor links
-  --json                    (exec/jobs/attach/logs) structured output,
+  --json                    (exec/jobs/attach/logs/kill) structured output,
                               one JSON object per line
   --detach                  (exec) start the job and exit; reattach later
+  --cwd <dir>               (exec) working directory on the remote host
+  --env KEY=VALUE           (exec) extra environment variable (repeatable)
+  --timeout <dur>           (exec) kill after duration, e.g. 30s, 5m, 2h
+                              exit code 124 on timeout
   -h, --help                show this help
   -V, --version             print version
 
@@ -1151,9 +1222,11 @@ EXAMPLES
   onyx exec prod -- deploy.sh
   onyx exec gpu-box --detach -- python train.py
   onyx exec ci --json -- cargo test --workspace
+  onyx exec gpu-box --cwd /data --env BATCH=64 --timeout 2h -- python train.py
   onyx jobs gpu-box
   onyx attach gpu-box job_a1b2c3d4e5f60718
   onyx logs  gpu-box job_a1b2c3d4e5f60718
+  onyx kill  gpu-box job_a1b2c3d4e5f60718
   onyx doctor user@host              # diagnose connectivity
 ";
 
@@ -3068,6 +3141,10 @@ fn emit_reconnecting_json() {
     println!("{{\"type\":\"reconnecting\"}}");
 }
 
+fn emit_timeout_json() {
+    println!("{{\"type\":\"timeout\"}}");
+}
+
 fn emit_resumed_json(job_id: &str, seq: u64) {
     println!(
         "{{\"type\":\"resumed\",\"job_id\":{},\"seq\":{}}}",
@@ -3133,6 +3210,8 @@ const EXEC_BUSY_RETRY: Duration = Duration::from_millis(300);
 enum ExecStreamResult {
     /// Server sent ExecFinished — terminal, propagate exit code.
     Finished(Option<i32>),
+    /// Server sent ExecTimedOut then ExecFinished — exit with code 124.
+    TimedOut,
     /// Server sent an error we cannot retry (job not found, spawn failed,
     /// malformed request, unexpected message). Carries the server's reason
     /// string.
@@ -3149,6 +3228,7 @@ async fn drain_exec_stream(
 ) -> ExecStreamResult {
     let mut stdout = tokio::io::stdout();
     let mut stderr = tokio::io::stderr();
+    let mut timed_out = false;
     loop {
         let msg = match recv_msg(recv).await {
             Ok(m) => m,
@@ -3198,12 +3278,23 @@ async fn drain_exec_stream(
                     );
                 }
             }
+            Message::ExecTimedOut => {
+                timed_out = true;
+                if json {
+                    emit_timeout_json();
+                } else {
+                    eprintln!("[exec] job timed out (killed by server-side timeout)");
+                }
+            }
             Message::ExecFinished {
                 exit_code,
                 finished_at_unix,
             } => {
                 if json {
                     emit_finished_json(exit_code, finished_at_unix, started_at_unix);
+                }
+                if timed_out {
+                    return ExecStreamResult::TimedOut;
                 }
                 return ExecStreamResult::Finished(exit_code);
             }
@@ -3322,6 +3413,7 @@ async fn stream_exec_with_resume(
 
         match result {
             ExecStreamResult::Finished(code) => return Ok(code),
+            ExecStreamResult::TimedOut => return Ok(Some(124)),
             ExecStreamResult::Fatal(reason) if exec_error_is_terminal(&reason) => {
                 if json {
                     emit_error_json(&reason);
@@ -3454,6 +3546,9 @@ async fn run_exec_mode(
     json: bool,
     detach: bool,
     command: Vec<String>,
+    cwd: Option<String>,
+    env: Vec<(String, String)>,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     let (endpoint, server_addr, host_port, capture) =
         prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
@@ -3471,6 +3566,9 @@ async fn run_exec_mode(
         &mut send,
         &Message::ExecStart {
             command: command.clone(),
+            cwd,
+            env,
+            timeout_secs,
         },
     )
     .await?;
@@ -3596,6 +3694,68 @@ async fn run_logs_mode(
     conn.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
     Ok(())
+}
+
+async fn run_kill_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    job_id: String,
+) -> Result<()> {
+    let (endpoint, server_addr, host_port, capture) =
+        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        &endpoint,
+        &host_port,
+        &capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    send_msg(
+        &mut send,
+        &Message::Kill {
+            job_id: job_id.clone(),
+        },
+    )
+    .await?;
+    let msg = recv_msg(&mut recv).await?;
+    conn.close(0u32.into(), b"bye");
+    endpoint.wait_idle().await;
+
+    match msg {
+        Message::KillResult {
+            killed,
+            message,
+            ..
+        } => {
+            if json {
+                println!(
+                    "{{\"type\":\"kill_result\",\"job_id\":{},\"killed\":{}}}",
+                    jq(&job_id),
+                    killed
+                );
+            } else {
+                println!("{message}");
+            }
+            if killed {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("{message}"))
+            }
+        }
+        Message::ExecError { reason } => {
+            if json {
+                emit_error_json(&reason);
+            } else {
+                eprintln!("onyx: {reason}");
+            }
+            Err(anyhow::anyhow!("{reason}"))
+        }
+        other => anyhow::bail!("unexpected kill response: {other:?}"),
+    }
 }
 
 fn format_relative_time(now_unix: u64, t_unix: u64) -> String {
@@ -4012,6 +4172,9 @@ async fn main() -> Result<()> {
             json,
             detach,
             command,
+            cwd,
+            env,
+            timeout_secs,
         } => {
             return run_exec_mode(
                 raw_target,
@@ -4020,9 +4183,19 @@ async fn main() -> Result<()> {
                 json,
                 detach,
                 command,
+                cwd,
+                env,
+                timeout_secs,
             )
             .await
         }
+        CliMode::Kill {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            job_id,
+        } => return run_kill_mode(raw_target, identity_file, no_bootstrap, json, job_id).await,
         CliMode::Jobs {
             raw_target,
             identity_file,

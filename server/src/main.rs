@@ -327,9 +327,10 @@ struct JobMeta {
     version_tx: watch::Sender<u64>,
     /// Number of stream handlers currently attached to this job.
     attach_count: u32,
-    /// Send `()` to kill the job early (not wired to a user-facing command
-    /// yet; used only by registry-cap eviction and shutdown).
+    /// Send `()` to kill the job early.
     shutdown_tx: Option<oneshot::Sender<()>>,
+    /// Set by job_runner when the server-side timeout fires.
+    timed_out: bool,
 }
 
 type Jobs = Arc<Mutex<HashMap<String, JobMeta>>>;
@@ -817,7 +818,16 @@ async fn job_runner(
     mut stdout: tokio::process::ChildStdout,
     mut stderr: tokio::process::ChildStderr,
     mut shutdown_rx: oneshot::Receiver<()>,
+    timeout_secs: Option<u64>,
 ) {
+    let timeout_fut = async {
+        match timeout_secs {
+            Some(s) => tokio::time::sleep(Duration::from_secs(s)).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(timeout_fut);
+
     let mut out_buf = [0u8; 8192];
     let mut err_buf = [0u8; 8192];
     let mut stdout_done = false;
@@ -828,6 +838,17 @@ async fn job_runner(
             biased;
 
             _ = &mut shutdown_rx => {
+                let _ = child.start_kill();
+                break;
+            }
+
+            _ = &mut timeout_fut => {
+                {
+                    let mut locked = jobs.lock().unwrap();
+                    if let Some(meta) = locked.get_mut(&job_id) {
+                        meta.timed_out = true;
+                    }
+                }
                 let _ = child.start_kill();
                 break;
             }
@@ -931,6 +952,9 @@ async fn handle_exec_start(
     mut recv: quinn::RecvStream,
     jobs: Jobs,
     command: Vec<String>,
+    cwd: Option<String>,
+    env: Vec<(String, String)>,
+    timeout_secs: Option<u64>,
 ) -> Result<()> {
     if command.is_empty() {
         send_msg(
@@ -944,6 +968,20 @@ async fn handle_exec_start(
         anyhow::bail!("empty exec command");
     }
 
+    if let Some(dir) = &cwd {
+        if !std::path::Path::new(dir).is_dir() {
+            send_msg(
+                &mut send,
+                &Message::ExecError {
+                    reason: format!("exec: cwd not found: {dir}"),
+                },
+            )
+            .await
+            .ok();
+            anyhow::bail!("cwd not found: {dir}");
+        }
+    }
+
     let job_id = new_job_id()?;
     let command_display = command.join(" ");
 
@@ -952,6 +990,12 @@ async fn handle_exec_start(
     // explicitly. Matches kubectl / docker exec semantics.
     let mut cmd = tokio::process::Command::new(&command[0]);
     cmd.args(&command[1..]);
+    if let Some(dir) = &cwd {
+        cmd.current_dir(dir);
+    }
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1021,6 +1065,7 @@ async fn handle_exec_start(
                 version_tx,
                 attach_count: 0,
                 shutdown_tx: Some(shutdown_tx),
+                timed_out: false,
             },
         );
     }
@@ -1042,7 +1087,7 @@ async fn handle_exec_start(
     let jobs_bg = jobs.clone();
     let job_id_bg = job_id.clone();
     tokio::spawn(async move {
-        job_runner(jobs_bg, job_id_bg, child, stdout, stderr, shutdown_rx).await;
+        job_runner(jobs_bg, job_id_bg, child, stdout, stderr, shutdown_rx, timeout_secs).await;
     });
 
     // Stream live output until either the client drops or the job finishes.
@@ -1104,7 +1149,7 @@ async fn stream_job_output(
     loop {
         // Snapshot new chunks + finished state under the lock, then send
         // outside the lock.
-        let (batch, finished_marker): (Vec<OutputChunk>, Option<(Option<i32>, u64)>) = {
+        let (batch, finished_marker): (Vec<OutputChunk>, Option<(Option<i32>, u64, bool)>) = {
             let locked = jobs.lock().unwrap();
             let meta = match locked.get(job_id) {
                 Some(m) => m,
@@ -1121,7 +1166,11 @@ async fn stream_job_output(
                 JobStatus::Succeeded | JobStatus::Failed | JobStatus::Expired
             );
             let marker = if finished {
-                Some((meta.exit_code, meta.finished_at_unix.unwrap_or(unix_now())))
+                Some((
+                    meta.exit_code,
+                    meta.finished_at_unix.unwrap_or(unix_now()),
+                    meta.timed_out,
+                ))
             } else {
                 None
             };
@@ -1141,7 +1190,10 @@ async fn stream_job_output(
             last_seen = chunk.seq;
         }
 
-        if let Some((exit_code, finished_at_unix)) = finished_marker {
+        if let Some((exit_code, finished_at_unix, timed_out)) = finished_marker {
+            if timed_out {
+                send_msg(send, &Message::ExecTimedOut).await?;
+            }
             send_msg(
                 send,
                 &Message::ExecFinished {
@@ -1344,6 +1396,44 @@ async fn handle_jobs_list(mut send: quinn::SendStream, jobs: Jobs) -> Result<()>
     Ok(())
 }
 
+async fn handle_kill(mut send: quinn::SendStream, jobs: Jobs, job_id: String) -> Result<()> {
+    let shutdown_tx = {
+        let mut locked = jobs.lock().unwrap();
+        locked.get_mut(&job_id).and_then(|meta| {
+            if matches!(meta.status, JobStatus::Running | JobStatus::Detached) {
+                meta.shutdown_tx.take()
+            } else {
+                None
+            }
+        })
+    };
+    let (killed, message) = match shutdown_tx {
+        Some(tx) => {
+            let _ = tx.send(());
+            (true, format!("job {job_id} killed"))
+        }
+        None => {
+            let exists = jobs.lock().unwrap().contains_key(&job_id);
+            if exists {
+                (false, format!("job {job_id} already finished"))
+            } else {
+                (false, format!("job {job_id} not found"))
+            }
+        }
+    };
+    send_msg(
+        &mut send,
+        &Message::KillResult {
+            job_id,
+            killed,
+            message,
+        },
+    )
+    .await?;
+    send.finish().ok();
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Stream dispatcher — reads first message and routes to PTY or forward handler
 // ---------------------------------------------------------------------------
@@ -1361,7 +1451,13 @@ async fn handle_stream(
         Message::ProxyConnect { .. } | Message::ProxyResume { .. } => {
             handle_proxy_message(send, recv, proxy_sessions, first).await
         }
-        Message::ExecStart { command } => handle_exec_start(send, recv, jobs, command).await,
+        Message::ExecStart {
+            command,
+            cwd,
+            env,
+            timeout_secs,
+        } => handle_exec_start(send, recv, jobs, command, cwd, env, timeout_secs).await,
+        Message::Kill { job_id } => handle_kill(send, jobs, job_id).await,
         Message::ExecAttach { job_id, last_seq } => {
             handle_exec_attach(send, recv, jobs, job_id, last_seq).await
         }
@@ -1884,6 +1980,7 @@ mod job_tests {
             version_tx: tx,
             attach_count: 0,
             shutdown_tx: Some(shut_tx),
+            timed_out: false,
         }
     }
 
