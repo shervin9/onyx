@@ -81,16 +81,19 @@ nav {
 }
 
 .logo {
+  display: inline-block;
   font-size: 0.9375rem;
   font-weight: 600;
   letter-spacing: -0.01em;
   text-decoration: none;
   color: var(--text);
+  text-align: center;
 }
 
 .nav-actions {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 1rem;
 }
 
@@ -98,6 +101,7 @@ nav {
   font-size: 0.875rem;
   color: var(--dim);
   text-decoration: none;
+  text-align: center;
   transition: color 0.15s ease;
 }
 
@@ -113,11 +117,16 @@ section {
   max-width: var(--w);
   margin: 0 auto;
   padding: 0 1.75rem;
+  text-align: center;
 }
 
 .section-head {
   max-width: var(--narrow);
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
   margin-bottom: 1.5rem;
+  text-align: center;
 }
 
 .section-head-centered {
@@ -301,17 +310,21 @@ h1 {
 }
 
 .terminal-top {
+  position: relative;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   padding: 0.85rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.018);
+  text-align: center;
 }
 
 .terminal-dots {
   display: flex;
   gap: 0.4rem;
+  position: absolute;
+  left: 1rem;
 }
 
 .terminal-dots span {
@@ -330,7 +343,7 @@ h1 {
 
 .terminal-body {
   padding: 1.2rem 1.25rem 1.3rem;
-  text-align: left;
+  text-align: center;
   font-family: var(--mono);
   font-weight: 500;
   letter-spacing: -0.01em;
@@ -339,10 +352,12 @@ h1 {
 .terminal-line {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 0.65rem;
   min-height: 1.65rem;
   font-size: 0.9rem;
   color: var(--text);
+  text-align: center;
 }
 
 .terminal-line + .terminal-line { margin-top: 0.25rem; }
@@ -365,6 +380,7 @@ h1 {
 .terminal-text {
   white-space: pre-wrap;
   word-break: break-word;
+  text-align: center;
 }
 
 .caret {
@@ -418,6 +434,7 @@ h2 {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+  width: 100%;
   max-width: 42rem;
   margin: 0 auto;
 }
@@ -435,10 +452,14 @@ h2 {
 }
 
 .install-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   padding: 1rem;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.018)),
     rgba(255, 255, 255, 0.018);
+  text-align: center;
 }
 
 .connect-card {
@@ -454,15 +475,19 @@ h2 {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.08em;
+  text-align: center;
 }
 
 .code-wrap {
   display: flex;
+  flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 0.85rem;
   padding: 0.95rem 1rem;
   margin: 0;
   background: rgba(255, 255, 255, 0.02);
+  text-align: center;
 }
 
 .code-wrap code,
@@ -478,20 +503,19 @@ h2 {
 .usage-line code {
   font-size: 0.88rem;
   color: var(--text);
+  text-align: center;
 }
 
 .code-wrap code {
-  flex: 1;
-  white-space: nowrap;
-  overflow-x: auto;
-  overflow-y: hidden;
-  text-overflow: clip;
+  width: 100%;
+  white-space: pre-wrap;
+  overflow: visible;
+  overflow-wrap: anywhere;
   user-select: all;
-  scrollbar-width: thin;
 }
 
 button[id^="copy-"] {
-  flex-shrink: 0;
+  align-self: center;
   padding: 0.3rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -511,9 +535,12 @@ button[id^="copy-"]:hover {
 .usage-line {
   padding: 0.95rem 1rem;
   background: rgba(255, 255, 255, 0.02);
+  text-align: center;
 }
 
 .usage-line code {
+  display: block;
+  width: 100%;
   color: var(--text);
   user-select: all;
 }
@@ -666,6 +693,7 @@ button[id^="copy-"]:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+  width: 100%;
   max-width: 42rem;
   margin: 0 auto;
 }
@@ -734,10 +762,13 @@ button[id^="copy-"]:hover {
 .exec-status-bar {
   display: flex;
   align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 0.7rem;
   padding: 0.82rem 1rem;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.014);
+  text-align: center;
 }
 
 .exec-status-label {
@@ -787,10 +818,12 @@ button[id^="copy-"]:hover {
 }
 
 .exec-status-meta {
-  margin-left: auto;
+  width: 100%;
+  margin-left: 0;
   font-family: var(--mono);
   font-size: 0.78rem;
   color: #9da2af;
+  text-align: center;
 }
 
 .exec-scene {
@@ -809,7 +842,7 @@ button[id^="copy-"]:hover {
 }
 
 .exec-scene .terminal-line {
-  align-items: flex-start;
+  align-items: center;
 }
 
 .exec-scene .terminal-text {
@@ -864,12 +897,14 @@ button[id^="copy-"]:hover {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1rem;
+  width: 100%;
+  max-width: 54rem;
   margin-top: 1.3rem;
 }
 
 .exec-command-card {
   padding: 1rem 1.05rem;
-  text-align: left;
+  text-align: center;
 }
 
 .exec-command-label {
@@ -892,6 +927,7 @@ button[id^="copy-"]:hover {
   white-space: pre-wrap;
   word-break: break-word;
   color: #e0e2ea;
+  text-align: center;
 }
 
 .exec-command-card p {
@@ -899,6 +935,7 @@ button[id^="copy-"]:hover {
   color: var(--dim);
   font-size: 0.84rem;
   line-height: 1.55;
+  text-align: center;
 }
 
 .exec-support-copy {
@@ -1004,6 +1041,7 @@ button[id^="copy-"]:hover {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.9rem;
+  width: 100%;
   max-width: 44rem;
   margin: 1.8rem auto 0;
 }
@@ -1034,13 +1072,17 @@ button[id^="copy-"]:hover {
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.01);
   color: var(--dim);
-  text-align: left;
+  text-align: center;
 }
 
 .mcp-sample code {
+  display: block;
   font-family: var(--mono);
   font-size: 0.79rem;
   line-height: 1.65;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .mcp-support-copy,
@@ -1124,6 +1166,7 @@ footer {
   gap: 1.1rem;
   font-size: 0.8125rem;
   color: #4c4e57;
+  text-align: center;
 }
 
 .footer-trust-strip,
@@ -1133,14 +1176,23 @@ footer {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  text-align: center;
 }
 
 .footer-trust-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  justify-items: center;
   padding: 0.9rem 1rem;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.014);
   color: var(--dim);
+}
+
+.footer-meta {
+  flex-direction: column;
+  justify-content: center;
 }
 
 footer a {
@@ -1219,10 +1271,10 @@ footer a:hover { color: var(--dim); }
   }
 
   .flow-node {
-    justify-content: flex-start;
+    justify-content: center;
     padding-top: 0;
-    padding-left: 1.2rem;
-    text-align: left;
+    padding-left: 0;
+    text-align: center;
     min-height: 1.2rem;
   }
 
@@ -1239,7 +1291,11 @@ footer a:hover { color: var(--dim); }
   .footer-trust-strip,
   .footer-meta {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: center;
+  }
+
+  .footer-trust-strip {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1323,7 +1379,7 @@ footer a:hover { color: var(--dim); }
 
   .exec-status-bar {
     flex-wrap: wrap;
-    align-items: flex-start;
+    align-items: center;
   }
 
   .exec-status-badge,
@@ -1347,7 +1403,7 @@ footer a:hover { color: var(--dim); }
 
   .code-wrap {
     flex-direction: column;
-    align-items: stretch;
+    align-items: center;
   }
 
   .code-wrap code {
