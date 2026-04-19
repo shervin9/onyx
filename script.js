@@ -24,11 +24,10 @@
   var latestReleaseApiUrl = "https://api.github.com/repos/shervin9/onyx/releases/latest";
 
   var terminalScenes = [
-    { command: "onyx user@host", meta: "[shell] auto-reconnect + tmux" },
-    { command: "onyx exec prod -- ./deploy.sh", meta: "[exec] resumable remote job" },
-    { command: "onyx exec gpu-box --detach -- python train.py", meta: "[job] detach now, attach later" },
-    { command: "onyx logs gpu-box job_xxx", meta: "[logs] inspect output later" },
-    { command: "onyx mcp serve", meta: "[mcp] local stdio tools for agents" }
+    { command: "onyx user@host", meta: "[shell] auto-reconnect" },
+    { command: "onyx dev-onyx", meta: "[session] resume instantly" },
+    { command: "onyx user@host:7373", meta: "[host] custom port" },
+    { command: "onyx user@host", meta: "[fallback] SSH when needed" }
   ];
 
   var execRevealLines = [

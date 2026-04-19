@@ -40,7 +40,7 @@
         </a>
       </div>
       <h1>Remote work that survives the network.</h1>
-      <p class="sub">Run shells, jobs, and agent work that keep going through disconnects.</p>
+      <p class="sub">Run shells, jobs, and agent tasks through disconnects.</p>
       <div class="actions">
         <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
         <a href="#install" class="btn btn-ghost">Install</a>
@@ -49,8 +49,8 @@
       <div class="mini-points" aria-label="Product highlights">
         <span>Auto-reconnect</span>
         <span>Resumable exec</span>
-        <span>MCP for agents</span>
-        <span>QUIC + SSH fallback</span>
+        <span>Local MCP</span>
+        <span>SSH fallback</span>
       </div>
 
       <div class="terminal-shell hero-terminal" aria-label="Onyx terminal preview">
@@ -63,7 +63,7 @@
         <div class="terminal-body">
           <div class="terminal-line terminal-line-static">
             <span class="prompt">$</span>
-            <span class="terminal-text">resilient shell, resumable exec, and local MCP</span>
+            <span class="terminal-text">interactive shell over unreliable networks</span>
           </div>
           <div class="terminal-scene" id="terminal-scene">
             <div class="terminal-line">
@@ -79,27 +79,16 @@
     <section class="flow shell-feature" id="shell">
       <div class="section-head">
         <h2>Stable interactive sessions.</h2>
-        <p>Connect like a normal shell target. Reconnect cleanly when the link drops.</p>
+        <p>Reconnect fast. Pick up where you left off.</p>
       </div>
-      <div class="shell-stack">
-        <article class="workflow-card shell-command-card">
-          <span class="workflow-kicker">Interactive shell</span>
-          <pre><code>onyx user@host</code></pre>
-          <p class="workflow-copy">Auto-reconnect, tmux-backed state, and SSH fallback when needed.</p>
+      <div class="shell-compact-grid">
+        <article class="shell-compact-card">
+          <span class="shell-compact-line">Reconnect fast</span>
+          <span class="shell-compact-line">Resume instantly</span>
         </article>
-      </div>
-      <div class="shell-notes">
-        <article class="shell-note">
-          <strong>Reconnects automatically</strong>
-          <span>Short network drops trigger reconnect instead of forcing a fresh login.</span>
-        </article>
-        <article class="shell-note">
-          <strong>tmux-backed</strong>
-          <span>Keep shell state and scrollback on the server instead of treating the session as disposable.</span>
-        </article>
-        <article class="shell-note">
-          <strong>Falls back to SSH</strong>
-          <span>QUIC is preferred, but the shell path stays usable when UDP is blocked or unavailable.</span>
+        <article class="shell-compact-card">
+          <span class="shell-compact-line">Remote session stays live</span>
+          <span class="shell-compact-line">SSH fallback when needed</span>
         </article>
       </div>
     </section>
@@ -107,7 +96,7 @@
     <section class="exec-feature" id="exec">
       <div class="section-head exec-head">
         <h2>Run commands that don’t die.</h2>
-        <p>Start work once. Detach, inspect, attach later, or kill it when needed.</p>
+        <p>Start once. Detach. Check back later.</p>
       </div>
 
       <div class="terminal-shell exec-terminal" aria-label="onyx exec resumable job animation">
@@ -162,20 +151,20 @@
         <article class="exec-command-card">
           <span class="exec-command-label">Run</span>
           <code>onyx exec prod -- ./deploy.sh</code>
-          <p>Start a remote command and stay attached.</p>
+          <p>Run it live.</p>
         </article>
         <article class="exec-command-card">
           <span class="exec-command-label">Detach</span>
           <code>onyx exec gpu-box --detach -- python train.py</code>
-          <p>Start once. Attach later.</p>
+          <p>Leave it running.</p>
         </article>
         <article class="exec-command-card">
           <span class="exec-command-label">Logs</span>
           <code>onyx logs gpu-box job_xxx</code>
-          <p>Check output without taking over the job.</p>
+          <p>Check progress later.</p>
         </article>
       </div>
-      <p class="exec-support-copy">Attach later. Kill when needed. <a href="./docs/exec.html" class="inline-link">Full CLI and MCP reference → Docs</a></p>
+      <p class="exec-support-copy"><a href="./docs/exec.html" class="inline-link">Full CLI and MCP reference → Docs</a></p>
     </section>
 
     <section class="mcp-section" id="mcp">
@@ -206,19 +195,16 @@
       <div class="mcp-tool-grid" aria-label="Onyx MCP tools">
         <article class="mcp-tool"><code>onyx_exec</code></article>
         <article class="mcp-tool"><code>onyx_jobs</code></article>
-        <article class="mcp-tool"><code>onyx_attach</code></article>
         <article class="mcp-tool"><code>onyx_logs</code></article>
         <article class="mcp-tool"><code>onyx_kill</code></article>
       </div>
 
-      <pre class="mcp-sample"><code>onyx mcp serve</code></pre>
-      <p class="mcp-support-copy">Run it locally. Let agents talk to remote hosts through Onyx.</p>
+      <pre class="mcp-sample"><code>target=hetzner-dev</code></pre>
     </section>
 
     <section class="install" id="install">
       <div class="section-head">
         <h2>Install</h2>
-        <p>Install the client. Update it later. Connect when ready.</p>
       </div>
       <div class="install-grid">
         <article class="install-card">
@@ -242,43 +228,20 @@
           <code id="connect-cmd">onyx user@host</code>
         </div>
       </article>
-      <p class="install-support-copy"><a href="./docs/" class="inline-link">Full CLI and MCP reference → Docs</a></p>
-    </section>
-
-    <section class="oss">
-      <div class="section-head section-head-centered">
-        <h2>Open source. Self-hostable.</h2>
-        <p>MIT licensed. No lock-in. Runs on your servers.</p>
-      </div>
-      <div class="oss-grid">
-        <article class="oss-item">
-          <strong>MIT licensed</strong>
-          <span>Use and modify it under a permissive license.</span>
-        </article>
-        <article class="oss-item">
-          <strong>No lock-in</strong>
-          <span>Keep your clients, hosts, and automation under your control.</span>
-        </article>
-        <article class="oss-item">
-          <strong>Runs on your servers</strong>
-          <span>Bootstrap provisions <code>onyx-server</code> over SSH when needed.</span>
-        </article>
-      </div>
-      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
-    </section>
-
-    <section class="final-cta">
-      <p>Install the client. Keep shells, jobs, and agent workflows running when the network drops.</p>
-      <div class="actions">
-        <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
-        <a href="#install" class="btn btn-ghost">Install</a>
-      </div>
+      <p class="install-support-copy">Remote server is provisioned automatically.</p>
     </section>
   </main>
 
   <footer>
-    <span class="logo">onyx</span>
-    <span>MIT licensed · <a href="./docs/">Docs</a> · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></span>
+    <div class="footer-trust-strip">
+      <span>MIT licensed</span>
+      <span>Self-hostable</span>
+      <span>No lock-in</span>
+    </div>
+    <div class="footer-meta">
+      <span class="logo">onyx</span>
+      <span><a href="./docs/">Docs</a> · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></span>
+    </div>
   </footer>
 
   <script src="script.js"></script>

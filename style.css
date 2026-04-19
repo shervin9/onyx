@@ -173,20 +173,6 @@ section {
   background: rgba(255, 255, 255, 0.024);
 }
 
-.badge {
-  display: inline-block;
-  padding: 0.25rem 0.75rem;
-  margin-bottom: 1.75rem;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--dim);
-  background: rgba(255, 255, 255, 0.015);
-}
-
 h1 {
   max-width: 15ch;
   margin: 0 auto 1.1rem;
@@ -676,31 +662,17 @@ button[id^="copy-"]:hover {
   margin-bottom: 1rem;
 }
 
-.shell-command-card {
-  padding: 1.1rem 1.15rem;
-}
-
-.shell-command-card pre {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.shell-command-card code {
-  font-size: 0.88rem;
-  line-height: 1.7;
-}
-
-.shell-notes {
+.shell-compact-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
-  margin-top: 1.1rem;
+  max-width: 42rem;
+  margin: 0 auto;
 }
 
-.shell-note,
+.shell-compact-card,
 .exec-command-card,
 .mcp-card,
-.mcp-capability,
 .oss-item {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -709,31 +681,23 @@ button[id^="copy-"]:hover {
     rgba(255, 255, 255, 0.014);
 }
 
-.shell-note {
-  padding: 1.1rem 1.15rem;
+.shell-compact-card {
+  padding: 1rem 1.05rem;
+  text-align: center;
 }
 
-.shell-note strong,
-.oss-item strong {
+.shell-compact-line {
   display: block;
-  margin-bottom: 0.35rem;
-  font-size: 0.96rem;
+  color: var(--text);
+  font-size: 0.92rem;
   font-weight: 500;
   letter-spacing: -0.02em;
-  color: var(--text);
 }
 
-.shell-note span,
-.oss-item span {
+.shell-compact-line + .shell-compact-line {
+  margin-top: 0.32rem;
   color: var(--dim);
-  font-size: 0.87rem;
-  line-height: 1.58;
-}
-
-.shell-note code,
-.oss-item code {
-  font-family: var(--mono);
-  font-size: 0.82rem;
+  font-weight: 400;
 }
 
 .exec-feature {
@@ -1038,9 +1002,9 @@ button[id^="copy-"]:hover {
 
 .mcp-tool-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.9rem;
-  max-width: 52rem;
+  max-width: 44rem;
   margin: 1.8rem auto 0;
 }
 
@@ -1150,46 +1114,33 @@ button[id^="copy-"]:hover {
   letter-spacing: 0.08em;
 }
 
-.oss,
-.final-cta {
-  text-align: center;
-}
-
-.oss p,
-.final-cta p {
-  max-width: 34rem;
-  margin: 0 auto 1.4rem;
-  color: var(--dim);
-  font-size: 1rem;
-}
-
-.oss-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.5rem;
-}
-
-.oss-item {
-  padding: 1.15rem 1.2rem;
-  text-align: center;
-}
-
-.final-cta {
-  padding-bottom: 6rem;
-}
-
 footer {
   max-width: var(--w);
   margin: 0 auto;
-  padding: 1.5rem 1.75rem;
+  padding: 1.5rem 1.75rem 2.5rem;
   border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 1.1rem;
+  font-size: 0.8125rem;
+  color: #4c4e57;
+}
+
+.footer-trust-strip,
+.footer-meta {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  font-size: 0.8125rem;
-  color: #4c4e57;
+}
+
+.footer-trust-strip {
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.014);
+  color: var(--dim);
 }
 
 footer a {
@@ -1213,7 +1164,7 @@ footer a:hover { color: var(--dim); }
   .install-grid,
   .mcp-tool-grid,
   .flow-panels,
-  .shell-notes,
+  .shell-compact-grid,
   .feature-grid,
   .how-grid,
   .exec-command-grid,
@@ -1284,6 +1235,12 @@ footer a:hover { color: var(--dim); }
   .flow-pulse {
     transform: translate(-50%, -50%);
   }
+
+  .footer-trust-strip,
+  .footer-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }
 
 @media (max-width: 640px) {
@@ -1318,8 +1275,7 @@ footer a:hover { color: var(--dim); }
     line-height: 1.68;
   }
 
-  .hero .actions,
-  .final-cta .actions {
+  .hero .actions {
     flex-direction: column;
     align-items: stretch;
   }
@@ -1389,11 +1345,6 @@ footer a:hover { color: var(--dim); }
     font-size: 0.79rem;
   }
 
-  .shell-note,
-  .oss-item {
-    padding: 1rem;
-  }
-
   .code-wrap {
     flex-direction: column;
     align-items: stretch;
@@ -1425,7 +1376,6 @@ footer a:hover { color: var(--dim); }
   }
 
   footer {
-    flex-direction: column;
-    align-items: flex-start;
+    padding-bottom: 2rem;
   }
 }
