@@ -8,10 +8,10 @@ use rustls::{
 use shared::{JobStatus, JobSummary, Message, StdStream, DEFAULT_PORT};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     net::SocketAddr,
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -1504,6 +1504,68 @@ mod parse_args_tests {
         assert!(err.contains("missing <target>"), "err was: {err}");
     }
 
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let unique = format!(
+            "onyx-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn fake_elf_header(machine: u16) -> [u8; 20] {
+        let mut header = [0u8; 20];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[18..20].copy_from_slice(&machine.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn server_artifact_name_normalizes_arch_aliases() {
+        assert_eq!(
+            server_artifact_name("x86_64"),
+            Some("onyx-server-linux-x86_64")
+        );
+        assert_eq!(
+            server_artifact_name("amd64"),
+            Some("onyx-server-linux-x86_64")
+        );
+        assert_eq!(
+            server_artifact_name("aarch64"),
+            Some("onyx-server-linux-arm64")
+        );
+        assert_eq!(
+            server_artifact_name("arm64"),
+            Some("onyx-server-linux-arm64")
+        );
+        assert_eq!(server_artifact_name("armv7l"), None);
+    }
+
+    #[test]
+    fn select_local_prebuilt_server_requires_matching_linux_binary() {
+        let dir = test_temp_dir("prebuilt-select");
+        let wrong = dir.join("wrong");
+        let right = dir.join("right");
+        let non_elf = dir.join("non-elf");
+
+        fs::write(&wrong, fake_elf_header(183)).unwrap();
+        fs::write(&right, fake_elf_header(62)).unwrap();
+        fs::write(&non_elf, b"not an elf").unwrap();
+
+        let selected = select_local_prebuilt_server(
+            "x86_64",
+            vec![non_elf.clone(), wrong.clone(), right.clone()],
+        );
+        assert_eq!(selected, Some(right));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn exec_rejects_unknown_flag_before_dashdash() {
         let err = parse_args_from(s(&["exec", "host", "--bogus", "--", "x"])).unwrap_err();
@@ -2042,7 +2104,7 @@ struct RemoteStatus {
     running: bool,   // onyx-server process is alive
     healthy: bool,   // onyx-server process is confirmed ready for QUIC
     own_pid: bool,   // server.pid still points to an onyx-server process
-    has_cargo: bool, // ~/.cargo/bin/cargo exists
+    has_cargo: bool, // ~/.cargo/bin/cargo exists and is executable
     conf_ok: bool,   // tmux config + status script are current
     arch: String,    // uname -m on the remote host
 }
@@ -2071,7 +2133,10 @@ fn remote_status(
          if [ \"$own\" = yes ] && grep -q 'listening on .*:{quic_port}  (ALPN: onyx)' {server_log} 2>/dev/null; then \
            ready=yes; \
          fi; \
-         c=no; [ -f ~/.cargo/bin/cargo ] && c=yes; \
+         c=no; \
+         if [ -x ~/.cargo/bin/cargo ] && ~/.cargo/bin/cargo --version >/dev/null 2>&1; then \
+           c=yes; \
+         fi; \
          arch=$(uname -m 2>/dev/null || echo unknown); \
          cv=$(cat {conf_dir}/.conf-hash 2>/dev/null); \
          echo \"h=$h r=$r own=$own ready=$ready c=$c arch=$arch cv=$cv\"",
@@ -2169,22 +2234,68 @@ fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths
 
 fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
     eprintln!("[onyx] installing Rust via rustup…");
-    ssh_show(
+    let rustup = ssh_show(
         target,
         identity,
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
          | sh -s -- -y --no-modify-path",
+    );
+    if rustup.is_err() {
+        anyhow::bail!("[onyx] rustup failed; cargo is unavailable");
+    }
+
+    let cargo_ready = ssh_capture(
+        target,
+        identity,
+        "if [ -x ~/.cargo/bin/cargo ] && ~/.cargo/bin/cargo --version >/dev/null 2>&1; then echo yes; else echo no; fi",
     )
-    .context("Rust installation failed on remote")?;
+    .unwrap_or_default();
+    if cargo_ready != "yes" {
+        anyhow::bail!("[onyx] rustup failed; cargo is unavailable");
+    }
+
     eprintln!("[onyx] Rust installed");
     Ok(())
 }
 
-fn server_artifact_name(remote_arch: &str) -> Option<&'static str> {
-    match remote_arch {
-        "x86_64" | "amd64" => Some("onyx-server-linux-x86_64"),
-        "aarch64" | "arm64" => Some("onyx-server-linux-arm64"),
+fn normalized_server_arch(remote_arch: &str) -> Option<&'static str> {
+    match remote_arch.trim() {
+        "x86_64" | "amd64" => Some("x86_64"),
+        "aarch64" | "arm64" => Some("arm64"),
         _ => None,
+    }
+}
+
+fn server_artifact_name(remote_arch: &str) -> Option<&'static str> {
+    match normalized_server_arch(remote_arch) {
+        Some("x86_64") => Some("onyx-server-linux-x86_64"),
+        Some("arm64") => Some("onyx-server-linux-arm64"),
+        _ => None,
+    }
+}
+
+fn remote_arch_label(remote_arch: &str) -> &str {
+    normalized_server_arch(remote_arch).unwrap_or_else(|| {
+        let trimmed = remote_arch.trim();
+        if trimmed.is_empty() {
+            "unknown"
+        } else {
+            trimmed
+        }
+    })
+}
+
+fn server_target_triples(remote_arch: &str) -> &'static [&'static str] {
+    match normalized_server_arch(remote_arch) {
+        Some("x86_64") => &["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"],
+        Some("arm64") => &["aarch64-unknown-linux-musl", "aarch64-unknown-linux-gnu"],
+        _ => &[],
+    }
+}
+
+fn push_unique_path(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !out.iter().any(|existing| existing == &path) {
+        out.push(path);
     }
 }
 
@@ -2195,38 +2306,78 @@ fn prebuilt_server_candidates(remote_arch: &str) -> Vec<PathBuf> {
     };
 
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            out.push(dir.join(name));
+        for exe_path in [Some(exe.clone()), fs::canonicalize(&exe).ok()] {
+            let Some(exe_path) = exe_path else {
+                continue;
+            };
+            if let Some(dir) = exe_path.parent() {
+                push_unique_path(&mut out, dir.join(name));
+                if let Some(prefix) = dir.parent() {
+                    push_unique_path(&mut out, prefix.join("libexec").join(name));
+                }
+            }
         }
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        out.push(cwd.join(name));
-        out.push(cwd.join("target").join("release").join("onyx-server"));
-        match remote_arch {
-            "x86_64" | "amd64" => out.push(
+        push_unique_path(&mut out, cwd.join(name));
+        for triple in server_target_triples(remote_arch) {
+            push_unique_path(
+                &mut out,
                 cwd.join("target")
-                    .join("x86_64-unknown-linux-musl")
+                    .join(triple)
                     .join("release")
                     .join("onyx-server"),
-            ),
-            "aarch64" | "arm64" => out.push(
-                cwd.join("target")
-                    .join("aarch64-unknown-linux-musl")
-                    .join("release")
-                    .join("onyx-server"),
-            ),
-            _ => {}
+            );
         }
+        push_unique_path(
+            &mut out,
+            cwd.join("target").join("release").join("onyx-server"),
+        );
     }
 
     out
 }
 
-fn find_local_prebuilt_server(remote_arch: &str) -> Option<PathBuf> {
-    prebuilt_server_candidates(remote_arch)
+fn expected_elf_machine(remote_arch: &str) -> Option<u16> {
+    match normalized_server_arch(remote_arch) {
+        Some("x86_64") => Some(62),
+        Some("arm64") => Some(183),
+        _ => None,
+    }
+}
+
+fn looks_like_matching_linux_server_binary(path: &Path, remote_arch: &str) -> bool {
+    let Some(expected_machine) = expected_elf_machine(remote_arch) else {
+        return false;
+    };
+
+    let mut header = [0u8; 20];
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+
+    if &header[..4] != b"\x7fELF" {
+        return false;
+    }
+
+    u16::from_le_bytes([header[18], header[19]]) == expected_machine
+}
+
+fn select_local_prebuilt_server<I>(remote_arch: &str, candidates: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    candidates
         .into_iter()
-        .find(|path| path.is_file())
+        .find(|path| path.is_file() && looks_like_matching_linux_server_binary(path, remote_arch))
+}
+
+fn find_local_prebuilt_server(remote_arch: &str) -> Option<PathBuf> {
+    select_local_prebuilt_server(remote_arch, prebuilt_server_candidates(remote_arch))
 }
 
 fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
@@ -2236,11 +2387,14 @@ fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
     )
 }
 
-fn upload_and_build(
-    target: &str,
-    identity: Option<&str>,
-    paths: &RemotePaths,
-) -> Result<()> {
+fn bootstrap_cannot_continue(err: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{}\n[onyx] bootstrap cannot continue without a usable onyx-server binary",
+        err
+    )
+}
+
+fn upload_and_build(target: &str, identity: Option<&str>, paths: &RemotePaths) -> Result<()> {
     eprintln!("[onyx] uploading source…");
     ssh_show(
         target,
@@ -2282,7 +2436,7 @@ fn upload_and_build(
         SERVER_MAIN_RS.as_bytes(),
     )?;
 
-    eprintln!("[onyx] building on remote (first run, ~1 min)…");
+    eprintln!("[onyx] building on remote from source (last-resort fallback)…");
     // Build into the workspace's target/ as usual, then stage the resulting
     // binary at onyx-server.new. We deliberately do NOT overwrite the live
     // onyx-server path here — that triggers ETXTBSY ("Text file busy") if
@@ -2691,13 +2845,17 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
 
         if !used_prebuilt {
             eprintln!(
-                "[onyx] no local prebuilt for {}; falling back to source build",
-                status.arch
+                "[onyx] no prebuilt server found for {}",
+                remote_arch_label(&status.arch)
             );
             if !status.has_cargo {
-                ensure_rust(ssh_target, identity).map_err(bootstrap_error_with_help)?;
+                ensure_rust(ssh_target, identity)
+                    .map_err(bootstrap_cannot_continue)
+                    .map_err(bootstrap_error_with_help)?;
             }
-            upload_and_build(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
+            upload_and_build(ssh_target, identity, &paths)
+                .map_err(bootstrap_cannot_continue)
+                .map_err(bootstrap_error_with_help)?;
         }
 
         // Atomically stop the old onyx-server (if any), swap in the new
