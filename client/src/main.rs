@@ -7,10 +7,14 @@ use rustls::{
 };
 use shared::{JobStatus, JobSummary, Message, StdStream, DEFAULT_PORT};
 use std::{
+    collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     net::SocketAddr,
-    os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    os::unix::{
+        fs::{OpenOptionsExt, PermissionsExt},
+        process::{CommandExt, ExitStatusExt},
+    },
     path::{Path, PathBuf},
     sync::{atomic::Ordering, Arc, Mutex},
     time::{Duration, Instant},
@@ -326,6 +330,17 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\"'\"'"))
 }
 
+fn display_shell_path(path: &str) -> String {
+    if path
+        .chars()
+        .any(|c| c.is_whitespace() || c == '\'' || c == '"')
+    {
+        shell_quote(path)
+    } else {
+        path.to_string()
+    }
+}
+
 struct RemotePaths {
     remote_dir: String,
     conf_dir: String,
@@ -346,14 +361,19 @@ fn normalize_remote_dir(candidate: &str, home: &str) -> String {
 fn ssh_capture_full(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     cmd: &str,
 ) -> Result<std::process::Output> {
-    ssh_cmd(target, identity).arg(cmd).output().context("ssh")
+    ssh_cmd(target, identity, session)
+        .arg(cmd)
+        .output()
+        .context("ssh")
 }
 
 fn check_remote_dir_writable(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     dir: &str,
 ) -> Result<(), String> {
     let marker = format!("{dir}/.onyx-write-test-{}", std::process::id());
@@ -362,7 +382,7 @@ fn check_remote_dir_writable(
         dir = shell_quote(dir),
         marker = shell_quote(&marker),
     );
-    let out = ssh_capture_full(target, identity, &cmd).map_err(|e| e.to_string())?;
+    let out = ssh_capture_full(target, identity, session, &cmd).map_err(|e| e.to_string())?;
     if out.status.success() {
         return Ok(());
     }
@@ -378,9 +398,13 @@ fn check_remote_dir_writable(
     ))
 }
 
-fn resolve_remote_paths(target: &str, identity: Option<&str>) -> Result<RemotePaths> {
-    let home =
-        ssh_capture(target, identity, "printf %s \"$HOME\"").context("resolving remote HOME")?;
+fn resolve_remote_paths(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+) -> Result<RemotePaths> {
+    let home = ssh_capture(target, identity, session, "printf %s \"$HOME\"")
+        .context("resolving remote HOME")?;
     anyhow::ensure!(!home.is_empty(), "remote HOME is empty");
 
     let mut remote_candidates = Vec::new();
@@ -397,7 +421,7 @@ fn resolve_remote_paths(target: &str, identity: Option<&str>) -> Result<RemotePa
     let mut remote_failures = Vec::new();
     let mut remote_dir = None;
     for candidate in &remote_candidates {
-        match check_remote_dir_writable(target, identity, candidate) {
+        match check_remote_dir_writable(target, identity, session, candidate) {
             Ok(()) => {
                 remote_dir = Some(candidate.clone());
                 break;
@@ -413,7 +437,7 @@ fn resolve_remote_paths(target: &str, identity: Option<&str>) -> Result<RemotePa
     })?;
 
     let conf_default = format!("{home}/.config/onyx");
-    let conf_dir = match check_remote_dir_writable(target, identity, &conf_default) {
+    let conf_dir = match check_remote_dir_writable(target, identity, session, &conf_default) {
         Ok(()) => conf_default,
         Err(_) => format!("{remote_dir}/config"),
     };
@@ -695,6 +719,9 @@ const INTERACTIVE_BACKOFF_MAX: Duration = Duration::from_secs(3);
 /// QUIC handshake timeout for proxy mode. Kept the same as interactive so
 /// the fallback decision happens on a similar cadence.
 const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+/// Bound how long we wait while establishing the initial SSH control-master
+/// connection before surfacing a clear timeout to the user.
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Throttle flag for the legacy "session already attached" Close reason.
 /// Set the first time an episode fires, cleared on the next successful
@@ -727,7 +754,10 @@ struct OnyxTarget {
     /// Resolved hostname used for the QUIC connection.
     quic_host: String,
     quic_port: u16,
+    /// Explicit `-i` identity passed by the user, if any.
     identity_file: Option<String>,
+    /// Best-effort identity path hint for user-facing ssh-add guidance.
+    identity_hint: Option<String>,
     ssh_mode: bool,
 }
 
@@ -1728,6 +1758,94 @@ mod reliability_tests {
         assert_eq!(b, INTERACTIVE_BACKOFF_MAX);
     }
 
+    #[test]
+    fn ssh_auth_failure_message_distinguishes_passphrase_cancel_and_retry() {
+        let required = ssh_auth_failure_message(
+            None,
+            Some("/home/me/.ssh/config-id"),
+            false,
+            Some(255),
+            None,
+            "Load key \"/home/me/.ssh/id_ed25519\": incorrect passphrase supplied to decrypt private key",
+        )
+        .unwrap();
+        assert_eq!(
+            required,
+            "[onyx] SSH key requires a passphrase.\nOnyx could not complete bootstrap through the current SSH flow.\nTry unlocking your key first on your local machine:\n  ssh-add /home/me/.ssh/id_ed25519"
+        );
+
+        let canceled = ssh_auth_failure_message(
+            None,
+            Some("/home/me/.ssh/id_ed25519"),
+            true,
+            Some(255),
+            None,
+            "Enter passphrase for key '/home/me/.ssh/id_ed25519': ",
+        )
+        .unwrap();
+        assert_eq!(canceled, "[onyx] SSH authentication was canceled.");
+
+        let retry = ssh_auth_failure_message(
+            Some("/tmp/onyx key"),
+            None,
+            true,
+            Some(255),
+            None,
+            "Enter passphrase for key '/tmp/onyx key':\nEnter passphrase for key '/tmp/onyx key':\nPermission denied (publickey).",
+        )
+        .unwrap();
+        assert_eq!(
+            retry,
+            "[onyx] SSH authentication could not be completed cleanly.\nPlease retry, or unlock your key first with:\n  ssh-add '/tmp/onyx key'"
+        );
+    }
+
+    #[test]
+    fn parse_resolved_ssh_config_captures_identityfile_hint() {
+        let resolved = parse_resolved_ssh_config(
+            "myserver",
+            "hostname host.example.com\nuser dev\nidentityfile /home/dev/.ssh/onyx_ed25519\nidentityfile /home/dev/.ssh/fallback\n",
+        )
+        .unwrap();
+        assert_eq!(resolved.hostname, "host.example.com");
+        assert_eq!(resolved.user, "dev");
+        assert_eq!(
+            resolved.identity_file.as_deref(),
+            Some("/home/dev/.ssh/onyx_ed25519")
+        );
+    }
+
+    #[test]
+    fn classify_ssh_master_failure_reports_connect_timeout() {
+        let status = std::process::ExitStatus::from_raw(255 << 8);
+        let err = classify_ssh_master_failure(
+            "myserver",
+            None,
+            None,
+            false,
+            &status,
+            "ssh: connect to host myserver port 22: Operation timed out",
+        );
+        assert_eq!(
+            format!("{err}"),
+            "[onyx] SSH connection timed out while establishing the session (15s).\nCheck SSH reachability and try again:\n  ssh myserver"
+        );
+    }
+
+    #[test]
+    fn bootstrap_context_is_not_added_to_ssh_auth_errors() {
+        let err = contextualize_bootstrap_error(
+            anyhow::anyhow!("[onyx] SSH authentication was canceled."),
+            "bootstrap failed",
+        );
+        assert_eq!(format!("{err}"), "[onyx] SSH authentication was canceled.");
+
+        let err = contextualize_bootstrap_error(anyhow::anyhow!("disk full"), "bootstrap failed");
+        let text = format!("{err:#}");
+        assert!(text.starts_with("bootstrap failed"));
+        assert!(text.contains("disk full"));
+    }
+
     // ───────── exec JSON helpers ─────────
 
     #[test]
@@ -1846,30 +1964,30 @@ mod reliability_tests {
     }
 }
 
-/// Use `ssh -G <ssh_target>` to resolve the canonical hostname and user.
-/// This honours ~/.ssh/config, ProxyJump, Include directives, etc.
-fn resolve_via_ssh_config(ssh_target: &str, identity: Option<&str>) -> Result<(String, String)> {
-    let mut cmd = std::process::Command::new("ssh");
-    if let Some(id) = identity {
-        cmd.args(["-i", id]);
-    }
-    cmd.arg("-T");
-    cmd.args(["-G", ssh_target]);
-    cmd.stderr(std::process::Stdio::null());
+#[derive(Debug, Clone)]
+struct ResolvedSshConfig {
+    hostname: String,
+    user: String,
+    identity_file: Option<String>,
+}
 
-    let out = cmd.output().context("ssh -G failed to run")?;
-    // ssh -G exits 0 even for unknown aliases (uses defaults), so we don't
-    // treat a non-zero exit as fatal here.
-
-    let text = String::from_utf8_lossy(&out.stdout);
+fn parse_resolved_ssh_config(ssh_target: &str, stdout: &str) -> Result<ResolvedSshConfig> {
     let mut hostname = String::new();
     let mut user = String::new();
+    let mut identity_file = None;
 
-    for line in text.lines() {
+    for line in stdout.lines() {
         if let Some(v) = line.strip_prefix("hostname ") {
             hostname = v.trim().to_string();
         } else if let Some(v) = line.strip_prefix("user ") {
             user = v.trim().to_string();
+        } else if identity_file.is_none() {
+            if let Some(v) = line.strip_prefix("identityfile ") {
+                let candidate = v.trim();
+                if !candidate.is_empty() && candidate != "none" {
+                    identity_file = Some(candidate.to_string());
+                }
+            }
         }
     }
 
@@ -1885,7 +2003,30 @@ fn resolve_via_ssh_config(ssh_target: &str, identity: Option<&str>) -> Result<(S
             .unwrap_or_else(|_| "root".to_string());
     }
 
-    Ok((hostname, user))
+    Ok(ResolvedSshConfig {
+        hostname,
+        user,
+        identity_file,
+    })
+}
+
+/// Use `ssh -G <ssh_target>` to resolve the canonical hostname, user, and
+/// preferred identity path from SSH config. This honours ~/.ssh/config,
+/// ProxyJump, Include directives, etc.
+fn resolve_via_ssh_config(ssh_target: &str, identity: Option<&str>) -> Result<ResolvedSshConfig> {
+    let mut cmd = std::process::Command::new("ssh");
+    if let Some(id) = identity {
+        cmd.args(["-i", id]);
+    }
+    cmd.arg("-T");
+    cmd.args(["-G", ssh_target]);
+    cmd.stderr(std::process::Stdio::null());
+
+    let out = cmd.output().context("ssh -G failed to run")?;
+    // ssh -G exits 0 even for unknown aliases (uses defaults), so we don't
+    // treat a non-zero exit as fatal here.
+
+    parse_resolved_ssh_config(ssh_target, &String::from_utf8_lossy(&out.stdout))
 }
 
 /// Build a fully-resolved OnyxTarget from raw CLI args.
@@ -1922,14 +2063,15 @@ fn build_target(raw: &str, identity: Option<String>, port_override: Option<u16>)
 
     if ssh_mode {
         // Resolve through SSH config to get the real hostname for QUIC.
-        let (quic_host, _user) = resolve_via_ssh_config(&ssh_part, identity.as_deref())
+        let resolved = resolve_via_ssh_config(&ssh_part, identity.as_deref())
             .with_context(|| format!("resolving '{ssh_part}'"))?;
 
         Ok(OnyxTarget {
             ssh_target: ssh_part,
-            quic_host,
+            quic_host: resolved.hostname,
             quic_port,
             identity_file: identity,
+            identity_hint: resolved.identity_file,
             ssh_mode: true,
         })
     } else {
@@ -1939,6 +2081,7 @@ fn build_target(raw: &str, identity: Option<String>, port_override: Option<u16>)
             quic_host: host_only.to_string(),
             quic_port,
             identity_file: identity,
+            identity_hint: None,
             ssh_mode: false,
         })
     }
@@ -1949,36 +2092,552 @@ fn build_target(raw: &str, identity: Option<String>, port_override: Option<u16>)
 // `ssh`) plus an optional identity file path.
 // ---------------------------------------------------------------------------
 
-fn ssh_cmd(target: &str, identity: Option<&str>) -> std::process::Command {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SshAuthFlow {
+    InteractivePrompt,
+    NonInteractive,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SshConnectMessages<'a> {
+    establishing: Option<&'a str>,
+    authenticated: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct SshSession {
+    target: String,
+    identity: Option<String>,
+    identity_hint: Option<String>,
+    control_dir: PathBuf,
+    control_path: PathBuf,
+}
+
+impl SshSession {
+    fn connect(
+        target: &str,
+        identity: Option<&str>,
+        identity_hint: Option<&str>,
+        auth_flow: SshAuthFlow,
+        messages: SshConnectMessages<'_>,
+    ) -> Result<Self> {
+        let unique = format!(
+            "onyx-ssh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let control_dir = std::env::temp_dir().join(unique);
+        fs::create_dir(&control_dir)
+            .with_context(|| format!("creating {}", control_dir.display()))?;
+        fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o700)).ok();
+
+        let control_path = control_dir.join("ctl");
+        let interactive_prompt =
+            matches!(auth_flow, SshAuthFlow::InteractivePrompt) && std::io::stderr().is_terminal();
+        if let Some(line) = messages.establishing {
+            eprintln!("{line}");
+        }
+        let (status, stderr) =
+            run_ssh_master(target, identity, &control_path, interactive_prompt)?;
+
+        if !status.success() {
+            let _ = fs::remove_dir_all(&control_dir);
+            return Err(classify_ssh_master_failure(
+                target,
+                identity,
+                identity_hint,
+                interactive_prompt,
+                &status,
+                &stderr,
+            ));
+        }
+
+        if ssh_passphrase_prompt_count(&stderr) > 0 {
+            if let Some(line) = messages.authenticated {
+                eprintln!("{line}");
+            }
+        }
+
+        Ok(Self {
+            target: target.to_string(),
+            identity: identity.map(str::to_string),
+            identity_hint: identity_hint.map(str::to_string).or_else(|| identity.map(str::to_string)),
+            control_dir,
+            control_path,
+        })
+    }
+
+    fn control_path(&self) -> &Path {
+        &self.control_path
+    }
+
+    fn identity_hint(&self) -> Option<&str> {
+        self.identity_hint.as_deref()
+    }
+
+    fn is_alive(&self) -> bool {
+        let mut cmd = std::process::Command::new("ssh");
+        if let Some(id) = self.identity.as_deref() {
+            cmd.args(["-i", id]);
+        }
+        cmd.arg("-S");
+        cmd.arg(&self.control_path);
+        cmd.args(["-O", "check"]);
+        cmd.arg(&self.target);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        cmd.status().map(|status| status.success()).unwrap_or(false)
+    }
+}
+
+impl Drop for SshSession {
+    fn drop(&mut self) {
+        let mut cmd = std::process::Command::new("ssh");
+        if let Some(id) = self.identity.as_deref() {
+            cmd.args(["-i", id]);
+        }
+        cmd.arg("-S");
+        cmd.arg(&self.control_path);
+        cmd.args(["-O", "exit"]);
+        cmd.arg(&self.target);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        let _ = cmd.status();
+        let _ = fs::remove_dir_all(&self.control_dir);
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct SshSessionPool {
+    sessions: Arc<Mutex<HashMap<SshSessionKey, Arc<SshSession>>>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct SshSessionKey {
+    target: String,
+    identity: Option<String>,
+}
+
+impl SshSessionPool {
+    fn get_or_connect(
+        &self,
+        target: &str,
+        identity: Option<&str>,
+        identity_hint: Option<&str>,
+        auth_flow: SshAuthFlow,
+        messages: SshConnectMessages<'_>,
+    ) -> Result<Arc<SshSession>> {
+        let key = SshSessionKey {
+            target: target.to_string(),
+            identity: identity.map(str::to_string),
+        };
+
+        let stale = {
+            let sessions = self.sessions.lock().unwrap();
+            match sessions.get(&key) {
+                Some(session) if session.is_alive() => return Ok(Arc::clone(session)),
+                Some(_) => true,
+                None => false,
+            }
+        };
+        if stale {
+            self.sessions.lock().unwrap().remove(&key);
+        }
+
+        let created = Arc::new(SshSession::connect(
+            target,
+            identity,
+            identity_hint,
+            auth_flow,
+            messages,
+        )?);
+        let mut sessions = self.sessions.lock().unwrap();
+        match sessions.entry(key) {
+            std::collections::hash_map::Entry::Occupied(entry) => Ok(Arc::clone(entry.get())),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Arc::clone(&created));
+                Ok(created)
+            }
+        }
+    }
+}
+
+fn ssh_session_for(
+    pool: Option<&SshSessionPool>,
+    target: &str,
+    identity: Option<&str>,
+    identity_hint: Option<&str>,
+    auth_flow: SshAuthFlow,
+    messages: SshConnectMessages<'_>,
+) -> Result<Arc<SshSession>> {
+    match pool {
+        Some(pool) => pool.get_or_connect(
+            target,
+            identity,
+            identity_hint,
+            auth_flow,
+            messages,
+        ),
+        None => Ok(Arc::new(SshSession::connect(
+            target,
+            identity,
+            identity_hint,
+            auth_flow,
+            messages,
+        )?)),
+    }
+}
+
+fn ssh_identity_from_stderr(stderr: &str) -> Option<String> {
+    for line in stderr.lines() {
+        if let Some(rest) = line.strip_prefix("Enter passphrase for key '") {
+            if let Some(path) = rest.strip_suffix("': ") {
+                return Some(path.to_string());
+            }
+            if let Some((path, _)) = rest.split_once("':") {
+                return Some(path.to_string());
+            }
+        }
+        if let Some(rest) = line.strip_prefix("Load key \"") {
+            if let Some((path, _)) = rest.split_once('"') {
+                return Some(path.to_string());
+            }
+        }
+        if let Some(rest) = line.strip_prefix("Load key '") {
+            if let Some((path, _)) = rest.split_once('\'') {
+                return Some(path.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn ssh_help_identity(
+    identity: Option<&str>,
+    identity_hint: Option<&str>,
+    stderr: &str,
+) -> Option<String> {
+    ssh_identity_from_stderr(stderr)
+        .or_else(|| identity.map(str::to_string))
+        .or_else(|| identity_hint.map(str::to_string))
+}
+
+fn ssh_add_hint(identity: Option<&str>) -> String {
+    match identity {
+        Some(path) => format!("ssh-add {}", display_shell_path(path)),
+        None => "ssh-add ~/.ssh/id_rsa".to_string(),
+    }
+}
+
+fn ssh_passphrase_required_message(identity: Option<&str>) -> String {
+    format!(
+        "[onyx] SSH key requires a passphrase.\n\
+         Onyx could not complete bootstrap through the current SSH flow.\n\
+         Try unlocking your key first on your local machine:\n  {}",
+        ssh_add_hint(identity)
+    )
+}
+
+fn ssh_auth_canceled_message() -> String {
+    "[onyx] SSH authentication was canceled.".to_string()
+}
+
+fn ssh_auth_retry_message(identity: Option<&str>) -> String {
+    format!(
+        "[onyx] SSH authentication could not be completed cleanly.\n\
+         Please retry, or unlock your key first with:\n  {}",
+        ssh_add_hint(identity)
+    )
+}
+
+fn ssh_connect_timeout_message(target: &str) -> String {
+    format!(
+        "[onyx] SSH connection timed out while establishing the session ({secs}s).\n\
+         Check SSH reachability and try again:\n  ssh {target}",
+        secs = SSH_CONNECT_TIMEOUT.as_secs(),
+    )
+}
+
+fn ssh_passphrase_prompt_count(stderr: &str) -> usize {
+    let lower = stderr.to_ascii_lowercase();
+    lower.matches("enter passphrase for key").count() + lower.matches("enter pin for").count()
+}
+
+fn ssh_stderr_is_auth_related(lower: &str) -> bool {
+    [
+        "permission denied",
+        "sign_and_send_pubkey",
+        "agent refused operation",
+        "incorrect passphrase",
+        "bad passphrase",
+        "load key",
+        "decrypt private key",
+        "passphrase",
+        "authentication failed",
+        "publickey",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn ssh_auth_failure_message(
+    identity: Option<&str>,
+    identity_hint: Option<&str>,
+    interactive_prompt: bool,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+    stderr: &str,
+) -> Option<String> {
+    let lower = stderr.to_ascii_lowercase();
+    let prompt_count = ssh_passphrase_prompt_count(stderr);
+    let auth_related = prompt_count > 0 || ssh_stderr_is_auth_related(&lower);
+    let help_identity = ssh_help_identity(identity, identity_hint, stderr);
+
+    if matches!(signal, Some(2 | 15)) {
+        return Some(ssh_auth_canceled_message());
+    }
+    if !auth_related {
+        return None;
+    }
+
+    if interactive_prompt {
+        if prompt_count > 1
+            || lower.contains("incorrect passphrase")
+            || lower.contains("bad passphrase")
+            || (prompt_count == 1 && lower.contains("permission denied"))
+        {
+            return Some(ssh_auth_retry_message(help_identity.as_deref()));
+        }
+        if prompt_count == 1 {
+            return Some(ssh_auth_canceled_message());
+        }
+    }
+
+    if !interactive_prompt
+        && (prompt_count > 0
+            || lower.contains("incorrect passphrase")
+            || lower.contains("bad passphrase")
+            || lower.contains("decrypt private key")
+            || lower.contains("load key"))
+    {
+        return Some(ssh_passphrase_required_message(help_identity.as_deref()));
+    }
+
+    if exit_code == Some(255) || auth_related {
+        return Some(ssh_auth_retry_message(help_identity.as_deref()));
+    }
+
+    None
+}
+
+fn run_ssh_master(
+    target: &str,
+    identity: Option<&str>,
+    control_path: &Path,
+    interactive_prompt: bool,
+) -> Result<(std::process::ExitStatus, String)> {
+    let mut cmd = std::process::Command::new("ssh");
+    if let Some(id) = identity {
+        cmd.args(["-i", id]);
+    }
+    cmd.arg("-S");
+    cmd.arg(control_path);
+    cmd.arg("-M");
+    cmd.arg("-N");
+    cmd.arg("-f");
+    cmd.arg("-o");
+    cmd.arg(format!("ConnectTimeout={}", SSH_CONNECT_TIMEOUT.as_secs()));
+    cmd.args([
+        "-o",
+        if interactive_prompt {
+            "BatchMode=no"
+        } else {
+            "BatchMode=yes"
+        },
+    ]);
+    cmd.arg(target);
+    cmd.stdin(if interactive_prompt {
+        std::process::Stdio::inherit()
+    } else {
+        std::process::Stdio::null()
+    });
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn().context("starting ssh authentication flow")?;
+    let stderr_reader = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("capturing ssh stderr"))?;
+    let capture = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut stderr_reader = stderr_reader;
+        let mut captured = Vec::new();
+        let mut buf = [0u8; 1024];
+        let mut local_stderr = std::io::stderr();
+        loop {
+            match stderr_reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    captured.extend_from_slice(&buf[..n]);
+                    if interactive_prompt {
+                        local_stderr.write_all(&buf[..n])?;
+                        local_stderr.flush()?;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(captured)
+    });
+
+    let status = child.wait().context("waiting for ssh authentication flow")?;
+    let stderr = capture
+        .join()
+        .map_err(|_| anyhow::anyhow!("ssh stderr reader panicked"))?
+        .context("reading ssh authentication stderr")?;
+    Ok((status, String::from_utf8_lossy(&stderr).into_owned()))
+}
+
+fn classify_ssh_master_failure(
+    target: &str,
+    identity: Option<&str>,
+    identity_hint: Option<&str>,
+    interactive_prompt: bool,
+    status: &std::process::ExitStatus,
+    stderr: &str,
+) -> anyhow::Error {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("timed out") {
+        return anyhow::anyhow!(ssh_connect_timeout_message(target));
+    }
+    if let Some(message) = ssh_auth_failure_message(
+        identity,
+        identity_hint,
+        interactive_prompt,
+        status.code(),
+        status.signal(),
+        stderr,
+    ) {
+        return anyhow::anyhow!(message);
+    }
+
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        anyhow::anyhow!("SSH connection failed (exit {})", status.code().unwrap_or(-1))
+    } else {
+        anyhow::anyhow!(
+            "SSH connection failed (exit {})\n{}",
+            status.code().unwrap_or(-1),
+            stderr
+        )
+    }
+}
+
+fn ssh_cmd(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+) -> std::process::Command {
     let mut c = std::process::Command::new("ssh");
     // -T: never allocate a pseudo-terminal for these non-interactive bootstrap
     //     commands.  Without it SSH prints "Pseudo-terminal will not be
     //     allocated because stdin is not a terminal." as noise on every run.
     c.arg("-T");
+    c.arg("-o");
+    c.arg(format!("ConnectTimeout={}", SSH_CONNECT_TIMEOUT.as_secs()));
     if let Some(id) = identity {
         c.args(["-i", id]);
+    }
+    if let Some(session) = session {
+        c.arg("-S");
+        c.arg(session.control_path());
+        c.args(["-o", "ControlMaster=auto", "-o", "BatchMode=yes"]);
     }
     c.arg(target);
     c
 }
 
-/// Run remote command; return trimmed stdout.  Stderr is suppressed — we only
-/// care about the output, not SSH banners or pseudo-terminal warnings.
-fn ssh_capture(target: &str, identity: Option<&str>, cmd: &str) -> Result<String> {
-    let out = ssh_cmd(target, identity)
+fn ssh_command_failure(
+    identity: Option<&str>,
+    identity_hint: Option<&str>,
+    status: &std::process::ExitStatus,
+    stderr: &str,
+) -> anyhow::Error {
+    if let Some(message) =
+        ssh_auth_failure_message(
+            identity,
+            identity_hint,
+            false,
+            status.code(),
+            status.signal(),
+            stderr,
+        )
+    {
+        return anyhow::anyhow!(message);
+    }
+
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        anyhow::anyhow!("SSH command failed (exit {})", status.code().unwrap_or(-1))
+    } else {
+        anyhow::anyhow!(
+            "SSH command failed (exit {})\n  stderr: {}",
+            status.code().unwrap_or(-1),
+            stderr
+        )
+    }
+}
+
+/// Run remote command; return trimmed stdout.
+fn ssh_capture(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    cmd: &str,
+) -> Result<String> {
+    let out = ssh_cmd(target, identity, session)
         .arg(cmd)
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
         .context("ssh")?;
+    if !out.status.success() {
+        return Err(ssh_command_failure(
+            identity,
+            session.and_then(|ssh| ssh.identity_hint()),
+            &out.status,
+            &String::from_utf8_lossy(&out.stderr),
+        ));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Run remote command; inherit stdout + stderr (shows build output, etc.).
-fn ssh_show(target: &str, identity: Option<&str>, cmd: &str) -> Result<()> {
-    let st = ssh_cmd(target, identity).arg(cmd).status().context("ssh")?;
+fn ssh_show(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    cmd: &str,
+) -> Result<()> {
+    let st = ssh_cmd(target, identity, session)
+        .arg(cmd)
+        .status()
+        .context("ssh")?;
     if !st.success() {
-        if st.code() == Some(255) {
-            anyhow::bail!("SSH authentication failed for '{target}'");
+        if let Some(message) = ssh_auth_failure_message(
+            identity,
+            session.and_then(|ssh| ssh.identity_hint()),
+            false,
+            st.code(),
+            st.signal(),
+            "",
+        )
+        {
+            anyhow::bail!(message);
         }
         anyhow::bail!("remote command failed (exit {})", st.code().unwrap_or(-1));
     }
@@ -1989,6 +2648,7 @@ fn ssh_show(target: &str, identity: Option<&str>, cmd: &str) -> Result<()> {
 fn ssh_upload(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     remote_path: &str,
     content: &[u8],
 ) -> Result<()> {
@@ -1996,12 +2656,22 @@ fn ssh_upload(
         .parent()
         .ok_or_else(|| anyhow::anyhow!("remote path has no parent: {remote_path}"))?;
     let parent = parent.display().to_string();
-    let mkdir = ssh_cmd(target, identity)
+    let mkdir = ssh_cmd(target, identity, session)
         .arg(format!("mkdir -p {}", shell_quote(&parent)))
         .stderr(std::process::Stdio::piped())
         .output()
         .context("creating remote upload directory")?;
     if !mkdir.status.success() {
+        if let Some(message) = ssh_auth_failure_message(
+            identity,
+            session.and_then(|ssh| ssh.identity_hint()),
+            false,
+            mkdir.status.code(),
+            mkdir.status.signal(),
+            &String::from_utf8_lossy(&mkdir.stderr),
+        ) {
+            anyhow::bail!(message);
+        }
         let stderr = String::from_utf8_lossy(&mkdir.stderr).trim().to_string();
         anyhow::bail!(
             "ssh upload failed\n  file: {remote_path}\n  exit: {}\n  stderr: {}",
@@ -2014,7 +2684,7 @@ fn ssh_upload(
         );
     }
 
-    let mut child = ssh_cmd(target, identity)
+    let mut child = ssh_cmd(target, identity, session)
         .arg(format!("cat > {}", shell_quote(remote_path)))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -2027,6 +2697,16 @@ fn ssh_upload(
     }
     let out = child.wait_with_output().context("waiting for ssh upload")?;
     if !out.status.success() {
+        if let Some(message) = ssh_auth_failure_message(
+            identity,
+            session.and_then(|ssh| ssh.identity_hint()),
+            false,
+            out.status.code(),
+            out.status.signal(),
+            &String::from_utf8_lossy(&out.stderr),
+        ) {
+            anyhow::bail!(message);
+        }
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         anyhow::bail!(
             "ssh upload failed\n  file: {remote_path}\n  exit: {}\n  stderr: {}",
@@ -2039,12 +2719,22 @@ fn ssh_upload(
         );
     }
 
-    let verify = ssh_cmd(target, identity)
+    let verify = ssh_cmd(target, identity, session)
         .arg(format!("test -f {}", shell_quote(remote_path)))
         .stderr(std::process::Stdio::piped())
         .output()
         .context("verifying remote upload")?;
     if !verify.status.success() {
+        if let Some(message) = ssh_auth_failure_message(
+            identity,
+            session.and_then(|ssh| ssh.identity_hint()),
+            false,
+            verify.status.code(),
+            verify.status.signal(),
+            &String::from_utf8_lossy(&verify.stderr),
+        ) {
+            anyhow::bail!(message);
+        }
         let stderr = String::from_utf8_lossy(&verify.stderr).trim().to_string();
         anyhow::bail!(
             "ssh upload verification failed\n  file: {remote_path}\n  exit: {}\n  stderr: {}",
@@ -2114,6 +2804,7 @@ struct RemoteStatus {
 fn remote_status(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     expected_hash: &str,
     quic_port: u16,
     paths: &RemotePaths,
@@ -2145,22 +2836,34 @@ fn remote_status(
         conf_dir = shell_quote(&paths.conf_dir),
     );
 
-    let out = ssh_cmd(target, identity)
+    let out = ssh_cmd(target, identity, session)
         .arg(&script)
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output()
         .context("failed to run ssh")?;
 
     if !out.status.success() {
-        if out.status.code() == Some(255) {
+        if let Some(message) = ssh_auth_failure_message(
+            identity,
+            session.and_then(|ssh| ssh.identity_hint()),
+            false,
+            out.status.code(),
+            out.status.signal(),
+            &String::from_utf8_lossy(&out.stderr),
+        ) {
+            anyhow::bail!(message);
+        }
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if stderr.is_empty() {
             anyhow::bail!(
-                "SSH authentication failed for '{}' — check your key/credentials",
-                target
+                "SSH connection failed (exit {})",
+                out.status.code().unwrap_or(-1)
             );
         }
         anyhow::bail!(
-            "SSH connection failed (exit {})",
-            out.status.code().unwrap_or(-1)
+            "SSH connection failed (exit {})\n{}",
+            out.status.code().unwrap_or(-1),
+            stderr
         );
     }
 
@@ -2190,11 +2893,17 @@ fn remote_status(
 
 /// Upload tmux.conf and status.sh to CONF_DIR and record the config hash.
 /// Only called when config_hash() doesn't match the remote, so it's rare.
-fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths) -> Result<()> {
+fn ensure_config_files(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    paths: &RemotePaths,
+) -> Result<()> {
     let conf_hash = format!("{:016x}", config_hash());
     let _ = ssh_capture(
         target,
         identity,
+        session,
         &format!(
             "mkdir -p {conf_dir} && chmod 700 {conf_dir}",
             conf_dir = shell_quote(&paths.conf_dir)
@@ -2203,12 +2912,14 @@ fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/tmux.conf", paths.conf_dir),
         ONYX_TMUX_CONF.as_bytes(),
     )?;
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/status.sh", paths.conf_dir),
         ONYX_STATUS_SH.as_bytes(),
     )?;
@@ -2216,6 +2927,7 @@ fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths
     let _ = ssh_capture(
         target,
         identity,
+        session,
         &format!(
             "chmod 700 {conf_dir} && chmod 600 {conf_dir}/tmux.conf && \
                   chmod 700 {conf_dir}/status.sh && \
@@ -2232,11 +2944,12 @@ fn ensure_config_files(target: &str, identity: Option<&str>, paths: &RemotePaths
 // Slow-path helpers — only called when something needs installing/building
 // ---------------------------------------------------------------------------
 
-fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
+fn ensure_rust(target: &str, identity: Option<&str>, session: Option<&SshSession>) -> Result<()> {
     eprintln!("[onyx] installing Rust via rustup…");
     let rustup = ssh_show(
         target,
         identity,
+        session,
         "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
          | sh -s -- -y --no-modify-path",
     );
@@ -2247,6 +2960,7 @@ fn ensure_rust(target: &str, identity: Option<&str>) -> Result<()> {
     let cargo_ready = ssh_capture(
         target,
         identity,
+        session,
         "if [ -x ~/.cargo/bin/cargo ] && ~/.cargo/bin/cargo --version >/dev/null 2>&1; then echo yes; else echo no; fi",
     )
     .unwrap_or_default();
@@ -2380,7 +3094,25 @@ fn find_local_prebuilt_server(remote_arch: &str) -> Option<PathBuf> {
     select_local_prebuilt_server(remote_arch, prebuilt_server_candidates(remote_arch))
 }
 
+fn is_ssh_auth_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("[onyx] SSH key requires a passphrase.")
+        || msg.contains("[onyx] SSH authentication was canceled.")
+        || msg.contains("[onyx] SSH authentication could not be completed cleanly.")
+}
+
+fn contextualize_bootstrap_error(err: anyhow::Error, context: &'static str) -> anyhow::Error {
+    if is_ssh_auth_error(&err) {
+        err
+    } else {
+        Err::<(), _>(err).context(context).unwrap_err()
+    }
+}
+
 fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
+    if is_ssh_auth_error(&err) {
+        return err;
+    }
     anyhow::anyhow!(
         "{}\nnext steps:\n  set ONYX_REMOTE_DIR to a writable absolute path on the remote host\n  or install/start onyx-server manually and re-run with --no-bootstrap",
         err
@@ -2388,17 +3120,26 @@ fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
 }
 
 fn bootstrap_cannot_continue(err: anyhow::Error) -> anyhow::Error {
+    if is_ssh_auth_error(&err) {
+        return err;
+    }
     anyhow::anyhow!(
         "{}\n[onyx] bootstrap cannot continue without a usable onyx-server binary",
         err
     )
 }
 
-fn upload_and_build(target: &str, identity: Option<&str>, paths: &RemotePaths) -> Result<()> {
+fn upload_and_build(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    paths: &RemotePaths,
+) -> Result<()> {
     eprintln!("[onyx] uploading source…");
     ssh_show(
         target,
         identity,
+        session,
         &format!(
             "mkdir -p {remote_dir}/shared/src {remote_dir}/server/src && chmod 700 {remote_dir}",
             remote_dir = shell_quote(&paths.remote_dir)
@@ -2408,30 +3149,35 @@ fn upload_and_build(target: &str, identity: Option<&str>, paths: &RemotePaths) -
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/Cargo.toml", paths.remote_dir),
         REMOTE_WORKSPACE_TOML.as_bytes(),
     )?;
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/shared/Cargo.toml", paths.remote_dir),
         SHARED_CARGO_TOML.as_bytes(),
     )?;
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/shared/src/lib.rs", paths.remote_dir),
         SHARED_LIB_RS.as_bytes(),
     )?;
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/server/Cargo.toml", paths.remote_dir),
         SERVER_CARGO_TOML.as_bytes(),
     )?;
     ssh_upload(
         target,
         identity,
+        session,
         &format!("{}/server/src/main.rs", paths.remote_dir),
         SERVER_MAIN_RS.as_bytes(),
     )?;
@@ -2445,6 +3191,7 @@ fn upload_and_build(target: &str, identity: Option<&str>, paths: &RemotePaths) -
     ssh_show(
         target,
         identity,
+        session,
         &format!(
             "cd {} && ~/.cargo/bin/cargo build --release -p server 2>&1 && \
              cp target/release/onyx-server onyx-server.new",
@@ -2458,6 +3205,7 @@ fn upload_and_build(target: &str, identity: Option<&str>, paths: &RemotePaths) -
 fn upload_prebuilt_server(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     remote_arch: &str,
     paths: &RemotePaths,
 ) -> Result<bool> {
@@ -2477,7 +3225,7 @@ fn upload_prebuilt_server(
     // which would ETXTBSY against a running onyx-server. The atomic
     // install step moves this into place after stopping the old server.
     let staging = format!("{}/onyx-server.new", paths.remote_dir);
-    ssh_upload(target, identity, &staging, &bytes)?;
+    ssh_upload(target, identity, session, &staging, &bytes)?;
     Ok(true)
 }
 
@@ -2494,6 +3242,7 @@ fn upload_prebuilt_server(
 fn install_staged_server_binary(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     hash: &str,
     status: &RemoteStatus,
     paths: &RemotePaths,
@@ -2538,7 +3287,7 @@ fn install_staged_server_binary(
         hash_path = shell_quote(&hash_path),
     );
 
-    ssh_show(target, identity, &script).map_err(classify_install_error)
+    ssh_show(target, identity, session, &script).map_err(classify_install_error)
 }
 
 /// Turn a shell-error from install_staged_server_binary into a precise,
@@ -2581,13 +3330,14 @@ fn classify_install_error(err: anyhow::Error) -> anyhow::Error {
 fn start_server(
     target: &str,
     identity: Option<&str>,
+    session: Option<&SshSession>,
     quic_port: u16,
     paths: &RemotePaths,
 ) -> Result<()> {
     let server_pid = format!("{}/server.pid", paths.remote_dir);
     let server_log = format!("{}/server.log", paths.remote_dir);
     let remote_dir = shell_quote(&paths.remote_dir);
-    let status = remote_status(target, identity, "", quic_port, paths)?;
+    let status = remote_status(target, identity, session, "", quic_port, paths)?;
 
     if status.healthy {
         eprintln!("[onyx] onyx-server already running");
@@ -2609,6 +3359,7 @@ fn start_server(
         let _ = ssh_capture(
             target,
             identity,
+            session,
             &format!(
                 "pid=$(cat {} 2>/dev/null); \
          [ -n \"$pid\" ] && kill \"$pid\" 2>/dev/null; \
@@ -2622,6 +3373,7 @@ fn start_server(
     let _ = ssh_capture(
         target,
         identity,
+        session,
         &format!(": > {} 2>/dev/null; true", shell_quote(&server_log)),
     );
 
@@ -2633,6 +3385,7 @@ fn start_server(
     ssh_show(
         target,
         identity,
+        session,
         &format!(
             "nohup {remote_dir}/onyx-server{port_arg} \
          >{server_log} 2>&1 </dev/null & \
@@ -2652,6 +3405,7 @@ fn start_server(
         ssh_capture(
             target,
             identity,
+            session,
             &format!(
                 "grep -q 'listening on .*:{quic_port}' {} 2>/dev/null && echo yes",
                 shell_quote(&server_log)
@@ -2665,6 +3419,7 @@ fn start_server(
         if let Ok(log) = ssh_capture(
             target,
             identity,
+            session,
             &format!("tail -20 {} 2>/dev/null", shell_quote(&server_log)),
         ) {
             if !log.is_empty() {
@@ -2674,6 +3429,7 @@ fn start_server(
         if let Ok(err) = ssh_capture(
             target,
             identity,
+            session,
             &format!(
                 "grep -m1 'Address already in use' {} 2>/dev/null",
                 shell_quote(&server_log)
@@ -2709,10 +3465,10 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
     eprintln!("[onyx doctor] port:   {quic_port}");
 
     // Resolve through SSH config.
-    let quic_host = match resolve_via_ssh_config(&raw_target, identity) {
-        Ok((h, _)) => {
-            eprintln!("[onyx doctor] resolves to: {h}");
-            h
+    let resolved = match resolve_via_ssh_config(&raw_target, identity) {
+        Ok(resolved) => {
+            eprintln!("[onyx doctor] resolves to: {}", resolved.hostname);
+            resolved
         }
         Err(e) => {
             eprintln!("[onyx doctor] ✗ SSH resolution failed: {e:#}");
@@ -2720,6 +3476,11 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
             return Ok(());
         }
     };
+    let quic_host = resolved.hostname.clone();
+    let ssh_identity_hint = identity
+        .map(str::to_string)
+        .or_else(|| resolved.identity_file.clone());
+    let ssh_pool = SshSessionPool::default();
 
     // DNS.
     let server_addr = match format!("{quic_host}:{quic_port}").to_socket_addrs() {
@@ -2743,12 +3504,25 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
     match tokio::task::spawn_blocking({
         let raw_target = raw_target.clone();
         let identity_file = identity_file.clone();
+        let ssh_identity_hint = ssh_identity_hint.clone();
+        let ssh_pool = ssh_pool.clone();
         move || -> Result<RemoteStatus> {
             let identity = identity_file.as_deref();
-            let paths =
-                resolve_remote_paths(&raw_target, identity).context("resolving remote paths")?;
+            let ssh = ssh_session_for(
+                Some(&ssh_pool),
+                &raw_target,
+                identity,
+                ssh_identity_hint.as_deref(),
+                SshAuthFlow::InteractivePrompt,
+                SshConnectMessages {
+                    establishing: Some("[onyx] establishing SSH session…"),
+                    authenticated: Some("[onyx] authenticated. continuing checks…"),
+                },
+            )?;
+            let paths = resolve_remote_paths(&raw_target, identity, Some(&ssh))
+                .context("resolving remote paths")?;
             let hash = format!("{:016x}", source_hash());
-            remote_status(&raw_target, identity, &hash, quic_port, &paths)
+            remote_status(&raw_target, identity, Some(&ssh), &hash, quic_port, &paths)
         }
     })
     .await
@@ -2816,13 +3590,22 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
 // Bootstrap — entry point called once before the QUIC loop
 // ---------------------------------------------------------------------------
 
-fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result<()> {
+fn bootstrap(
+    ssh_target: &str,
+    identity: Option<&str>,
+    identity_hint: Option<&str>,
+    quic_port: u16,
+    auth_flow: SshAuthFlow,
+    pool: Option<&SshSessionPool>,
+    messages: SshConnectMessages<'_>,
+) -> Result<()> {
+    let ssh = ssh_session_for(pool, ssh_target, identity, identity_hint, auth_flow, messages)?;
     let hash = format!("{:016x}", source_hash());
-    let paths = resolve_remote_paths(ssh_target, identity).map_err(bootstrap_error_with_help)?;
+    let paths = resolve_remote_paths(ssh_target, identity, Some(&ssh))
+        .map_err(bootstrap_error_with_help)?;
 
     // Single SSH call: verify auth + get all state.
-    let status = remote_status(ssh_target, identity, &hash, quic_port, &paths)
-        .context("cannot reach remote")
+    let status = remote_status(ssh_target, identity, Some(&ssh), &hash, quic_port, &paths)
         .map_err(bootstrap_error_with_help)?;
 
     // ── Fast path ─────────────────────────────────────────────────────────────
@@ -2832,7 +3615,8 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
 
     // Config files stale but server is running — just push the new files.
     if status.hash_ok && status.healthy && !status.conf_ok {
-        ensure_config_files(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
+        ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
+            .map_err(bootstrap_error_with_help)?;
         return Ok(());
     }
 
@@ -2840,8 +3624,9 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
     eprintln!("[onyx] setting up remote (one-time or after update)...");
 
     if !status.hash_ok {
-        let used_prebuilt = upload_prebuilt_server(ssh_target, identity, &status.arch, &paths)
-            .map_err(bootstrap_error_with_help)?;
+        let used_prebuilt =
+            upload_prebuilt_server(ssh_target, identity, Some(&ssh), &status.arch, &paths)
+                .map_err(bootstrap_error_with_help)?;
 
         if !used_prebuilt {
             eprintln!(
@@ -2849,11 +3634,11 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
                 remote_arch_label(&status.arch)
             );
             if !status.has_cargo {
-                ensure_rust(ssh_target, identity)
+                ensure_rust(ssh_target, identity, Some(&ssh))
                     .map_err(bootstrap_cannot_continue)
                     .map_err(bootstrap_error_with_help)?;
             }
-            upload_and_build(ssh_target, identity, &paths)
+            upload_and_build(ssh_target, identity, Some(&ssh), &paths)
                 .map_err(bootstrap_cannot_continue)
                 .map_err(bootstrap_error_with_help)?;
         }
@@ -2861,12 +3646,14 @@ fn bootstrap(ssh_target: &str, identity: Option<&str>, quic_port: u16) -> Result
         // Atomically stop the old onyx-server (if any), swap in the new
         // binary via mv, and update the hash stamp. Must run after upload
         // and before start_server.
-        install_staged_server_binary(ssh_target, identity, &hash, &status, &paths)
+        install_staged_server_binary(ssh_target, identity, Some(&ssh), &hash, &status, &paths)
             .map_err(bootstrap_error_with_help)?;
     }
 
-    ensure_config_files(ssh_target, identity, &paths).map_err(bootstrap_error_with_help)?;
-    start_server(ssh_target, identity, quic_port, &paths).map_err(bootstrap_error_with_help)?;
+    ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
+        .map_err(bootstrap_error_with_help)?;
+    start_server(ssh_target, identity, Some(&ssh), quic_port, &paths)
+        .map_err(bootstrap_error_with_help)?;
 
     eprintln!("[onyx] ready");
     Ok(())
@@ -3323,11 +4110,25 @@ async fn prepare_exec_target(
     if target.ssh_mode && !no_bootstrap {
         let ssh_target = target.ssh_target.clone();
         let identity = target.identity_file.clone();
+        let identity_hint = target.identity_hint.clone();
         let port = target.quic_port;
-        tokio::task::spawn_blocking(move || bootstrap(&ssh_target, identity.as_deref(), port))
+        tokio::task::spawn_blocking(move || {
+            bootstrap(
+                &ssh_target,
+                identity.as_deref(),
+                identity_hint.as_deref(),
+                port,
+                SshAuthFlow::InteractivePrompt,
+                None,
+                SshConnectMessages {
+                    establishing: Some("[onyx] establishing SSH session…"),
+                    authenticated: Some("[onyx] authenticated. continuing bootstrap…"),
+                },
+            )
+        })
             .await
             .map_err(|e| anyhow::anyhow!("bootstrap task: {e}"))?
-            .context("bootstrap failed")?;
+            .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
     }
 
     let server_addr: SocketAddr = {
@@ -4406,15 +5207,23 @@ async fn main() -> Result<()> {
     // canonical hostname; the unresolved alias is kept only for SSH commands.
     let target = build_target(&raw_target, identity_file, port_override)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
+    let ssh_pool = target.ssh_mode.then(SshSessionPool::default);
 
     // SSH bootstrap (blocking, single SSH call on fast path).
     if target.ssh_mode && !no_bootstrap {
         bootstrap(
             &target.ssh_target,
             target.identity_file.as_deref(),
+            target.identity_hint.as_deref(),
             target.quic_port,
+            SshAuthFlow::InteractivePrompt,
+            ssh_pool.as_ref(),
+            SshConnectMessages {
+                establishing: Some("[onyx] establishing SSH session…"),
+                authenticated: Some("[onyx] authenticated. continuing bootstrap…"),
+            },
         )
-        .context("bootstrap failed")?;
+        .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
     }
 
     // Build QUIC SocketAddr from the resolved hostname (never the raw alias).
@@ -4475,9 +5284,19 @@ async fn main() -> Result<()> {
                 if t.elapsed() > Duration::from_secs(20) && rebootstrap_due {
                     let ssh_target = target.ssh_target.clone();
                     let identity = target.identity_file.clone();
+                    let identity_hint = target.identity_hint.clone();
+                    let ssh_pool = ssh_pool.clone();
                     let port = target.quic_port;
                     let _ = tokio::task::spawn_blocking(move || {
-                        bootstrap(&ssh_target, identity.as_deref(), port)
+                        bootstrap(
+                            &ssh_target,
+                            identity.as_deref(),
+                            identity_hint.as_deref(),
+                            port,
+                            SshAuthFlow::NonInteractive,
+                            ssh_pool.as_ref(),
+                            SshConnectMessages::default(),
+                        )
                     })
                     .await;
                     last_rebootstrap = Some(Instant::now());
@@ -4537,9 +5356,22 @@ async fn main() -> Result<()> {
                     // Never had a session — QUIC could not connect at all.
                     // Fetch server.log to distinguish firewall vs handshake.
                     eprintln!("onyx: QUIC failed — {e:#}{hint}");
+                    let ssh = ssh_pool
+                        .as_ref()
+                        .and_then(|pool| {
+                            pool.get_or_connect(
+                                &target.ssh_target,
+                                target.identity_file.as_deref(),
+                                target.identity_hint.as_deref(),
+                                SshAuthFlow::NonInteractive,
+                                SshConnectMessages::default(),
+                            )
+                            .ok()
+                        });
                     if let Ok(log) = ssh_capture(
                         &target.ssh_target,
                         target.identity_file.as_deref(),
+                        ssh.as_deref(),
                         &format!("cat {REMOTE_DIR}/server.log 2>/dev/null"),
                     ) {
                         if log.is_empty() {
