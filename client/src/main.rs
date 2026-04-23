@@ -12,7 +12,8 @@ use std::{
     io::{IsTerminal, Read, Write},
     net::SocketAddr,
     os::unix::{
-        fs::{OpenOptionsExt, PermissionsExt},
+        ffi::OsStrExt,
+        fs::OpenOptionsExt,
         process::{CommandExt, ExitStatusExt},
     },
     path::{Path, PathBuf},
@@ -722,6 +723,10 @@ const PROXY_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Bound how long we wait while establishing the initial SSH control-master
 /// connection before surfacing a clear timeout to the user.
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Keep well below the shortest common Unix domain socket limit (104 bytes on
+/// macOS) so `/tmp/...` control sockets are safe across platforms.
+const SSH_CONTROL_SOCKET_MAX_LEN: usize = 96;
+const SSH_CONTROL_SOCKET_ATTEMPTS: u32 = 32;
 
 /// Throttle flag for the legacy "session already attached" Close reason.
 /// Set the first time an episode fires, cleared on the next successful
@@ -730,6 +735,8 @@ const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// ties to the user-visible display, which is itself process-global.
 static SESSION_BUSY_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static SSH_SOCKET_COUNTER: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Target resolution
@@ -1816,13 +1823,28 @@ mod reliability_tests {
     }
 
     #[test]
+    fn ssh_control_socket_path_is_short_and_flat() {
+        let path = ssh_control_socket_path().unwrap();
+        let rendered = path.display().to_string();
+        assert!(rendered.starts_with("/tmp/o-"), "path was: {rendered}");
+        assert!(rendered.ends_with(".sock"), "path was: {rendered}");
+        assert!(control_socket_path_len(&path) <= SSH_CONTROL_SOCKET_MAX_LEN);
+        assert!(
+            !rendered.contains("/ctl"),
+            "path should not create nested control socket dirs: {rendered}"
+        );
+    }
+
+    #[test]
     fn classify_ssh_master_failure_reports_connect_timeout() {
         let status = std::process::ExitStatus::from_raw(255 << 8);
+        let control_path = Path::new("/tmp/o-1234-abcd12.sock");
         let err = classify_ssh_master_failure(
             "myserver",
             None,
             None,
             false,
+            control_path,
             &status,
             "ssh: connect to host myserver port 22: Operation timed out",
         );
@@ -1833,12 +1855,40 @@ mod reliability_tests {
     }
 
     #[test]
+    fn classify_ssh_master_failure_reports_control_socket_path_errors() {
+        let status = std::process::ExitStatus::from_raw(255 << 8);
+        let control_path = Path::new("/tmp/o-1234-abcd12.sock");
+        let err = classify_ssh_master_failure(
+            "myserver",
+            None,
+            None,
+            false,
+            control_path,
+            &status,
+            "unix_listener: path \"/tmp/o-1234-abcd12.sock\" too long for Unix domain socket",
+        );
+        assert_eq!(
+            format!("{err}"),
+            "[onyx] failed to create SSH control socket (path too long)\n  path: /tmp/o-1234-abcd12.sock"
+        );
+    }
+
+    #[test]
     fn bootstrap_context_is_not_added_to_ssh_auth_errors() {
         let err = contextualize_bootstrap_error(
             anyhow::anyhow!("[onyx] SSH authentication was canceled."),
             "bootstrap failed",
         );
         assert_eq!(format!("{err}"), "[onyx] SSH authentication was canceled.");
+
+        let err = contextualize_bootstrap_error(
+            anyhow::anyhow!("[onyx] failed to create SSH control socket (path too long)\n  path: /tmp/o-1.sock"),
+            "bootstrap failed",
+        );
+        assert_eq!(
+            format!("{err}"),
+            "[onyx] failed to create SSH control socket (path too long)\n  path: /tmp/o-1.sock"
+        );
 
         let err = contextualize_bootstrap_error(anyhow::anyhow!("disk full"), "bootstrap failed");
         let text = format!("{err:#}");
@@ -2109,7 +2159,6 @@ struct SshSession {
     target: String,
     identity: Option<String>,
     identity_hint: Option<String>,
-    control_dir: PathBuf,
     control_path: PathBuf,
 }
 
@@ -2121,20 +2170,7 @@ impl SshSession {
         auth_flow: SshAuthFlow,
         messages: SshConnectMessages<'_>,
     ) -> Result<Self> {
-        let unique = format!(
-            "onyx-ssh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        let control_dir = std::env::temp_dir().join(unique);
-        fs::create_dir(&control_dir)
-            .with_context(|| format!("creating {}", control_dir.display()))?;
-        fs::set_permissions(&control_dir, fs::Permissions::from_mode(0o700)).ok();
-
-        let control_path = control_dir.join("ctl");
+        let control_path = ssh_control_socket_path()?;
         let interactive_prompt =
             matches!(auth_flow, SshAuthFlow::InteractivePrompt) && std::io::stderr().is_terminal();
         if let Some(line) = messages.establishing {
@@ -2144,12 +2180,13 @@ impl SshSession {
             run_ssh_master(target, identity, &control_path, interactive_prompt)?;
 
         if !status.success() {
-            let _ = fs::remove_dir_all(&control_dir);
+            let _ = fs::remove_file(&control_path);
             return Err(classify_ssh_master_failure(
                 target,
                 identity,
                 identity_hint,
                 interactive_prompt,
+                &control_path,
                 &status,
                 &stderr,
             ));
@@ -2164,8 +2201,9 @@ impl SshSession {
         Ok(Self {
             target: target.to_string(),
             identity: identity.map(str::to_string),
-            identity_hint: identity_hint.map(str::to_string).or_else(|| identity.map(str::to_string)),
-            control_dir,
+            identity_hint: identity_hint
+                .map(str::to_string)
+                .or_else(|| identity.map(str::to_string)),
             control_path,
         })
     }
@@ -2208,7 +2246,7 @@ impl Drop for SshSession {
         cmd.stdout(std::process::Stdio::null());
         cmd.stderr(std::process::Stdio::null());
         let _ = cmd.status();
-        let _ = fs::remove_dir_all(&self.control_dir);
+        let _ = fs::remove_file(&self.control_path);
     }
 }
 
@@ -2293,6 +2331,85 @@ fn ssh_session_for(
     }
 }
 
+fn control_socket_path_len(path: &Path) -> usize {
+    path.as_os_str().as_bytes().len()
+}
+
+fn ssh_control_socket_path_too_long_message(path: &Path) -> String {
+    format!(
+        "[onyx] failed to create SSH control socket (path too long)\n  path: {}",
+        path.display()
+    )
+}
+
+fn ssh_control_socket_failure_message(path: &Path, detail: Option<&str>) -> String {
+    match detail.map(str::trim).filter(|detail| !detail.is_empty()) {
+        Some(detail) => format!(
+            "[onyx] failed to create SSH control socket\n  path: {}\n  detail: {}",
+            path.display(),
+            detail
+        ),
+        None => format!(
+            "[onyx] failed to create SSH control socket\n  path: {}",
+            path.display()
+        ),
+    }
+}
+
+fn ssh_control_socket_path() -> Result<PathBuf> {
+    let base = Path::new("/tmp");
+    anyhow::ensure!(
+        base.is_dir(),
+        "{}",
+        ssh_control_socket_failure_message(base, Some("/tmp is unavailable"))
+    );
+
+    let pid = std::process::id();
+    for _ in 0..SSH_CONTROL_SOCKET_ATTEMPTS {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let counter = SSH_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed) as u64;
+        let suffix = (now.as_nanos() as u64 ^ (counter << 12) ^ pid as u64) & 0x00ff_ffff;
+        let path = base.join(format!("o-{pid}-{suffix:06x}.sock"));
+
+        if control_socket_path_len(&path) > SSH_CONTROL_SOCKET_MAX_LEN {
+            anyhow::bail!("{}", ssh_control_socket_path_too_long_message(&path));
+        }
+        if !path.exists() {
+            return Ok(path);
+        }
+    }
+
+    let fallback = base.join(format!("o-{pid}-xxxxxx.sock"));
+    anyhow::bail!(
+        "{}",
+        ssh_control_socket_failure_message(&fallback, Some("could not allocate a unique socket path"))
+    )
+}
+
+fn ssh_control_socket_failure_from_stderr(
+    control_path: &Path,
+    stderr: &str,
+) -> Option<anyhow::Error> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("too long for unix domain socket") {
+        return Some(anyhow::anyhow!(
+            ssh_control_socket_path_too_long_message(control_path)
+        ));
+    }
+    if lower.contains("unix_listener:")
+        || lower.contains("control socket")
+        || lower.contains("muxserver_listen")
+    {
+        return Some(anyhow::anyhow!(ssh_control_socket_failure_message(
+            control_path,
+            Some(stderr),
+        )));
+    }
+    None
+}
+
 fn ssh_identity_from_stderr(stderr: &str) -> Option<String> {
     for line in stderr.lines() {
         if let Some(rest) = line.strip_prefix("Enter passphrase for key '") {
@@ -2360,6 +2477,13 @@ fn ssh_connect_timeout_message(target: &str) -> String {
         "[onyx] SSH connection timed out while establishing the session ({secs}s).\n\
          Check SSH reachability and try again:\n  ssh {target}",
         secs = SSH_CONNECT_TIMEOUT.as_secs(),
+    )
+}
+
+fn ssh_banner_timeout_message(target: &str) -> String {
+    format!(
+        "[onyx] SSH connection timed out during banner exchange.\n\
+         Check SSH reachability and try again:\n  ssh {target}"
     )
 }
 
@@ -2508,10 +2632,17 @@ fn classify_ssh_master_failure(
     identity: Option<&str>,
     identity_hint: Option<&str>,
     interactive_prompt: bool,
+    control_path: &Path,
     status: &std::process::ExitStatus,
     stderr: &str,
 ) -> anyhow::Error {
+    if let Some(err) = ssh_control_socket_failure_from_stderr(control_path, stderr) {
+        return err;
+    }
     let lower = stderr.to_ascii_lowercase();
+    if lower.contains("banner exchange") && lower.contains("timed out") {
+        return anyhow::anyhow!(ssh_banner_timeout_message(target));
+    }
     if lower.contains("timed out") {
         return anyhow::anyhow!(ssh_connect_timeout_message(target));
     }
@@ -2528,10 +2659,10 @@ fn classify_ssh_master_failure(
 
     let stderr = stderr.trim();
     if stderr.is_empty() {
-        anyhow::anyhow!("SSH connection failed (exit {})", status.code().unwrap_or(-1))
+        anyhow::anyhow!("[onyx] SSH connection failed")
     } else {
         anyhow::anyhow!(
-            "SSH connection failed (exit {})\n{}",
+            "[onyx] SSH connection failed\n  exit: {}\n  stderr: {}",
             status.code().unwrap_or(-1),
             stderr
         )
@@ -2855,13 +2986,10 @@ fn remote_status(
         }
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
         if stderr.is_empty() {
-            anyhow::bail!(
-                "SSH connection failed (exit {})",
-                out.status.code().unwrap_or(-1)
-            );
+            anyhow::bail!("[onyx] SSH connection failed");
         }
         anyhow::bail!(
-            "SSH connection failed (exit {})\n{}",
+            "[onyx] SSH connection failed\n  exit: {}\n  stderr: {}",
             out.status.code().unwrap_or(-1),
             stderr
         );
@@ -3094,15 +3222,18 @@ fn find_local_prebuilt_server(remote_arch: &str) -> Option<PathBuf> {
     select_local_prebuilt_server(remote_arch, prebuilt_server_candidates(remote_arch))
 }
 
-fn is_ssh_auth_error(err: &anyhow::Error) -> bool {
+fn is_user_visible_ssh_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
     msg.contains("[onyx] SSH key requires a passphrase.")
         || msg.contains("[onyx] SSH authentication was canceled.")
         || msg.contains("[onyx] SSH authentication could not be completed cleanly.")
+        || msg.contains("[onyx] failed to create SSH control socket")
+        || msg.contains("[onyx] SSH connection failed")
+        || msg.contains("[onyx] SSH connection timed out")
 }
 
 fn contextualize_bootstrap_error(err: anyhow::Error, context: &'static str) -> anyhow::Error {
-    if is_ssh_auth_error(&err) {
+    if is_user_visible_ssh_error(&err) {
         err
     } else {
         Err::<(), _>(err).context(context).unwrap_err()
@@ -3110,7 +3241,7 @@ fn contextualize_bootstrap_error(err: anyhow::Error, context: &'static str) -> a
 }
 
 fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
-    if is_ssh_auth_error(&err) {
+    if is_user_visible_ssh_error(&err) {
         return err;
     }
     anyhow::anyhow!(
@@ -3120,7 +3251,7 @@ fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
 }
 
 fn bootstrap_cannot_continue(err: anyhow::Error) -> anyhow::Error {
-    if is_ssh_auth_error(&err) {
+    if is_user_visible_ssh_error(&err) {
         return err;
     }
     anyhow::anyhow!(
