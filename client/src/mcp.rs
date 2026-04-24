@@ -300,11 +300,11 @@ async fn streaming_call(
     let tool_name = params["name"].as_str()?.to_string();
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    let (result, is_error) =
-        match stream_exec_tool(&tool_name, &args, onyx_bin, &id, stdout).await {
-            Ok(v) => (v, false),
-            Err(e) => (mk_error("exec_failed", &e.to_string()), true),
-        };
+    let (result, is_error) = match stream_exec_tool(&tool_name, &args, onyx_bin, &id, stdout).await
+    {
+        Ok(v) => (v, false),
+        Err(e) => (mk_error("exec_failed", &e.to_string()), true),
+    };
 
     Some(json!({
         "jsonrpc": "2.0",
@@ -472,24 +472,12 @@ async fn kill_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
     cmd.args(["kill", target, job_id, "--json"]);
 
     let (ndjson, diagnostics) = capture(&mut cmd).await?;
-
-    let killed = ndjson
-        .lines()
-        .find_map(|l| {
-            let v: Value = serde_json::from_str(l.trim()).ok()?;
-            if v["type"].as_str() == Some("kill_result") {
-                Some(v["killed"].as_bool().unwrap_or(false))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(false);
-
-    Ok(json!({
-        "job_id": job_id,
-        "killed": killed,
-        "diagnostics": diagnostics
-    }))
+    let mut result = parse_kill_result_ndjson(&ndjson)?;
+    if result["job_id"].is_null() {
+        result["job_id"] = json!(job_id);
+    }
+    result["diagnostics"] = json!(diagnostics);
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -510,9 +498,7 @@ async fn capture(cmd: &mut Command) -> Result<(String, String)> {
     let output = cmd.output().await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr)
-        .trim()
-        .to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     if !output.status.success() && stdout.trim().is_empty() {
         let msg = if stderr.is_empty() {
@@ -569,25 +555,12 @@ async fn capture_streaming<W: AsyncWriteExt + Unpin>(
 
         // Forward every meaningful event as a progress notification so the
         // MCP client sees output incrementally rather than after completion.
-        if let Ok(event) = serde_json::from_str::<Value>(trimmed) {
-            if event["type"].as_str().map_or(false, is_streamable_event) {
-                let notif = json!({
-                    "jsonrpc": "2.0",
-                    "method": "notifications/progress",
-                    "params": {
-                        "progressToken": request_id,
-                        "progress": seq,
-                        // The event JSON is embedded as a string so the
-                        // client can parse it if it wants structured data.
-                        "message": trimmed
-                    }
-                });
-                seq += 1;
-                let mut out = notif.to_string();
-                out.push('\n');
-                writer.write_all(out.as_bytes()).await?;
-                writer.flush().await?;
-            }
+        if let Some(notif) = progress_notification_for_event(trimmed, request_id, seq) {
+            seq += 1;
+            let mut out = notif.to_string();
+            out.push('\n');
+            writer.write_all(out.as_bytes()).await?;
+            writer.flush().await?;
         }
     }
 
@@ -606,6 +579,24 @@ async fn capture_streaming<W: AsyncWriteExt + Unpin>(
     let mut result = parse_exec_stream(&ndjson_buf);
     result["diagnostics"] = json!(stderr_str);
     Ok(result)
+}
+
+fn progress_notification_for_event(line: &str, request_id: &Value, seq: u64) -> Option<Value> {
+    let event: Value = serde_json::from_str(line).ok()?;
+    if !event["type"].as_str().map_or(false, is_streamable_event) {
+        return None;
+    }
+    Some(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {
+            "progressToken": request_id,
+            "progress": seq,
+            // The event JSON is embedded as a string so the
+            // client can parse it if it wants structured data.
+            "message": line
+        }
+    }))
 }
 
 /// Events that are meaningful to forward incrementally. Informational events
@@ -655,6 +646,7 @@ pub fn parse_exec_stream(ndjson: &str) -> Value {
     let mut status = "unknown";
     let mut error: Option<String> = None;
     let mut truncated = false;
+    let mut timed_out = false;
 
     for line in ndjson.lines() {
         let line = line.trim();
@@ -682,15 +674,19 @@ pub fn parse_exec_stream(ndjson: &str) -> Value {
                 }
             }
             Some("finished") => {
-                exit_code = v["exit_code"].clone();
                 duration_ms = v["duration_ms"].clone();
-                status = match v["exit_code"].as_i64() {
-                    Some(0) => "succeeded",
-                    Some(_) => "failed",
-                    None => "killed",
-                };
+                if !timed_out {
+                    exit_code = v["exit_code"].clone();
+                    status = match v["exit_code"].as_i64() {
+                        Some(0) => "succeeded",
+                        Some(_) => "failed",
+                        None => "killed",
+                    };
+                }
             }
             Some("timeout") => {
+                timed_out = true;
+                exit_code = json!(124);
                 status = "timed_out";
             }
             Some("error") => {
@@ -723,6 +719,36 @@ pub fn parse_exec_stream(ndjson: &str) -> Value {
     }
 
     obj
+}
+
+fn parse_kill_result_ndjson(ndjson: &str) -> Result<Value> {
+    let mut exec_error: Option<String> = None;
+    for line in ndjson
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        match v["type"].as_str() {
+            Some("kill_result") => {
+                return Ok(json!({
+                    "job_id": v["job_id"],
+                    "killed": v["killed"].as_bool().unwrap_or(false),
+                    "message": v["message"]
+                }));
+            }
+            Some("error") => {
+                exec_error = v["reason"].as_str().map(str::to_string);
+            }
+            _ => {}
+        }
+    }
+    if let Some(reason) = exec_error {
+        anyhow::bail!("{reason}");
+    }
+    anyhow::bail!("onyx kill produced no kill_result event")
 }
 
 /// Parse the NDJSON produced by `onyx jobs --json`.
@@ -778,17 +804,32 @@ fn mk_error(kind: &str, message: &str) -> Value {
 /// agents can pattern-match without parsing free-form English.
 fn classify_error(stderr: &str) -> String {
     let lower = stderr.to_lowercase();
-    let kind = if lower.contains("no address") || lower.contains("failed to lookup") || lower.contains("name or service") {
-        "unknown_target"
-    } else if lower.contains("job not found") || lower.contains("no such job") {
-        "job_not_found"
-    } else if lower.contains("bootstrap") {
-        "bootstrap_failed"
-    } else if lower.contains("connection refused") || lower.contains("timed out") || lower.contains("unreachable") {
-        "connection_failed"
-    } else {
-        "exec_failed"
-    };
+    let kind =
+        if lower.contains("ssh authentication failed: the selected key requires a passphrase") {
+            "passphrase_required"
+        } else if lower.contains("ssh authentication failed") {
+            "ssh_auth_failed"
+        } else if lower.contains("quic handshake timed out") || lower.contains("udp/") {
+            "udp_blocked"
+        } else if lower.contains("quic handshake failed") {
+            "quic_failed"
+        } else if lower.contains("no address")
+            || lower.contains("failed to lookup")
+            || lower.contains("name or service")
+        {
+            "unknown_target"
+        } else if lower.contains("job not found") || lower.contains("no such job") {
+            "job_not_found"
+        } else if lower.contains("bootstrap") {
+            "bootstrap_failed"
+        } else if lower.contains("connection refused")
+            || lower.contains("timed out")
+            || lower.contains("unreachable")
+        {
+            "connection_failed"
+        } else {
+            "exec_failed"
+        };
     format!("{kind}: {stderr}")
 }
 
@@ -869,6 +910,19 @@ mod tests {
     }
 
     #[test]
+    fn exec_stream_timeout_preserves_timed_out_status_and_exit_code() {
+        let ndjson = r#"
+{"type":"started","job_id":"job_t","started_at_unix":1000,"command":"sleep 99"}
+{"type":"timeout"}
+{"type":"finished","exit_code":null,"finished_at_unix":1012,"duration_ms":12000}
+"#;
+        let r = parse_exec_stream(ndjson);
+        assert_eq!(r["status"], "timed_out");
+        assert_eq!(r["exit_code"], 124);
+        assert_eq!(r["duration_ms"], 12000);
+    }
+
+    #[test]
     fn exec_stream_server_error() {
         let ndjson = r#"{"type":"error","reason":"job not found: job_xyz"}"#;
         let r = parse_exec_stream(ndjson);
@@ -937,6 +991,24 @@ mod tests {
         assert_eq!(r["stderr"], "");
     }
 
+    #[test]
+    fn kill_result_parser_extracts_message_and_state() {
+        let parsed = parse_kill_result_ndjson(
+            r#"{"type":"kill_result","job_id":"job_dead","killed":false,"message":"job job_dead already finished"}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed["job_id"], "job_dead");
+        assert_eq!(parsed["killed"], false);
+        assert_eq!(parsed["message"], "job job_dead already finished");
+    }
+
+    #[test]
+    fn kill_result_parser_surfaces_exec_error() {
+        let err = parse_kill_result_ndjson(r#"{"type":"error","reason":"job job_dead not found"}"#)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "job job_dead not found");
+    }
+
     // -- parse_jobs_ndjson ---------------------------------------------------
 
     #[test]
@@ -999,6 +1071,20 @@ not json at all
     }
 
     #[test]
+    fn classify_passphrase_required() {
+        let msg = classify_error(
+            "[onyx] SSH authentication failed: the selected key requires a passphrase.",
+        );
+        assert!(msg.starts_with("passphrase_required:"));
+    }
+
+    #[test]
+    fn classify_udp_blocked() {
+        let msg = classify_error("QUIC handshake timed out after 8 s; UDP/7272 may be blocked");
+        assert!(msg.starts_with("udp_blocked:"));
+    }
+
+    #[test]
     fn mk_error_shape() {
         let e = mk_error("job_not_found", "no such job: job_xyz");
         assert_eq!(e["error"], "job_not_found");
@@ -1009,11 +1095,23 @@ not json at all
 
     #[test]
     fn streamable_event_covers_all_meaningful_types() {
-        for t in ["started", "stdout", "stderr", "finished", "timeout",
-                  "reconnecting", "resumed", "gap", "error"] {
+        for t in [
+            "started",
+            "stdout",
+            "stderr",
+            "finished",
+            "timeout",
+            "reconnecting",
+            "resumed",
+            "gap",
+            "error",
+        ] {
             assert!(is_streamable_event(t), "{t} should be streamable");
         }
-        assert!(!is_streamable_event("job"), "job list events are not exec events");
+        assert!(
+            !is_streamable_event("job"),
+            "job list events are not exec events"
+        );
         assert!(!is_streamable_event("kill_result"));
         assert!(!is_streamable_event("unknown_type"));
     }
@@ -1021,12 +1119,39 @@ not json at all
     #[test]
     fn streaming_call_detects_stream_flag() {
         let streaming = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"onyx_exec","arguments":{"target":"h","command":["ls"],"stream":true}}}"#;
-        let buffered  = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"onyx_exec","arguments":{"target":"h","command":["ls"]}}}"#;
-        let other     = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#;
+        let buffered = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"onyx_exec","arguments":{"target":"h","command":["ls"]}}}"#;
+        let other = r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#;
         assert!(is_streaming_call(streaming));
         assert!(!is_streaming_call(buffered));
         assert!(!is_streaming_call(other));
         assert!(!is_streaming_call("not json {{{"));
+    }
+
+    #[test]
+    fn progress_notification_wraps_streamable_events() {
+        let notif = progress_notification_for_event(
+            r#"{"type":"resumed","job_id":"job_r","seq":5}"#,
+            &json!(7),
+            3,
+        )
+        .unwrap();
+        assert_eq!(notif["method"], "notifications/progress");
+        assert_eq!(notif["params"]["progressToken"], 7);
+        assert_eq!(notif["params"]["progress"], 3);
+        assert_eq!(
+            notif["params"]["message"],
+            r#"{"type":"resumed","job_id":"job_r","seq":5}"#
+        );
+    }
+
+    #[test]
+    fn progress_notification_skips_non_streamable_events() {
+        assert!(progress_notification_for_event(
+            r#"{"type":"kill_result","job_id":"job_k","killed":true}"#,
+            &json!(1),
+            0,
+        )
+        .is_none());
     }
 
     // -- protocol layer (no subprocess) -------------------------------------
@@ -1048,10 +1173,7 @@ not json at all
         let resp = handle_message(req, &dummy).await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 5);
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"onyx_exec"));
         assert!(names.contains(&"onyx_jobs"));
         assert!(names.contains(&"onyx_attach"));
@@ -1066,12 +1188,9 @@ not json at all
     #[tokio::test]
     async fn handle_ping() {
         let dummy = PathBuf::from("/dev/null");
-        let resp = handle_message(
-            r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#,
-            &dummy,
-        )
-        .await
-        .unwrap();
+        let resp = handle_message(r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#, &dummy)
+            .await
+            .unwrap();
         assert!(resp["result"].is_object());
         assert_eq!(resp["id"], 9);
     }
@@ -1091,11 +1210,7 @@ not json at all
     #[tokio::test]
     async fn handle_notification_no_response() {
         let dummy = PathBuf::from("/dev/null");
-        let resp = handle_message(
-            r#"{"jsonrpc":"2.0","method":"initialized"}"#,
-            &dummy,
-        )
-        .await;
+        let resp = handle_message(r#"{"jsonrpc":"2.0","method":"initialized"}"#, &dummy).await;
         assert!(resp.is_none());
     }
 

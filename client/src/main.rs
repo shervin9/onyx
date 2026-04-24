@@ -432,7 +432,10 @@ fn resolve_remote_paths(
     }
     let remote_dir = remote_dir.ok_or_else(|| {
         anyhow::anyhow!(
-            "no writable remote install directory found\n{}\nnext steps:\n  set ONYX_REMOTE_DIR to a writable absolute path\n  or install onyx-server manually and use --no-bootstrap",
+            "[onyx] bootstrap could not find a writable remote install directory.\n\
+             Likely cause: the default Onyx paths are not writable on the remote host.\n\
+             Checked:\n{}\n\
+             Try:\n  set ONYX_REMOTE_DIR to a writable absolute path, e.g. /tmp/onyx\n  or install/start onyx-server manually and re-run with --no-bootstrap",
             remote_failures.join("\n")
         )
     })?;
@@ -621,15 +624,57 @@ impl Drop for RawMode {
 // Error hints
 // ---------------------------------------------------------------------------
 
-fn quic_error_hint(e: &anyhow::Error) -> &'static str {
-    let s = format!("{e:#}");
-    if s.contains("timed out") || s.contains("TimedOut") || s.contains("deadline") {
-        "\n  (UDP packets dropped — most likely the server firewall blocks the QUIC port;\
-         \n   fix: ssh <host> 'sudo ufw allow 7272/udp'  or open it in the Hetzner firewall panel)"
-    } else if s.contains("handshake") || s.contains("ALPN") || s.contains("tls") {
-        "\n  (QUIC handshake failed — check server.log for TLS/ALPN errors)"
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum QuicFailureKind {
+    Timeout,
+    ConnectionRefused,
+    NetworkUnreachable,
+    Dns,
+    Handshake,
+    Other,
+}
+
+fn classify_quic_failure(e: &anyhow::Error) -> QuicFailureKind {
+    let s = format!("{e:#}").to_ascii_lowercase();
+    if s.contains("connection refused") {
+        QuicFailureKind::ConnectionRefused
+    } else if s.contains("network is unreachable") || s.contains("no route to host") {
+        QuicFailureKind::NetworkUnreachable
+    } else if s.contains("dns lookup")
+        || s.contains("no address resolved")
+        || s.contains("failed to lookup address information")
+        || s.contains("name or service not known")
+    {
+        QuicFailureKind::Dns
+    } else if s.contains("timed out")
+        || s.contains("timedout")
+        || s.contains("deadline")
+        || s.contains("udp/")
+    {
+        QuicFailureKind::Timeout
+    } else if s.contains("handshake")
+        || s.contains("alpn")
+        || s.contains("tls")
+        || s.contains("certificate")
+    {
+        QuicFailureKind::Handshake
     } else {
-        ""
+        QuicFailureKind::Other
+    }
+}
+
+fn quic_error_hint(e: &anyhow::Error, port: u16) -> String {
+    match classify_quic_failure(e) {
+        QuicFailureKind::Timeout => format!(
+            "\n  likely cause: UDP/{port} is blocked or dropped before it reaches onyx-server\n  try: open UDP/{port} in the remote firewall, or use --no-fallback to require QUIC"
+        ),
+        QuicFailureKind::ConnectionRefused => format!(
+            "\n  likely cause: onyx-server is not listening on UDP/{port} yet\n  try: run `onyx doctor <target>` or reconnect after bootstrap completes"
+        ),
+        QuicFailureKind::Handshake => {
+            "\n  likely cause: the server answered UDP, but QUIC/TLS setup does not match Onyx\n  try: inspect server.log for TLS/ALPN or TOFU issues".to_string()
+        }
+        _ => String::new(),
     }
 }
 
@@ -640,19 +685,13 @@ fn proxy_session_not_resumable(e: &anyhow::Error) -> bool {
 }
 
 fn quic_unavailable_for_proxy(e: &anyhow::Error) -> bool {
-    let s = format!("{e:#}").to_ascii_lowercase();
-    [
-        "timed out",
-        "deadline",
-        "udp/",
-        "connection refused",
-        "network is unreachable",
-        "no route to host",
-        "dns lookup",
-        "no address resolved",
-    ]
-    .iter()
-    .any(|needle| s.contains(needle))
+    matches!(
+        classify_quic_failure(e),
+        QuicFailureKind::Timeout
+            | QuicFailureKind::ConnectionRefused
+            | QuicFailureKind::NetworkUnreachable
+            | QuicFailureKind::Dns
+    )
 }
 
 /// Plain-TCP fallback for proxy mode when QUIC is unavailable.
@@ -735,8 +774,7 @@ const SSH_CONTROL_SOCKET_ATTEMPTS: u32 = 32;
 /// ties to the user-visible display, which is itself process-global.
 static SESSION_BUSY_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static SSH_SOCKET_COUNTER: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+static SSH_SOCKET_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Target resolution
@@ -877,7 +915,11 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 }
                 return Ok(ParseOutcome::Run(CliMode::Mcp {}));
             }
-            Some(other) => return Err(format!("mcp: unknown subcommand '{other}' (try: onyx mcp serve)")),
+            Some(other) => {
+                return Err(format!(
+                    "mcp: unknown subcommand '{other}' (try: onyx mcp serve)"
+                ))
+            }
             None => return Err("mcp: missing subcommand (try: onyx mcp serve)".to_string()),
         }
     }
@@ -995,13 +1037,12 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                     env.push((k.to_string(), v.to_string()));
                 }
                 "--timeout" => {
-                    let raw = it
-                        .next()
-                        .ok_or_else(|| "--timeout requires a duration (e.g. 30s, 5m)".to_string())?;
-                    timeout_secs = Some(
-                        parse_duration_secs(&raw)
-                            .ok_or_else(|| format!("--timeout: invalid duration '{raw}' (use e.g. 30s, 5m, 2h)"))?
-                    );
+                    let raw = it.next().ok_or_else(|| {
+                        "--timeout requires a duration (e.g. 30s, 5m)".to_string()
+                    })?;
+                    timeout_secs = Some(parse_duration_secs(&raw).ok_or_else(|| {
+                        format!("--timeout: invalid duration '{raw}' (use e.g. 30s, 5m, 2h)")
+                    })?);
                 }
                 other if other.starts_with('-') => {
                     return Err(format!("unknown flag for {sub}: {other} (try --help)"));
@@ -1383,8 +1424,8 @@ mod parse_args_tests {
 
     #[test]
     fn proxy_mode_accepts_no_fallback() {
-        let out = parse_args_from(s(&["proxy", "--no-fallback", "host.example.com", "22"]))
-            .unwrap();
+        let out =
+            parse_args_from(s(&["proxy", "--no-fallback", "host.example.com", "22"])).unwrap();
         match out {
             ParseOutcome::Run(CliMode::Proxy { no_fallback, .. }) => {
                 assert!(no_fallback);
@@ -1451,10 +1492,7 @@ mod parse_args_tests {
             "Resumable remote command execution",
             "1 hour",
         ] {
-            assert!(
-                HELP_TEXT.contains(needle),
-                "HELP_TEXT missing '{needle}'"
-            );
+            assert!(HELP_TEXT.contains(needle), "HELP_TEXT missing '{needle}'");
         }
     }
 
@@ -1529,10 +1567,7 @@ mod parse_args_tests {
     #[test]
     fn exec_empty_command_rejected() {
         let err = parse_args_from(s(&["exec", "host", "--"])).unwrap_err();
-        assert!(
-            err.contains("missing command"),
-            "err was: {err}"
-        );
+        assert!(err.contains("missing command"), "err was: {err}");
     }
 
     #[test]
@@ -1739,6 +1774,22 @@ mod reliability_tests {
     }
 
     #[test]
+    fn quic_failure_classifier_distinguishes_timeout_and_handshake() {
+        assert_eq!(
+            classify_quic_failure(&err("QUIC handshake timed out after 8 s")),
+            QuicFailureKind::Timeout
+        );
+        assert_eq!(
+            classify_quic_failure(&err("connection refused")),
+            QuicFailureKind::ConnectionRefused
+        );
+        assert_eq!(
+            classify_quic_failure(&err("QUIC handshake failed: alpn mismatch")),
+            QuicFailureKind::Handshake
+        );
+    }
+
+    #[test]
     fn reconnect_constants_form_coherent_progression() {
         // Backoff must actually grow and never exceed the cap.
         assert!(INTERACTIVE_BACKOFF_INITIAL < INTERACTIVE_BACKOFF_MAX);
@@ -1778,7 +1829,7 @@ mod reliability_tests {
         .unwrap();
         assert_eq!(
             required,
-            "[onyx] SSH key requires a passphrase.\nOnyx could not complete bootstrap through the current SSH flow.\nTry unlocking your key first on your local machine:\n  ssh-add /home/me/.ssh/id_ed25519"
+            "[onyx] SSH authentication failed: the selected key requires a passphrase.\nLikely cause: Onyx is using a non-interactive SSH flow for bootstrap.\nTry:\n  unlock the key locally with ssh-add /home/me/.ssh/id_ed25519\n  then re-run Onyx"
         );
 
         let canceled = ssh_auth_failure_message(
@@ -1803,7 +1854,7 @@ mod reliability_tests {
         .unwrap();
         assert_eq!(
             retry,
-            "[onyx] SSH authentication could not be completed cleanly.\nPlease retry, or unlock your key first with:\n  ssh-add '/tmp/onyx key'"
+            "[onyx] SSH authentication failed.\nLikely cause: the passphrase was canceled, incorrect, or the agent refused the key.\nTry:\n  retry the SSH prompt\n  or unlock the key first with ssh-add '/tmp/onyx key'"
         );
     }
 
@@ -1823,6 +1874,63 @@ mod reliability_tests {
     }
 
     #[test]
+    fn remote_status_parser_detects_tmux_presence() {
+        let parsed = parse_remote_status_output(
+            "h=abc r=yes own=yes ready=yes c=yes arch=x86_64 cv=def tmux=yes",
+            "abc",
+            "def",
+        );
+        assert!(parsed.hash_ok);
+        assert!(parsed.healthy);
+        assert!(parsed.tmux_available);
+    }
+
+    #[test]
+    fn remote_status_parser_defaults_missing_tmux_to_basic_mode() {
+        let parsed = parse_remote_status_output(
+            "h=abc r=yes own=yes ready=yes c=yes arch=x86_64 cv=def",
+            "abc",
+            "def",
+        );
+        assert!(!parsed.tmux_available);
+    }
+
+    #[test]
+    fn basic_mode_activation_requires_ssh_and_missing_tmux() {
+        assert!(should_activate_basic_mode(true, Some(false)));
+        assert!(!should_activate_basic_mode(true, Some(true)));
+        assert!(!should_activate_basic_mode(false, Some(false)));
+        assert!(!should_activate_basic_mode(true, None));
+    }
+
+    #[test]
+    fn tmux_messages_are_stable() {
+        assert_eq!(
+            tmux_missing_warning_lines(),
+            [
+                "[onyx] tmux not found — running in basic mode (no persistent sessions)",
+                "[onyx] install tmux for full experience: sudo apt install tmux",
+            ]
+        );
+        assert_eq!(
+            tmux_feature_unavailable_message("attach"),
+            "[onyx] attach is not available without tmux"
+        );
+    }
+
+    #[test]
+    fn exec_detach_hint_switches_to_logs_and_kill_without_tmux() {
+        assert_eq!(
+            exec_detach_hint("job_123", Some(true)),
+            "[onyx] detached; reattach with: onyx attach <target> job_123"
+        );
+        assert_eq!(
+            exec_detach_hint("job_123", Some(false)),
+            "[onyx] detached; use logs/kill instead: onyx logs <target> job_123 | onyx kill <target> job_123"
+        );
+    }
+
+    #[test]
     fn ssh_control_socket_path_is_short_and_flat() {
         let path = ssh_control_socket_path().unwrap();
         let rendered = path.display().to_string();
@@ -1833,6 +1941,16 @@ mod reliability_tests {
             !rendered.contains("/ctl"),
             "path should not create nested control socket dirs: {rendered}"
         );
+    }
+
+    #[test]
+    fn ssh_control_socket_paths_stay_short_across_multiple_allocations() {
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..8 {
+            let path = ssh_control_socket_path().unwrap();
+            assert!(control_socket_path_len(&path) <= SSH_CONTROL_SOCKET_MAX_LEN);
+            assert!(seen.insert(path));
+        }
     }
 
     #[test]
@@ -1850,7 +1968,26 @@ mod reliability_tests {
         );
         assert_eq!(
             format!("{err}"),
-            "[onyx] SSH connection timed out while establishing the session (15s).\nCheck SSH reachability and try again:\n  ssh myserver"
+            "[onyx] SSH connection timed out while establishing the session (15s).\nLikely cause: the host is unreachable, port 22 is blocked, or SSH is hanging before login.\nTry:\n  ssh myserver"
+        );
+    }
+
+    #[test]
+    fn classify_ssh_master_failure_reports_connection_closed() {
+        let status = std::process::ExitStatus::from_raw(255 << 8);
+        let control_path = Path::new("/tmp/o-1234-abcd12.sock");
+        let err = classify_ssh_master_failure(
+            "myserver",
+            None,
+            None,
+            false,
+            control_path,
+            &status,
+            "Connection closed by remote host",
+        );
+        assert_eq!(
+            format!("{err}"),
+            "[onyx] SSH connection closed during bootstrap.\nLikely cause: the SSH server or a network middlebox dropped the session.\nTry:\n  ssh myserver\n  then re-run Onyx once plain SSH is stable"
         );
     }
 
@@ -1882,12 +2019,23 @@ mod reliability_tests {
         assert_eq!(format!("{err}"), "[onyx] SSH authentication was canceled.");
 
         let err = contextualize_bootstrap_error(
-            anyhow::anyhow!("[onyx] failed to create SSH control socket (path too long)\n  path: /tmp/o-1.sock"),
+            anyhow::anyhow!(
+                "[onyx] failed to create SSH control socket (path too long)\n  path: /tmp/o-1.sock"
+            ),
             "bootstrap failed",
         );
         assert_eq!(
             format!("{err}"),
             "[onyx] failed to create SSH control socket (path too long)\n  path: /tmp/o-1.sock"
+        );
+
+        let err = contextualize_bootstrap_error(
+            anyhow::anyhow!("[onyx] bootstrap could not find a writable remote install directory."),
+            "bootstrap failed",
+        );
+        assert_eq!(
+            format!("{err}"),
+            "[onyx] bootstrap could not find a writable remote install directory."
         );
 
         let err = contextualize_bootstrap_error(anyhow::anyhow!("disk full"), "bootstrap failed");
@@ -2081,7 +2229,11 @@ fn resolve_via_ssh_config(ssh_target: &str, identity: Option<&str>) -> Result<Re
 
 /// Build a fully-resolved OnyxTarget from raw CLI args.
 /// Port resolution order: explicit `port_override` → `ONYX_PORT` env → `:port` suffix → DEFAULT_PORT.
-fn build_target(raw: &str, identity: Option<String>, port_override: Option<u16>) -> Result<OnyxTarget> {
+fn build_target(
+    raw: &str,
+    identity: Option<String>,
+    port_override: Option<u16>,
+) -> Result<OnyxTarget> {
     // Strip optional `:quic_port` suffix (rightmost colon followed by digits).
     let (ssh_part, quic_port) = match raw.rfind(':') {
         Some(i) if raw[i + 1..].parse::<u16>().is_ok() => {
@@ -2176,8 +2328,7 @@ impl SshSession {
         if let Some(line) = messages.establishing {
             eprintln!("{line}");
         }
-        let (status, stderr) =
-            run_ssh_master(target, identity, &control_path, interactive_prompt)?;
+        let (status, stderr) = run_ssh_master(target, identity, &control_path, interactive_prompt)?;
 
         if !status.success() {
             let _ = fs::remove_file(&control_path);
@@ -2314,13 +2465,7 @@ fn ssh_session_for(
     messages: SshConnectMessages<'_>,
 ) -> Result<Arc<SshSession>> {
     match pool {
-        Some(pool) => pool.get_or_connect(
-            target,
-            identity,
-            identity_hint,
-            auth_flow,
-            messages,
-        ),
+        Some(pool) => pool.get_or_connect(target, identity, identity_hint, auth_flow, messages),
         None => Ok(Arc::new(SshSession::connect(
             target,
             identity,
@@ -2384,7 +2529,10 @@ fn ssh_control_socket_path() -> Result<PathBuf> {
     let fallback = base.join(format!("o-{pid}-xxxxxx.sock"));
     anyhow::bail!(
         "{}",
-        ssh_control_socket_failure_message(&fallback, Some("could not allocate a unique socket path"))
+        ssh_control_socket_failure_message(
+            &fallback,
+            Some("could not allocate a unique socket path")
+        )
     )
 }
 
@@ -2394,9 +2542,9 @@ fn ssh_control_socket_failure_from_stderr(
 ) -> Option<anyhow::Error> {
     let lower = stderr.to_ascii_lowercase();
     if lower.contains("too long for unix domain socket") {
-        return Some(anyhow::anyhow!(
-            ssh_control_socket_path_too_long_message(control_path)
-        ));
+        return Some(anyhow::anyhow!(ssh_control_socket_path_too_long_message(
+            control_path
+        )));
     }
     if lower.contains("unix_listener:")
         || lower.contains("control socket")
@@ -2453,9 +2601,9 @@ fn ssh_add_hint(identity: Option<&str>) -> String {
 
 fn ssh_passphrase_required_message(identity: Option<&str>) -> String {
     format!(
-        "[onyx] SSH key requires a passphrase.\n\
-         Onyx could not complete bootstrap through the current SSH flow.\n\
-         Try unlocking your key first on your local machine:\n  {}",
+        "[onyx] SSH authentication failed: the selected key requires a passphrase.\n\
+         Likely cause: Onyx is using a non-interactive SSH flow for bootstrap.\n\
+         Try:\n  unlock the key locally with {}\n  then re-run Onyx",
         ssh_add_hint(identity)
     )
 }
@@ -2466,8 +2614,9 @@ fn ssh_auth_canceled_message() -> String {
 
 fn ssh_auth_retry_message(identity: Option<&str>) -> String {
     format!(
-        "[onyx] SSH authentication could not be completed cleanly.\n\
-         Please retry, or unlock your key first with:\n  {}",
+        "[onyx] SSH authentication failed.\n\
+         Likely cause: the passphrase was canceled, incorrect, or the agent refused the key.\n\
+         Try:\n  retry the SSH prompt\n  or unlock the key first with {}",
         ssh_add_hint(identity)
     )
 }
@@ -2475,7 +2624,8 @@ fn ssh_auth_retry_message(identity: Option<&str>) -> String {
 fn ssh_connect_timeout_message(target: &str) -> String {
     format!(
         "[onyx] SSH connection timed out while establishing the session ({secs}s).\n\
-         Check SSH reachability and try again:\n  ssh {target}",
+         Likely cause: the host is unreachable, port 22 is blocked, or SSH is hanging before login.\n\
+         Try:\n  ssh {target}",
         secs = SSH_CONNECT_TIMEOUT.as_secs(),
     )
 }
@@ -2483,8 +2633,79 @@ fn ssh_connect_timeout_message(target: &str) -> String {
 fn ssh_banner_timeout_message(target: &str) -> String {
     format!(
         "[onyx] SSH connection timed out during banner exchange.\n\
-         Check SSH reachability and try again:\n  ssh {target}"
+         Likely cause: the TCP connection opened, but sshd did not finish the handshake.\n\
+         Try:\n  ssh {target}\n  then inspect sshd, ProxyJump, or fail2ban on the remote side"
     )
+}
+
+fn ssh_connection_closed_message(target: &str) -> String {
+    format!(
+        "[onyx] SSH connection closed during bootstrap.\n\
+         Likely cause: the SSH server or a network middlebox dropped the session.\n\
+         Try:\n  ssh {target}\n  then re-run Onyx once plain SSH is stable"
+    )
+}
+
+fn ssh_transport_failure_message(target: &str, stderr: &str) -> Option<String> {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("banner exchange") && lower.contains("timed out") {
+        Some(ssh_banner_timeout_message(target))
+    } else if lower.contains("connection closed by remote host")
+        || lower.contains("connection reset by peer")
+        || lower.contains("broken pipe")
+        || lower.contains("kex_exchange_identification")
+    {
+        Some(ssh_connection_closed_message(target))
+    } else if lower.contains("timed out") {
+        Some(ssh_connect_timeout_message(target))
+    } else {
+        None
+    }
+}
+
+fn ssh_connection_failed_message(
+    target: &str,
+    status: &std::process::ExitStatus,
+    stderr: &str,
+) -> anyhow::Error {
+    if let Some(message) = ssh_transport_failure_message(target, stderr) {
+        anyhow::anyhow!(message)
+    } else {
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            anyhow::anyhow!(
+                "[onyx] SSH connection failed\n  exit: {}",
+                status.code().unwrap_or(-1)
+            )
+        } else {
+            anyhow::anyhow!(
+                "[onyx] SSH connection failed\n  exit: {}\n  stderr: {}",
+                status.code().unwrap_or(-1),
+                stderr
+            )
+        }
+    }
+}
+
+fn ssh_command_failed_message(
+    target: &str,
+    status: &std::process::ExitStatus,
+    stderr: &str,
+) -> anyhow::Error {
+    if let Some(message) = ssh_transport_failure_message(target, stderr) {
+        anyhow::anyhow!(message)
+    } else {
+        let stderr = stderr.trim();
+        if stderr.is_empty() {
+            anyhow::anyhow!("SSH command failed (exit {})", status.code().unwrap_or(-1))
+        } else {
+            anyhow::anyhow!(
+                "SSH command failed (exit {})\n  stderr: {}",
+                status.code().unwrap_or(-1),
+                stderr
+            )
+        }
+    }
 }
 
 fn ssh_passphrase_prompt_count(stderr: &str) -> usize {
@@ -2619,7 +2840,9 @@ fn run_ssh_master(
         Ok(captured)
     });
 
-    let status = child.wait().context("waiting for ssh authentication flow")?;
+    let status = child
+        .wait()
+        .context("waiting for ssh authentication flow")?;
     let stderr = capture
         .join()
         .map_err(|_| anyhow::anyhow!("ssh stderr reader panicked"))?
@@ -2639,13 +2862,6 @@ fn classify_ssh_master_failure(
     if let Some(err) = ssh_control_socket_failure_from_stderr(control_path, stderr) {
         return err;
     }
-    let lower = stderr.to_ascii_lowercase();
-    if lower.contains("banner exchange") && lower.contains("timed out") {
-        return anyhow::anyhow!(ssh_banner_timeout_message(target));
-    }
-    if lower.contains("timed out") {
-        return anyhow::anyhow!(ssh_connect_timeout_message(target));
-    }
     if let Some(message) = ssh_auth_failure_message(
         identity,
         identity_hint,
@@ -2656,17 +2872,7 @@ fn classify_ssh_master_failure(
     ) {
         return anyhow::anyhow!(message);
     }
-
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        anyhow::anyhow!("[onyx] SSH connection failed")
-    } else {
-        anyhow::anyhow!(
-            "[onyx] SSH connection failed\n  exit: {}\n  stderr: {}",
-            status.code().unwrap_or(-1),
-            stderr
-        )
-    }
+    ssh_connection_failed_message(target, status, stderr)
 }
 
 fn ssh_cmd(
@@ -2694,34 +2900,23 @@ fn ssh_cmd(
 }
 
 fn ssh_command_failure(
+    target: &str,
     identity: Option<&str>,
     identity_hint: Option<&str>,
     status: &std::process::ExitStatus,
     stderr: &str,
 ) -> anyhow::Error {
-    if let Some(message) =
-        ssh_auth_failure_message(
-            identity,
-            identity_hint,
-            false,
-            status.code(),
-            status.signal(),
-            stderr,
-        )
-    {
+    if let Some(message) = ssh_auth_failure_message(
+        identity,
+        identity_hint,
+        false,
+        status.code(),
+        status.signal(),
+        stderr,
+    ) {
         return anyhow::anyhow!(message);
     }
-
-    let stderr = stderr.trim();
-    if stderr.is_empty() {
-        anyhow::anyhow!("SSH command failed (exit {})", status.code().unwrap_or(-1))
-    } else {
-        anyhow::anyhow!(
-            "SSH command failed (exit {})\n  stderr: {}",
-            status.code().unwrap_or(-1),
-            stderr
-        )
-    }
+    ssh_command_failed_message(target, status, stderr)
 }
 
 /// Run remote command; return trimmed stdout.
@@ -2738,6 +2933,7 @@ fn ssh_capture(
         .context("ssh")?;
     if !out.status.success() {
         return Err(ssh_command_failure(
+            target,
             identity,
             session.and_then(|ssh| ssh.identity_hint()),
             &out.status,
@@ -2766,8 +2962,7 @@ fn ssh_show(
             st.code(),
             st.signal(),
             "",
-        )
-        {
+        ) {
             anyhow::bail!(message);
         }
         anyhow::bail!("remote command failed (exit {})", st.code().unwrap_or(-1));
@@ -2927,7 +3122,65 @@ struct RemoteStatus {
     own_pid: bool,   // server.pid still points to an onyx-server process
     has_cargo: bool, // ~/.cargo/bin/cargo exists and is executable
     conf_ok: bool,   // tmux config + status script are current
-    arch: String,    // uname -m on the remote host
+    tmux_available: bool,
+    arch: String, // uname -m on the remote host
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BootstrapInfo {
+    tmux_available: bool,
+}
+
+fn parse_remote_status_output(text: &str, expected_hash: &str, conf_hash: &str) -> RemoteStatus {
+    let get = |key: &str| -> String {
+        text.split_whitespace()
+            .find(|kv| kv.starts_with(&format!("{key}=")))
+            .and_then(|kv| kv.splitn(2, '=').nth(1))
+            .unwrap_or("")
+            .to_string()
+    };
+
+    RemoteStatus {
+        hash_ok: get("h") == expected_hash,
+        running: get("r") == "yes",
+        healthy: get("ready") == "yes",
+        own_pid: get("own") == "yes",
+        has_cargo: get("c") == "yes",
+        conf_ok: get("cv") == conf_hash,
+        tmux_available: get("tmux") == "yes",
+        arch: get("arch"),
+    }
+}
+
+fn tmux_missing_warning_lines() -> [&'static str; 2] {
+    [
+        "[onyx] tmux not found — running in basic mode (no persistent sessions)",
+        "[onyx] install tmux for full experience: sudo apt install tmux",
+    ]
+}
+
+fn emit_tmux_missing_warning() {
+    for line in tmux_missing_warning_lines() {
+        eprintln!("{line}");
+    }
+}
+
+fn tmux_feature_unavailable_message(feature: &str) -> String {
+    format!("[onyx] {feature} is not available without tmux")
+}
+
+fn should_activate_basic_mode(ssh_mode: bool, tmux_available: Option<bool>) -> bool {
+    ssh_mode && matches!(tmux_available, Some(false))
+}
+
+fn exec_detach_hint(job_id: &str, tmux_available: Option<bool>) -> String {
+    if matches!(tmux_available, Some(false)) {
+        format!(
+            "[onyx] detached; use logs/kill instead: onyx logs <target> {job_id} | onyx kill <target> {job_id}"
+        )
+    } else {
+        format!("[onyx] detached; reattach with: onyx attach <target> {job_id}")
+    }
 }
 
 /// Single SSH round-trip: verifies auth and gathers all bootstrap pre-conditions.
@@ -2959,9 +3212,13 @@ fn remote_status(
          if [ -x ~/.cargo/bin/cargo ] && ~/.cargo/bin/cargo --version >/dev/null 2>&1; then \
            c=yes; \
          fi; \
+         tmux=no; \
+         if command -v tmux >/dev/null 2>&1; then \
+           tmux=yes; \
+         fi; \
          arch=$(uname -m 2>/dev/null || echo unknown); \
          cv=$(cat {conf_dir}/.conf-hash 2>/dev/null); \
-         echo \"h=$h r=$r own=$own ready=$ready c=$c arch=$arch cv=$cv\"",
+         echo \"h=$h r=$r own=$own ready=$ready c=$c arch=$arch cv=$cv tmux=$tmux\"",
         server_log = shell_quote(&format!("{}/server.log", paths.remote_dir)),
         remote_dir = shell_quote(&paths.remote_dir),
         conf_dir = shell_quote(&paths.conf_dir),
@@ -2984,35 +3241,15 @@ fn remote_status(
         ) {
             anyhow::bail!(message);
         }
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        if stderr.is_empty() {
-            anyhow::bail!("[onyx] SSH connection failed");
-        }
-        anyhow::bail!(
-            "[onyx] SSH connection failed\n  exit: {}\n  stderr: {}",
-            out.status.code().unwrap_or(-1),
-            stderr
-        );
+        return Err(ssh_connection_failed_message(
+            target,
+            &out.status,
+            &String::from_utf8_lossy(&out.stderr),
+        ));
     }
 
     let text = String::from_utf8_lossy(&out.stdout);
-    let get = |key: &str| -> String {
-        text.split_whitespace()
-            .find(|kv| kv.starts_with(&format!("{key}=")))
-            .and_then(|kv| kv.splitn(2, '=').nth(1))
-            .unwrap_or("")
-            .to_string()
-    };
-
-    Ok(RemoteStatus {
-        hash_ok: get("h") == expected_hash,
-        running: get("r") == "yes",
-        healthy: get("ready") == "yes",
-        own_pid: get("own") == "yes",
-        has_cargo: get("c") == "yes",
-        conf_ok: get("cv") == conf_hash,
-        arch: get("arch"),
-    })
+    Ok(parse_remote_status_output(&text, expected_hash, &conf_hash))
 }
 
 // ---------------------------------------------------------------------------
@@ -3028,7 +3265,7 @@ fn ensure_config_files(
     paths: &RemotePaths,
 ) -> Result<()> {
     let conf_hash = format!("{:016x}", config_hash());
-    let _ = ssh_capture(
+    ssh_capture(
         target,
         identity,
         session,
@@ -3036,7 +3273,8 @@ fn ensure_config_files(
             "mkdir -p {conf_dir} && chmod 700 {conf_dir}",
             conf_dir = shell_quote(&paths.conf_dir)
         ),
-    );
+    )
+    .context("preparing remote config directory")?;
     ssh_upload(
         target,
         identity,
@@ -3052,7 +3290,7 @@ fn ensure_config_files(
         ONYX_STATUS_SH.as_bytes(),
     )?;
     let conf_hash_path = format!("{}/.conf-hash", paths.conf_dir);
-    let _ = ssh_capture(
+    ssh_capture(
         target,
         identity,
         session,
@@ -3064,7 +3302,8 @@ fn ensure_config_files(
             conf_hash = shell_quote(&conf_hash),
             conf_hash_path = shell_quote(&conf_hash_path),
         ),
-    );
+    )
+    .context("recording remote config version")?;
     Ok(())
 }
 
@@ -3222,7 +3461,7 @@ fn find_local_prebuilt_server(remote_arch: &str) -> Option<PathBuf> {
     select_local_prebuilt_server(remote_arch, prebuilt_server_candidates(remote_arch))
 }
 
-fn is_user_visible_ssh_error(err: &anyhow::Error) -> bool {
+fn is_user_visible_bootstrap_error(err: &anyhow::Error) -> bool {
     let msg = format!("{err:#}");
     msg.contains("[onyx] SSH key requires a passphrase.")
         || msg.contains("[onyx] SSH authentication was canceled.")
@@ -3230,10 +3469,15 @@ fn is_user_visible_ssh_error(err: &anyhow::Error) -> bool {
         || msg.contains("[onyx] failed to create SSH control socket")
         || msg.contains("[onyx] SSH connection failed")
         || msg.contains("[onyx] SSH connection timed out")
+        || msg.contains("[onyx] SSH connection closed")
+        || msg.contains("[onyx] bootstrap could not find a writable remote install directory")
+        || msg.contains("[onyx] bootstrap could not produce an onyx-server binary")
+        || msg.contains("[onyx] remote install failed")
+        || msg.contains("[onyx] onyx-server ")
 }
 
 fn contextualize_bootstrap_error(err: anyhow::Error, context: &'static str) -> anyhow::Error {
-    if is_user_visible_ssh_error(&err) {
+    if is_user_visible_bootstrap_error(&err) {
         err
     } else {
         Err::<(), _>(err).context(context).unwrap_err()
@@ -3241,7 +3485,7 @@ fn contextualize_bootstrap_error(err: anyhow::Error, context: &'static str) -> a
 }
 
 fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
-    if is_user_visible_ssh_error(&err) {
+    if is_user_visible_bootstrap_error(&err) {
         return err;
     }
     anyhow::anyhow!(
@@ -3250,13 +3494,14 @@ fn bootstrap_error_with_help(err: anyhow::Error) -> anyhow::Error {
     )
 }
 
-fn bootstrap_cannot_continue(err: anyhow::Error) -> anyhow::Error {
-    if is_user_visible_ssh_error(&err) {
-        return err;
-    }
+fn bootstrap_missing_server_binary_error(remote_arch: &str, err: anyhow::Error) -> anyhow::Error {
+    let artifact = server_artifact_name(remote_arch).unwrap_or("onyx-server-linux-<arch>");
     anyhow::anyhow!(
-        "{}\n[onyx] bootstrap cannot continue without a usable onyx-server binary",
-        err
+        "[onyx] bootstrap could not produce an onyx-server binary for {}.\n\
+         Likely cause: no matching local prebuilt server was found and the remote build fallback failed.\n\
+         Try:\n  place {} next to the onyx client or in target/release\n  or install Rust/cargo on the remote and re-run\n  or install onyx-server manually and re-run with --no-bootstrap\nDetail: {err}",
+        remote_arch_label(remote_arch),
+        artifact,
     )
 }
 
@@ -3428,34 +3673,108 @@ fn classify_install_error(err: anyhow::Error) -> anyhow::Error {
     let msg = format!("{err:?}");
     if msg.contains("Text file busy") || msg.contains("ETXTBSY") {
         anyhow::anyhow!(
-            "could not replace onyx-server: binary reports busy even via atomic swap. \
-             This should not normally happen; file a bug with the output above. \
-             Underlying error: {err}"
+            "[onyx] remote install failed while replacing onyx-server.\n\
+             Likely cause: the remote filesystem reported the binary as busy even after the atomic swap path.\n\
+             Try:\n  re-run once to confirm it is reproducible\n  then file a bug with the error below\nDetail: {err}"
         )
     } else if msg.contains("Permission denied") {
         anyhow::anyhow!(
-            "could not install onyx-server: permission denied on remote. \
-             Try a writable path, e.g. ONYX_REMOTE_DIR=/tmp/onyx onyx user@host. \
-             Underlying error: {err}"
+            "[onyx] remote install failed: permission denied while writing onyx-server.\n\
+             Likely cause: ONYX_REMOTE_DIR points to a directory you cannot write.\n\
+             Try:\n  set ONYX_REMOTE_DIR to a writable absolute path, e.g. /tmp/onyx\n  or install onyx-server manually and re-run with --no-bootstrap\nDetail: {err}"
         )
     } else if msg.contains("No space left on device") {
         anyhow::anyhow!(
-            "could not install onyx-server: remote disk is full. \
-             Underlying error: {err}"
+            "[onyx] remote install failed: the remote disk is full.\n\
+             Likely cause: there is not enough space to stage or replace onyx-server.\n\
+             Try:\n  free space on the remote host\n  then re-run bootstrap\nDetail: {err}"
         )
     } else if msg.contains("command not found") {
         anyhow::anyhow!(
-            "missing required tool on remote (mv/chmod/kill). \
-             Underlying error: {err}"
+            "[onyx] remote install failed: a required remote tool is missing.\n\
+             Likely cause: the remote shell cannot run mv, chmod, or kill.\n\
+             Try:\n  verify a standard POSIX userland is available on the remote host\n  or install onyx-server manually and re-run with --no-bootstrap\nDetail: {err}"
         )
     } else if msg.contains("exit 20") {
         anyhow::anyhow!(
-            "onyx-server.new was not found on the remote after upload — \
-             the upload likely failed silently. Underlying error: {err}"
+            "[onyx] remote install failed: the uploaded onyx-server.new file is missing on the remote host.\n\
+             Likely cause: the SSH upload did not complete or the remote path rejected the write.\n\
+             Try:\n  set ONYX_REMOTE_DIR to a writable absolute path, e.g. /tmp/onyx\n  then re-run bootstrap\nDetail: {err}"
         )
     } else {
         err
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerStartState {
+    Ready,
+    PortBusy,
+    Timeout,
+}
+
+fn server_port_busy_message(quic_port: u16) -> anyhow::Error {
+    anyhow::anyhow!(
+        "[onyx] onyx-server could not start on UDP/{quic_port}.\n\
+         Likely cause: another process is already using that port on the remote host.\n\
+         Try:\n  choose a different port with --port / ONYX_PORT\n  or stop the conflicting process and re-run"
+    )
+}
+
+fn server_start_timeout_message(target: &str, server_log: &str, quic_port: u16) -> anyhow::Error {
+    anyhow::anyhow!(
+        "[onyx] onyx-server did not become ready on UDP/{quic_port} within 10s.\n\
+         Likely cause: it crashed on startup or could not bind the requested port.\n\
+         Try:\n  inspect {server_log} on the remote host\n  or run `onyx doctor {target}` for a quick check"
+    )
+}
+
+fn fetch_remote_server_log_excerpt(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    server_log: &str,
+) -> Option<String> {
+    ssh_capture(
+        target,
+        identity,
+        session,
+        &format!("tail -20 {} 2>/dev/null", shell_quote(server_log)),
+    )
+    .ok()
+    .filter(|log| !log.is_empty())
+}
+
+fn wait_for_server_ready(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    quic_port: u16,
+    server_log: &str,
+) -> Result<ServerStartState> {
+    let outcome = ssh_capture(
+        target,
+        identity,
+        session,
+        &format!(
+            "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do \
+               if grep -q 'listening on .*:{quic_port}  (ALPN: onyx)' {server_log} 2>/dev/null; then \
+                 echo ready; exit 0; \
+               fi; \
+               if grep -q 'Address already in use' {server_log} 2>/dev/null; then \
+                 echo port_busy; exit 0; \
+               fi; \
+               sleep 0.5; \
+             done; \
+             echo timeout",
+            server_log = shell_quote(server_log),
+        ),
+    )?;
+    Ok(match outcome.trim() {
+        "ready" => ServerStartState::Ready,
+        "port_busy" => ServerStartState::PortBusy,
+        _ => ServerStartState::Timeout,
+    })
 }
 
 fn start_server(
@@ -3463,12 +3782,12 @@ fn start_server(
     identity: Option<&str>,
     session: Option<&SshSession>,
     quic_port: u16,
+    status: &RemoteStatus,
     paths: &RemotePaths,
 ) -> Result<()> {
     let server_pid = format!("{}/server.pid", paths.remote_dir);
     let server_log = format!("{}/server.log", paths.remote_dir);
     let remote_dir = shell_quote(&paths.remote_dir);
-    let status = remote_status(target, identity, session, "", quic_port, paths)?;
 
     if status.healthy {
         eprintln!("[onyx] onyx-server already running");
@@ -3478,9 +3797,7 @@ fn start_server(
     if status.running && status.own_pid {
         eprintln!("[onyx] existing onyx-server is unhealthy; restarting");
     } else if status.running {
-        anyhow::bail!(
-            "startup failed: port appears busy but server.pid does not point to a healthy onyx-server"
-        );
+        return Err(server_port_busy_message(quic_port));
     } else {
         eprintln!("[onyx] starting server…");
     }
@@ -3529,53 +3846,25 @@ fn start_server(
         ),
     )?;
 
-    // Poll server.log for "listening on :<port>" — confirms the UDP socket is bound.
-    // Checks every 500 ms for up to 10 s.
-    let ready = (0..20).any(|_| {
-        std::thread::sleep(Duration::from_millis(500));
-        ssh_capture(
-            target,
-            identity,
-            session,
-            &format!(
-                "grep -q 'listening on .*:{quic_port}' {} 2>/dev/null && echo yes",
-                shell_quote(&server_log)
-            ),
-        )
-        .map(|s| s == "yes")
-        .unwrap_or(false)
-    });
-
-    if !ready {
-        if let Ok(log) = ssh_capture(
-            target,
-            identity,
-            session,
-            &format!("tail -20 {} 2>/dev/null", shell_quote(&server_log)),
-        ) {
-            if !log.is_empty() {
+    match wait_for_server_ready(target, identity, session, quic_port, &server_log)? {
+        ServerStartState::Ready => Ok(()),
+        ServerStartState::PortBusy => {
+            if let Some(log) =
+                fetch_remote_server_log_excerpt(target, identity, session, &server_log)
+            {
                 eprintln!("[onyx] server.log:\n{log}");
             }
+            Err(server_port_busy_message(quic_port))
         }
-        if let Ok(err) = ssh_capture(
-            target,
-            identity,
-            session,
-            &format!(
-                "grep -m1 'Address already in use' {} 2>/dev/null",
-                shell_quote(&server_log)
-            ),
-        ) {
-            if !err.is_empty() {
-                anyhow::bail!("onyx-server failed to start: {err}");
+        ServerStartState::Timeout => {
+            if let Some(log) =
+                fetch_remote_server_log_excerpt(target, identity, session, &server_log)
+            {
+                eprintln!("[onyx] server.log:\n{log}");
             }
+            Err(server_start_timeout_message(target, &server_log, quic_port))
         }
-        anyhow::bail!(
-            "onyx-server failed to start — see {} on the remote host",
-            server_log
-        );
     }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -3664,7 +3953,11 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
             eprintln!("[onyx doctor] SSH:       OK");
             eprintln!(
                 "[onyx doctor] server binary: {}",
-                if st.hash_ok { "up to date" } else { "stale or missing" }
+                if st.hash_ok {
+                    "up to date"
+                } else {
+                    "stale or missing"
+                }
             );
             eprintln!(
                 "[onyx doctor] server running: {}",
@@ -3672,9 +3965,24 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
             );
             eprintln!(
                 "[onyx doctor] server healthy: {}",
-                if st.healthy { "yes (QUIC port bound)" } else { "no" }
+                if st.healthy {
+                    "yes (QUIC port bound)"
+                } else {
+                    "no"
+                }
+            );
+            eprintln!(
+                "[onyx doctor] tmux:          {}",
+                if st.tmux_available {
+                    "installed"
+                } else {
+                    "missing (basic mode only)"
+                }
             );
             eprintln!("[onyx doctor] remote arch:    {}", st.arch);
+            if !st.tmux_available {
+                eprintln!("[onyx doctor]   tip: install tmux for persistent interactive sessions");
+            }
             if !st.healthy {
                 eprintln!("[onyx doctor]   tip: run `onyx {raw_target}` to bootstrap");
             }
@@ -3704,13 +4012,27 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
     };
     match tokio::time::timeout(Duration::from_secs(5), connecting).await {
         Ok(Ok(_)) => eprintln!("[onyx doctor] QUIC:      reachable (UDP/{quic_port} open)"),
-        Ok(Err(e)) => eprintln!(
-            "[onyx doctor] QUIC:      handshake error — {e:#}\n\
-             [onyx doctor]   (server reachable but handshake failed; check TOFU trust)"
-        ),
+        Ok(Err(e)) => match classify_quic_failure(&anyhow::anyhow!("{e:#}")) {
+            QuicFailureKind::ConnectionRefused => eprintln!(
+                "[onyx doctor] QUIC:      connection refused on UDP/{quic_port}\n\
+                 [onyx doctor]   likely cause: onyx-server is not running or is bound to a different port\n\
+                 [onyx doctor]   try: run `onyx {raw_target}` or check ONYX_PORT / --port"
+            ),
+            QuicFailureKind::NetworkUnreachable => eprintln!(
+                "[onyx doctor] QUIC:      network unreachable\n\
+                 [onyx doctor]   likely cause: VPN, route, or firewall issue before the host\n\
+                 [onyx doctor]   try: verify the host is reachable, then retry"
+            ),
+            _ => eprintln!(
+                "[onyx doctor] QUIC:      handshake error — {e:#}\n\
+                 [onyx doctor]   likely cause: the server answered UDP/{quic_port}, but QUIC/TLS or TOFU trust failed\n\
+                 [onyx doctor]   try: inspect server.log and known_hosts trust"
+            ),
+        },
         Err(_) => eprintln!(
             "[onyx doctor] QUIC:      timeout — UDP/{quic_port} appears blocked\n\
-             [onyx doctor]   open UDP {quic_port} in your firewall, or use --port / ONYX_PORT"
+             [onyx doctor]   likely cause: a cloud firewall, VPN, or NAT is dropping UDP before it reaches onyx-server\n\
+             [onyx doctor]   try: open UDP {quic_port} in your firewall, or use --port / ONYX_PORT"
         ),
     }
     endpoint.wait_idle().await;
@@ -3729,8 +4051,15 @@ fn bootstrap(
     auth_flow: SshAuthFlow,
     pool: Option<&SshSessionPool>,
     messages: SshConnectMessages<'_>,
-) -> Result<()> {
-    let ssh = ssh_session_for(pool, ssh_target, identity, identity_hint, auth_flow, messages)?;
+) -> Result<BootstrapInfo> {
+    let ssh = ssh_session_for(
+        pool,
+        ssh_target,
+        identity,
+        identity_hint,
+        auth_flow,
+        messages,
+    )?;
     let hash = format!("{:016x}", source_hash());
     let paths = resolve_remote_paths(ssh_target, identity, Some(&ssh))
         .map_err(bootstrap_error_with_help)?;
@@ -3738,17 +4067,21 @@ fn bootstrap(
     // Single SSH call: verify auth + get all state.
     let status = remote_status(ssh_target, identity, Some(&ssh), &hash, quic_port, &paths)
         .map_err(bootstrap_error_with_help)?;
+    let info = BootstrapInfo {
+        tmux_available: status.tmux_available,
+    };
+    let config_ready = !status.tmux_available || status.conf_ok;
 
     // ── Fast path ─────────────────────────────────────────────────────────────
-    if status.hash_ok && status.healthy && status.conf_ok {
-        return Ok(());
+    if status.hash_ok && status.healthy && config_ready {
+        return Ok(info);
     }
 
     // Config files stale but server is running — just push the new files.
-    if status.hash_ok && status.healthy && !status.conf_ok {
+    if status.tmux_available && status.hash_ok && status.healthy && !status.conf_ok {
         ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
             .map_err(bootstrap_error_with_help)?;
-        return Ok(());
+        return Ok(info);
     }
 
     // ── Slow path ────────────────────────────────────────────────────────────
@@ -3766,11 +4099,11 @@ fn bootstrap(
             );
             if !status.has_cargo {
                 ensure_rust(ssh_target, identity, Some(&ssh))
-                    .map_err(bootstrap_cannot_continue)
+                    .map_err(|err| bootstrap_missing_server_binary_error(&status.arch, err))
                     .map_err(bootstrap_error_with_help)?;
             }
             upload_and_build(ssh_target, identity, Some(&ssh), &paths)
-                .map_err(bootstrap_cannot_continue)
+                .map_err(|err| bootstrap_missing_server_binary_error(&status.arch, err))
                 .map_err(bootstrap_error_with_help)?;
         }
 
@@ -3781,13 +4114,15 @@ fn bootstrap(
             .map_err(bootstrap_error_with_help)?;
     }
 
-    ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
-        .map_err(bootstrap_error_with_help)?;
-    start_server(ssh_target, identity, Some(&ssh), quic_port, &paths)
+    if status.tmux_available {
+        ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
+            .map_err(bootstrap_error_with_help)?;
+    }
+    start_server(ssh_target, identity, Some(&ssh), quic_port, &status, &paths)
         .map_err(bootstrap_error_with_help)?;
 
     eprintln!("[onyx] ready");
-    Ok(())
+    Ok(info)
 }
 
 // ---------------------------------------------------------------------------
@@ -3926,11 +4261,7 @@ async fn connect_proxy_stream(
     }
 }
 
-async fn run_proxy_mode(
-    target_host: String,
-    target_port: u16,
-    no_fallback: bool,
-) -> Result<()> {
+async fn run_proxy_mode(target_host: String, target_port: u16, no_fallback: bool) -> Result<()> {
     let target = build_target(&target_host, None, None)
         .with_context(|| format!("resolving target '{target_host}'"))?;
     let server_addr: SocketAddr = match {
@@ -4044,8 +4375,8 @@ async fn run_proxy_mode(
                     return Err(e);
                 }
 
-                let deadline = *reconnect_deadline
-                    .get_or_insert_with(|| Instant::now() + PROXY_RESUME_WINDOW);
+                let deadline =
+                    *reconnect_deadline.get_or_insert_with(|| Instant::now() + PROXY_RESUME_WINDOW);
                 if !logged_disconnect {
                     eprintln!("[proxy] transport hiccup, retrying…");
                     logged_disconnect = true;
@@ -4067,9 +4398,7 @@ async fn run_proxy_mode(
                 // QUIC is unreachable, falling back to a plain TCP bridge is
                 // exactly what SSH with no ProxyCommand would do.
                 if !no_fallback && quic_unavailable_for_proxy(&e) {
-                    eprintln!(
-                        "[proxy] QUIC unavailable ({e:#}); falling back to plain TCP"
-                    );
+                    eprintln!("[proxy] QUIC unavailable ({e:#}); falling back to plain TCP");
                     return tcp_proxy_fallback(&target_host, target_port).await;
                 }
                 return Err(e);
@@ -4229,21 +4558,40 @@ fn emit_resumed_json(job_id: &str, seq: u64) {
     );
 }
 
+fn exec_ssh_shell(ssh_target: &str, identity_file: Option<&str>) -> Result<()> {
+    let mut cmd = std::process::Command::new("ssh");
+    cmd.args(["-tt", "-q", "-o", "SetEnv ONYX_MODE=ssh"]);
+    if let Some(id) = identity_file {
+        cmd.args(["-i", id]);
+    }
+    cmd.arg(ssh_target);
+    Err(anyhow::anyhow!("exec ssh: {}", cmd.exec()))
+}
+
 /// Shared target preparation used by every exec subcommand.
+struct PreparedExecTarget {
+    endpoint: Endpoint,
+    server_addr: SocketAddr,
+    host_port: String,
+    capture: FpCapture,
+    tmux_available: Option<bool>,
+}
+
 async fn prepare_exec_target(
     raw_target: String,
     identity_file: Option<String>,
     no_bootstrap: bool,
-) -> Result<(Endpoint, SocketAddr, String, FpCapture)> {
+) -> Result<PreparedExecTarget> {
     let target = build_target(&raw_target, identity_file, None)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
+    let mut tmux_available = None;
 
     if target.ssh_mode && !no_bootstrap {
         let ssh_target = target.ssh_target.clone();
         let identity = target.identity_file.clone();
         let identity_hint = target.identity_hint.clone();
         let port = target.quic_port;
-        tokio::task::spawn_blocking(move || {
+        let info = tokio::task::spawn_blocking(move || {
             bootstrap(
                 &ssh_target,
                 identity.as_deref(),
@@ -4257,9 +4605,10 @@ async fn prepare_exec_target(
                 },
             )
         })
-            .await
-            .map_err(|e| anyhow::anyhow!("bootstrap task: {e}"))?
-            .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
+        .await
+        .map_err(|e| anyhow::anyhow!("bootstrap task: {e}"))?
+        .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
+        tmux_available = Some(info.tmux_available);
     }
 
     let server_addr: SocketAddr = {
@@ -4275,7 +4624,13 @@ async fn prepare_exec_target(
     let capture: FpCapture = Arc::new(Mutex::new(None));
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(make_client_config(capture.clone())?);
-    Ok((endpoint, server_addr, host_port, capture))
+    Ok(PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        tmux_available,
+    })
 }
 
 /// Drain an exec/attach QUIC stream: forward output, print gap/finish/error
@@ -4640,8 +4995,13 @@ async fn run_exec_mode(
     env: Vec<(String, String)>,
     timeout_secs: Option<u64>,
 ) -> Result<()> {
-    let (endpoint, server_addr, host_port, capture) =
-        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        tmux_available,
+    } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
         server_addr,
         &endpoint,
@@ -4683,9 +5043,10 @@ async fn run_exec_mode(
         emit_started_json(&job_id, started_at_unix, &command);
     } else if detach {
         println!("{job_id}");
-        eprintln!(
-            "[onyx] detached; reattach with: onyx attach <target> {job_id}"
-        );
+        if matches!(tmux_available, Some(false)) {
+            emit_tmux_missing_warning();
+        }
+        eprintln!("{}", exec_detach_hint(&job_id, tmux_available));
     }
 
     if detach {
@@ -4728,8 +5089,17 @@ async fn run_attach_mode(
     json: bool,
     job_id: String,
 ) -> Result<()> {
-    let (endpoint, server_addr, host_port, capture) =
-        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let prepared = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    if matches!(prepared.tmux_available, Some(false)) {
+        anyhow::bail!("{}", tmux_feature_unavailable_message("attach"));
+    }
+    let PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        ..
+    } = prepared;
 
     // Attach goes straight into the resume loop. started_at_unix isn't
     // known to the client here; use 0 so the JSON `finished` event's
@@ -4759,8 +5129,13 @@ async fn run_logs_mode(
     json: bool,
     job_id: String,
 ) -> Result<()> {
-    let (endpoint, server_addr, host_port, capture) =
-        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        ..
+    } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
         server_addr,
         &endpoint,
@@ -4793,8 +5168,13 @@ async fn run_kill_mode(
     json: bool,
     job_id: String,
 ) -> Result<()> {
-    let (endpoint, server_addr, host_port, capture) =
-        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        ..
+    } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
         server_addr,
         &endpoint,
@@ -4817,9 +5197,7 @@ async fn run_kill_mode(
 
     match msg {
         Message::KillResult {
-            killed,
-            message,
-            ..
+            killed, message, ..
         } => {
             if json {
                 println!(
@@ -4933,8 +5311,13 @@ async fn run_jobs_mode(
     no_bootstrap: bool,
     json: bool,
 ) -> Result<()> {
-    let (endpoint, server_addr, host_port, capture) =
-        prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        ..
+    } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
         server_addr,
         &endpoint,
@@ -5298,9 +5681,7 @@ async fn main() -> Result<()> {
             no_bootstrap,
             json,
             job_id,
-        } => {
-            return run_attach_mode(raw_target, identity_file, no_bootstrap, json, job_id).await
-        }
+        } => return run_attach_mode(raw_target, identity_file, no_bootstrap, json, job_id).await,
         CliMode::Logs {
             raw_target,
             identity_file,
@@ -5339,10 +5720,11 @@ async fn main() -> Result<()> {
     let target = build_target(&raw_target, identity_file, port_override)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
     let ssh_pool = target.ssh_mode.then(SshSessionPool::default);
+    let mut tmux_available = None;
 
     // SSH bootstrap (blocking, single SSH call on fast path).
     if target.ssh_mode && !no_bootstrap {
-        bootstrap(
+        let info = bootstrap(
             &target.ssh_target,
             target.identity_file.as_deref(),
             target.identity_hint.as_deref(),
@@ -5355,6 +5737,12 @@ async fn main() -> Result<()> {
             },
         )
         .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
+        tmux_available = Some(info.tmux_available);
+    }
+
+    if should_activate_basic_mode(target.ssh_mode, tmux_available) {
+        emit_tmux_missing_warning();
+        return exec_ssh_shell(&target.ssh_target, target.identity_file.as_deref());
     }
 
     // Build QUIC SocketAddr from the resolved hostname (never the raw alias).
@@ -5463,7 +5851,7 @@ async fn main() -> Result<()> {
             }
 
             Err(e) => {
-                let hint = quic_error_hint(&e);
+                let hint = quic_error_hint(&e, target.quic_port);
                 if let Some(dl) = reconnect_deadline {
                     if Instant::now() < dl {
                         // Still within retry window — show banner, back off,
@@ -5487,18 +5875,16 @@ async fn main() -> Result<()> {
                     // Never had a session — QUIC could not connect at all.
                     // Fetch server.log to distinguish firewall vs handshake.
                     eprintln!("onyx: QUIC failed — {e:#}{hint}");
-                    let ssh = ssh_pool
-                        .as_ref()
-                        .and_then(|pool| {
-                            pool.get_or_connect(
-                                &target.ssh_target,
-                                target.identity_file.as_deref(),
-                                target.identity_hint.as_deref(),
-                                SshAuthFlow::NonInteractive,
-                                SshConnectMessages::default(),
-                            )
-                            .ok()
-                        });
+                    let ssh = ssh_pool.as_ref().and_then(|pool| {
+                        pool.get_or_connect(
+                            &target.ssh_target,
+                            target.identity_file.as_deref(),
+                            target.identity_hint.as_deref(),
+                            SshAuthFlow::NonInteractive,
+                            SshConnectMessages::default(),
+                        )
+                        .ok()
+                    });
                     if let Ok(log) = ssh_capture(
                         &target.ssh_target,
                         target.identity_file.as_deref(),
@@ -5531,13 +5917,7 @@ async fn main() -> Result<()> {
                     }
                     eprintln!("[onyx] UDP unavailable — falling back to SSH");
                     eprintln!("       tip: use --no-fallback to require QUIC, or --port / ONYX_PORT for a custom port");
-                    let mut cmd = std::process::Command::new("ssh");
-                    cmd.args(["-tt", "-q", "-o", "SetEnv ONYX_MODE=ssh"]);
-                    if let Some(id) = &target.identity_file {
-                        cmd.args(["-i", id]);
-                    }
-                    cmd.arg(&target.ssh_target);
-                    return Err(anyhow::anyhow!("exec ssh: {}", cmd.exec()));
+                    return exec_ssh_shell(&target.ssh_target, target.identity_file.as_deref());
                 }
                 // We previously had a session — reconnect window expired.
                 // Be explicit about what that means instead of just
@@ -5549,9 +5929,7 @@ async fn main() -> Result<()> {
                 // would require on-disk session state, which isn't built
                 // yet.
                 if session.is_some() {
-                    eprintln!(
-                        "[session] connection lost — reconnect window expired."
-                    );
+                    eprintln!("[session] connection lost — reconnect window expired.");
                     eprintln!(
                         "          the remote tmux session is retained on the server for up to 12h."
                     );

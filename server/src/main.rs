@@ -1087,7 +1087,16 @@ async fn handle_exec_start(
     let jobs_bg = jobs.clone();
     let job_id_bg = job_id.clone();
     tokio::spawn(async move {
-        job_runner(jobs_bg, job_id_bg, child, stdout, stderr, shutdown_rx, timeout_secs).await;
+        job_runner(
+            jobs_bg,
+            job_id_bg,
+            child,
+            stdout,
+            stderr,
+            shutdown_rx,
+            timeout_secs,
+        )
+        .await;
     });
 
     // Stream live output until either the client drops or the job finishes.
@@ -1387,11 +1396,7 @@ async fn handle_jobs_list(mut send: quinn::SendStream, jobs: Jobs) -> Result<()>
         v.sort_by_key(|s| std::cmp::Reverse(s.started_at_unix));
         v
     };
-    send_msg(
-        &mut send,
-        &Message::JobsListResponse { jobs: summaries },
-    )
-    .await?;
+    send_msg(&mut send, &Message::JobsListResponse { jobs: summaries }).await?;
     send.finish().ok();
     Ok(())
 }
@@ -1490,13 +1495,14 @@ async fn run_session(
             let tmux_cmd = format!(
                 "if command -v tmux >/dev/null 2>&1; then \
                      conf=~/.config/onyx/tmux.conf; \
-                     if [ ! -f \"$conf\" ]; then \
+                 if [ ! -f \"$conf\" ]; then \
                          mkdir -p ~/.config/onyx; \
                          printf 'set -g mouse on\\nset -g history-limit 50000\\nset -g status-style bg=colour234,fg=colour240\\nset -g pane-border-style fg=colour236\\nset -g pane-active-border-style fg=colour240\\n' > \"$conf\"; \
                      fi; \
                      tmux -f \"$conf\" new-session -A -s \"onyx-{session_id}\" -e ONYX_MODE=quic; \
                  else \
-                     echo '[onyx] tip: install tmux for scroll, copy-paste and session persistence'; \
+                     echo '[onyx] tmux not found — running in basic mode (no persistent sessions)'; \
+                     echo '[onyx] install tmux for full experience: sudo apt install tmux'; \
                      exec \"$ONYX_LOGIN_SHELL\"; \
                  fi"
             );
