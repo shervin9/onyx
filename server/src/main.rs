@@ -1572,6 +1572,7 @@ async fn run_session(
                          mkdir -p ~/.config/onyx; \
                          printf 'set -g mouse on\\nset -g history-limit 50000\\nset -g status-style bg=colour234,fg=colour240\\nset -g pane-border-style fg=colour236\\nset -g pane-active-border-style fg=colour240\\n' > \"$conf\"; \
                      fi; \
+                     tmux -f \"$conf\" start-server \\; source-file \"$conf\" >/dev/null 2>&1 || true; \
                      tmux -f \"$conf\" new-session -A -s \"onyx-{session_id}\" -e ONYX_MODE=quic; \
                  else \
                      echo '[onyx] tmux not found — running in basic mode (no persistent sessions)'; \

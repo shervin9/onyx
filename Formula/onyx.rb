@@ -1,7 +1,7 @@
 class Onyx < Formula
   desc "Stable remote shell for unreliable networks (QUIC + SSH fallback)"
   homepage "https://useonyx.dev"
-  version "0.2.16"
+  version "0.2.17"
   license "MIT"
 
   # The tap currently ships only macOS Apple Silicon. Linux users should
@@ -9,20 +9,20 @@ class Onyx < Formula
   # bottles land.
   on_macos do
     on_arm do
-      url "https://github.com/shervin9/onyx/releases/download/v0.2.16/onyx-macos-arm64"
+      url "https://github.com/shervin9/onyx/releases/download/v0.2.17/onyx-macos-arm64"
       # Replace with the real sha256 from onyx-sha256sums.txt at release time.
       sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   resource "onyx-server-linux-x86_64" do
-    url "https://github.com/shervin9/onyx/releases/download/v0.2.16/onyx-server-linux-x86_64"
+    url "https://github.com/shervin9/onyx/releases/download/v0.2.17/onyx-server-linux-x86_64"
     # Replace with the real sha256 from onyx-sha256sums.txt at release time.
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
 
   resource "onyx-server-linux-arm64" do
-    url "https://github.com/shervin9/onyx/releases/download/v0.2.16/onyx-server-linux-arm64"
+    url "https://github.com/shervin9/onyx/releases/download/v0.2.17/onyx-server-linux-arm64"
     # Replace with the real sha256 from onyx-sha256sums.txt at release time.
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
   end
