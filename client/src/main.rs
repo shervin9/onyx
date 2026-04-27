@@ -1693,6 +1693,7 @@ mod parse_args_tests {
             candidates,
             vec![
                 PathBuf::from("/opt/homebrew/bin/onyx-server-linux-x86_64"),
+                PathBuf::from("/opt/homebrew/bin/onyx-server"),
                 PathBuf::from("/opt/homebrew/libexec/onyx-server-linux-x86_64"),
                 PathBuf::from("/custom/onyx-server-linux-x86_64"),
             ]
@@ -3614,6 +3615,7 @@ fn prebuilt_server_candidates_from(
     if let Some(exe_path) = current_exe {
         if let Some(dir) = exe_path.parent() {
             push_unique_path(&mut out, dir.join(name));
+            push_unique_path(&mut out, dir.join("onyx-server"));
             if let Some(prefix) = dir.parent() {
                 push_unique_path(&mut out, prefix.join("libexec").join(name));
             }

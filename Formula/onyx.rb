@@ -1,7 +1,7 @@
 class Onyx < Formula
   desc "Stable remote shell for unreliable networks (QUIC + SSH fallback)"
   homepage "https://useonyx.dev"
-  version "0.2.11"
+  version "0.2.12"
   license "MIT"
 
   # The tap currently ships only macOS Apple Silicon. Linux users should
