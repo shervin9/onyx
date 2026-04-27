@@ -20,8 +20,8 @@ The default `GITHUB_TOKEN` is intentionally **not** used for cross-repo pushes
 2. Tag and push:
 
    ```bash
-   git tag v0.2.12
-   git push origin v0.2.12
+   git tag v0.2.13
+   git push origin v0.2.13
    ```
 
 3. The `Release` workflow (`.github/workflows/release.yml`) runs three jobs in
@@ -77,7 +77,7 @@ Release is fine — only the tap is stale. To recover:
 4. If you need to bump manually instead, in `shervin9/homebrew-onyx`:
 
    ```bash
-   VERSION=0.2.12
+   VERSION=0.2.13
    curl -fsSL https://github.com/shervin9/onyx/releases/download/v${VERSION}/onyx-sha256sums.txt > /tmp/onyx-sha256sums.txt
    SHA256=$(awk '$2 == "onyx-macos-arm64" {print $1}' /tmp/onyx-sha256sums.txt)
    SERVER_X86_SHA256=$(awk '$2 == "onyx-server-linux-x86_64" {print $1}' /tmp/onyx-sha256sums.txt)
