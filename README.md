@@ -24,7 +24,9 @@ brew upgrade shervin9/onyx/onyx --formula
 onyx user@host
 ```
 
-`onyx` installs the local client. The remote `onyx-server` is provisioned automatically over SSH when needed.
+`onyx` installs the local client plus packaged Linux `onyx-server`
+companions. On first connect, the matching server binary is uploaded over SSH
+and started on the remote.
 
 ## Usage
 

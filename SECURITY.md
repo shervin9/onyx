@@ -57,10 +57,11 @@ Onyx's verification guarantees are intentionally narrow. The following are
 - **Interactive persistence is tmux-backed.** Only the interactive Onyx
   shell gets tmux-style resume; arbitrary SSH-based tools ridden over Onyx
   proxy mode do not.
-- **No supply-chain attestation.** The remote `onyx-server` is either an
-  uploaded prebuilt binary matched to the remote architecture or built from
-  uploaded source via `cargo build --release`. The source hash is checked
-  on every bootstrap, but there is no reproducible-build attestation.
+- **No supply-chain attestation.** The remote `onyx-server` is uploaded from
+  a packaged prebuilt binary matched to the remote architecture. Developer
+  source builds are available only with `ONYX_DEV_REMOTE_BUILD=1`. The source
+  hash is checked on every bootstrap, but there is no reproducible-build
+  attestation.
 
 ## File permissions
 

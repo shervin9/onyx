@@ -39,6 +39,8 @@ const SERVER_CARGO_TOML: &str = include_str!("../../server/Cargo.toml");
 const SERVER_MAIN_RS: &str = include_str!("../../server/src/main.rs");
 
 const REMOTE_DIR: &str = "~/.local/share/onyx";
+const ONYX_SERVER_BINARY_ENV: &str = "ONYX_SERVER_BINARY";
+const ONYX_DEV_REMOTE_BUILD_ENV: &str = "ONYX_DEV_REMOTE_BUILD";
 
 // ---------------------------------------------------------------------------
 // Remote config files — tmux setup + live status bar script.
@@ -575,6 +577,36 @@ fn get_terminal_size() -> (u16, u16) {
     (ws.ws_col, ws.ws_row)
 }
 
+fn sane_terminal_size(cols: u16, rows: u16) -> (u16, u16) {
+    let cols = if cols == 0 { 80 } else { cols };
+    let rows = if rows == 0 { 24 } else { rows };
+    (cols, rows)
+}
+
+fn terminal_env_value_from(value: Option<&str>) -> String {
+    let term = value.unwrap_or("").trim();
+    let valid = !term.is_empty()
+        && term != "unknown"
+        && term != "dumb"
+        && term.len() <= 64
+        && term
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'));
+    if valid {
+        term.to_string()
+    } else {
+        "xterm-256color".to_string()
+    }
+}
+
+fn terminal_env_value() -> String {
+    terminal_env_value_from(std::env::var("TERM").ok().as_deref())
+}
+
+fn should_show_reconnect_ui(session: &Option<(String, String)>) -> bool {
+    session.is_some()
+}
+
 /// Escape sequences emitted on RawMode drop to clean up terminal modes that
 /// tmux on the remote side may have enabled. Without these, a transport drop
 /// would leave the local terminal in mouse-tracking mode: mouse moves and
@@ -594,14 +626,19 @@ struct RawMode {
 }
 
 impl RawMode {
-    fn enter() -> Self {
+    fn enter() -> Result<Self> {
+        anyhow::ensure!(std::io::stdin().is_terminal(), "stdin is not a terminal");
         unsafe {
             let mut t: libc::termios = std::mem::zeroed();
-            libc::tcgetattr(libc::STDIN_FILENO, &mut t);
+            if libc::tcgetattr(libc::STDIN_FILENO, &mut t) != 0 {
+                return Err(std::io::Error::last_os_error()).context("tcgetattr stdin");
+            }
             let saved = t;
             libc::cfmakeraw(&mut t);
-            libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
-            RawMode { saved }
+            if libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t) != 0 {
+                return Err(std::io::Error::last_os_error()).context("tcsetattr stdin raw");
+            }
+            Ok(RawMode { saved })
         }
     }
 }
@@ -1263,10 +1300,14 @@ MODES
 
 INSTALL MODEL
   onyx is a local CLI. On first connect to a host it provisions
-  onyx-server on the remote over SSH, preferring a prebuilt binary
-  matching the remote arch and falling back to `cargo build --release`
-  only if no prebuilt is available. Subsequent connects reuse the
-  already-running server.
+  onyx-server on the remote over SSH using a packaged companion binary
+  matching the remote arch. Supported companion names are
+  onyx-server-linux-x86_64 and onyx-server-linux-arm64. Lookup order:
+  same directory as onyx, Homebrew/package libexec, then
+  ONYX_SERVER_BINARY=/path/to/onyx-server-linux-<arch>.
+  Remote source builds are developer-only and require
+  ONYX_DEV_REMOTE_BUILD=1. Subsequent connects reuse the already-running
+  server.
 
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
@@ -1639,6 +1680,95 @@ mod parse_args_tests {
     }
 
     #[test]
+    fn prebuilt_candidates_find_homebrew_libexec_before_override() {
+        let exe = Path::new("/opt/homebrew/bin/onyx");
+        let candidates = prebuilt_server_candidates_from(
+            "x86_64",
+            Some(exe),
+            Some(Path::new("/repo")),
+            Some("/custom/onyx-server-linux-x86_64"),
+            false,
+        );
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/opt/homebrew/bin/onyx-server-linux-x86_64"),
+                PathBuf::from("/opt/homebrew/libexec/onyx-server-linux-x86_64"),
+                PathBuf::from("/custom/onyx-server-linux-x86_64"),
+            ]
+        );
+    }
+
+    #[test]
+    fn prebuilt_candidates_skip_dev_paths_by_default() {
+        let candidates = prebuilt_server_candidates_from(
+            "arm64",
+            Some(Path::new("/usr/local/bin/onyx")),
+            Some(Path::new("/repo")),
+            None,
+            false,
+        );
+        assert!(!candidates
+            .iter()
+            .any(|path| path.starts_with("/repo/target")));
+
+        let dev_candidates = prebuilt_server_candidates_from(
+            "arm64",
+            Some(Path::new("/usr/local/bin/onyx")),
+            Some(Path::new("/repo")),
+            None,
+            true,
+        );
+        assert!(dev_candidates
+            .iter()
+            .any(|path| path == Path::new("/repo/target/release/onyx-server")));
+    }
+
+    #[test]
+    fn dev_remote_build_requires_explicit_env_value() {
+        assert!(!dev_remote_build_enabled_from(None));
+        assert!(!dev_remote_build_enabled_from(Some("")));
+        assert!(!dev_remote_build_enabled_from(Some("0")));
+        assert!(dev_remote_build_enabled_from(Some("1")));
+        assert!(dev_remote_build_enabled_from(Some("true")));
+        assert!(dev_remote_build_enabled_from(Some("yes")));
+        assert!(dev_remote_build_enabled_from(Some("on")));
+    }
+
+    #[test]
+    fn missing_prebuilt_does_not_remote_build_by_default() {
+        assert_eq!(
+            missing_prebuilt_action(false),
+            MissingPrebuiltAction::FailFast
+        );
+        assert_eq!(
+            missing_prebuilt_action(true),
+            MissingPrebuiltAction::DevRemoteBuild
+        );
+    }
+
+    #[test]
+    fn bootstrap_errors_are_product_messages() {
+        let missing = missing_prebuilt_server_binary_error("x86_64").to_string();
+        assert!(missing.contains("[onyx] missing onyx-server binary for linux-x86_64"));
+        assert!(missing.contains("brew reinstall shervin9/onyx/onyx --formula"));
+        assert!(!missing.contains("cargo"));
+        assert!(!missing.contains("rustup"));
+
+        let unsupported = unsupported_remote_arch_error("armv7l").to_string();
+        assert!(unsupported.contains("[onyx] unsupported remote architecture: armv7l"));
+        assert!(unsupported.contains("Supported: linux-x86_64, linux-arm64"));
+    }
+
+    #[test]
+    fn ssh_fallback_notice_is_single_clean_line() {
+        let notice = ssh_fallback_notice();
+        assert_eq!(notice, "[onyx] UDP unavailable — falling back to SSH");
+        assert!(!notice.contains('\n'));
+        assert!(notice.len() < 80);
+    }
+
+    #[test]
     fn exec_rejects_unknown_flag_before_dashdash() {
         let err = parse_args_from(s(&["exec", "host", "--bogus", "--", "x"])).unwrap_err();
         assert!(err.contains("unknown flag"), "err was: {err}");
@@ -1804,6 +1934,39 @@ mod reliability_tests {
         // single failed attempt doesn't blow the whole window.
         assert!(INTERACTIVE_HANDSHAKE_TIMEOUT * 4 < INTERACTIVE_RECONNECT_WINDOW);
         assert_eq!(INTERACTIVE_HANDSHAKE_TIMEOUT, PROXY_HANDSHAKE_TIMEOUT);
+    }
+
+    #[test]
+    fn initial_connect_does_not_show_reconnect_ui() {
+        assert!(!should_show_reconnect_ui(&None));
+        assert!(should_show_reconnect_ui(&Some((
+            "sid".into(),
+            "tok".into()
+        ))));
+    }
+
+    #[test]
+    fn terminal_env_falls_back_for_bad_terms() {
+        assert_eq!(terminal_env_value_from(None), "xterm-256color");
+        assert_eq!(terminal_env_value_from(Some("")), "xterm-256color");
+        assert_eq!(terminal_env_value_from(Some("unknown")), "xterm-256color");
+        assert_eq!(terminal_env_value_from(Some("dumb")), "xterm-256color");
+        assert_eq!(
+            terminal_env_value_from(Some("xterm-256color")),
+            "xterm-256color"
+        );
+        assert_eq!(
+            terminal_env_value_from(Some("screen-256color")),
+            "screen-256color"
+        );
+        assert_eq!(terminal_env_value_from(Some("bad term")), "xterm-256color");
+    }
+
+    #[test]
+    fn terminal_size_zero_values_are_sane() {
+        assert_eq!(sane_terminal_size(0, 0), (80, 24));
+        assert_eq!(sane_terminal_size(132, 0), (132, 24));
+        assert_eq!(sane_terminal_size(0, 43), (80, 43));
     }
 
     #[test]
@@ -2165,6 +2328,7 @@ mod reliability_tests {
 #[derive(Debug, Clone)]
 struct ResolvedSshConfig {
     hostname: String,
+    #[allow(dead_code)]
     user: String,
     identity_file: Option<String>,
 }
@@ -3135,7 +3299,7 @@ fn parse_remote_status_output(text: &str, expected_hash: &str, conf_hash: &str) 
     let get = |key: &str| -> String {
         text.split_whitespace()
             .find(|kv| kv.starts_with(&format!("{key}=")))
-            .and_then(|kv| kv.splitn(2, '=').nth(1))
+            .and_then(|kv| kv.split_once('=').map(|x| x.1))
             .unwrap_or("")
             .to_string()
     };
@@ -3366,6 +3530,45 @@ fn remote_arch_label(remote_arch: &str) -> &str {
     })
 }
 
+fn server_platform_label(remote_arch: &str) -> String {
+    match normalized_server_arch(remote_arch) {
+        Some("x86_64") => "linux-x86_64".to_string(),
+        Some("arm64") => "linux-arm64".to_string(),
+        _ => remote_arch_label(remote_arch).to_string(),
+    }
+}
+
+fn dev_remote_build_enabled_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("1")
+            | Some("true")
+            | Some("TRUE")
+            | Some("yes")
+            | Some("YES")
+            | Some("on")
+            | Some("ON")
+    )
+}
+
+fn dev_remote_build_enabled() -> bool {
+    dev_remote_build_enabled_from(std::env::var(ONYX_DEV_REMOTE_BUILD_ENV).ok().as_deref())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MissingPrebuiltAction {
+    FailFast,
+    DevRemoteBuild,
+}
+
+fn missing_prebuilt_action(dev_remote_build: bool) -> MissingPrebuiltAction {
+    if dev_remote_build {
+        MissingPrebuiltAction::DevRemoteBuild
+    } else {
+        MissingPrebuiltAction::FailFast
+    }
+}
+
 fn server_target_triples(remote_arch: &str) -> &'static [&'static str] {
     match normalized_server_arch(remote_arch) {
         Some("x86_64") => &["x86_64-unknown-linux-musl", "x86_64-unknown-linux-gnu"],
@@ -3374,33 +3577,55 @@ fn server_target_triples(remote_arch: &str) -> &'static [&'static str] {
     }
 }
 
+fn unsupported_remote_arch_error(remote_arch: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "[onyx] unsupported remote architecture: {}\nSupported: linux-x86_64, linux-arm64",
+        remote_arch_label(remote_arch)
+    )
+}
+
+fn missing_prebuilt_server_binary_error(remote_arch: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "[onyx] missing onyx-server binary for {}\n\
+         Your local Onyx install is incomplete.\n\
+         Try reinstalling: brew reinstall shervin9/onyx/onyx --formula",
+        server_platform_label(remote_arch)
+    )
+}
+
 fn push_unique_path(out: &mut Vec<PathBuf>, path: PathBuf) {
     if !out.iter().any(|existing| existing == &path) {
         out.push(path);
     }
 }
 
-fn prebuilt_server_candidates(remote_arch: &str) -> Vec<PathBuf> {
+fn prebuilt_server_candidates_from(
+    remote_arch: &str,
+    current_exe: Option<&Path>,
+    current_dir: Option<&Path>,
+    env_override: Option<&str>,
+    include_dev_paths: bool,
+) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Some(name) = server_artifact_name(remote_arch) else {
         return out;
     };
 
-    if let Ok(exe) = std::env::current_exe() {
-        for exe_path in [Some(exe.clone()), fs::canonicalize(&exe).ok()] {
-            let Some(exe_path) = exe_path else {
-                continue;
-            };
-            if let Some(dir) = exe_path.parent() {
-                push_unique_path(&mut out, dir.join(name));
-                if let Some(prefix) = dir.parent() {
-                    push_unique_path(&mut out, prefix.join("libexec").join(name));
-                }
+    if let Some(exe_path) = current_exe {
+        if let Some(dir) = exe_path.parent() {
+            push_unique_path(&mut out, dir.join(name));
+            if let Some(prefix) = dir.parent() {
+                push_unique_path(&mut out, prefix.join("libexec").join(name));
             }
         }
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
+    if let Some(path) = env_override.map(str::trim).filter(|path| !path.is_empty()) {
+        push_unique_path(&mut out, PathBuf::from(path));
+    }
+
+    if include_dev_paths {
+        let cwd = current_dir.unwrap_or_else(|| Path::new("."));
         push_unique_path(&mut out, cwd.join(name));
         for triple in server_target_triples(remote_arch) {
             push_unique_path(
@@ -3417,6 +3642,31 @@ fn prebuilt_server_candidates(remote_arch: &str) -> Vec<PathBuf> {
         );
     }
 
+    out
+}
+
+fn prebuilt_server_candidates(remote_arch: &str) -> Vec<PathBuf> {
+    let current_exe = std::env::current_exe().ok();
+    let canonical_exe = current_exe
+        .as_ref()
+        .and_then(|exe| fs::canonicalize(exe).ok());
+    let current_dir = std::env::current_dir().ok();
+    let env_override = std::env::var(ONYX_SERVER_BINARY_ENV).ok();
+    let include_dev_paths = dev_remote_build_enabled();
+    let mut out = prebuilt_server_candidates_from(
+        remote_arch,
+        current_exe.as_deref(),
+        current_dir.as_deref(),
+        env_override.as_deref(),
+        include_dev_paths,
+    );
+    if let Some(canonical_exe) = canonical_exe.as_deref() {
+        for path in
+            prebuilt_server_candidates_from(remote_arch, Some(canonical_exe), None, None, false)
+        {
+            push_unique_path(&mut out, path);
+        }
+    }
     out
 }
 
@@ -3472,6 +3722,8 @@ fn is_user_visible_bootstrap_error(err: &anyhow::Error) -> bool {
         || msg.contains("[onyx] SSH connection closed")
         || msg.contains("[onyx] bootstrap could not find a writable remote install directory")
         || msg.contains("[onyx] bootstrap could not produce an onyx-server binary")
+        || msg.contains("[onyx] missing onyx-server binary")
+        || msg.contains("[onyx] unsupported remote architecture")
         || msg.contains("[onyx] remote install failed")
         || msg.contains("[onyx] onyx-server ")
 }
@@ -3589,8 +3841,10 @@ fn upload_prebuilt_server(
         return Ok(false);
     };
 
-    let binary_name = server_artifact_name(remote_arch).unwrap_or("onyx-server");
-    eprintln!("[onyx] installing prebuilt server ({binary_name})…");
+    eprintln!(
+        "[onyx] installing server binary ({})…",
+        server_platform_label(remote_arch)
+    );
     let bytes = fs::read(&local_binary).with_context(|| {
         format!(
             "reading local prebuilt server binary {}",
@@ -4085,17 +4339,26 @@ fn bootstrap(
     }
 
     // ── Slow path ────────────────────────────────────────────────────────────
-    eprintln!("[onyx] setting up remote (one-time or after update)...");
+    eprintln!("[onyx] bootstrapping remote...");
 
     if !status.hash_ok {
+        if server_artifact_name(&status.arch).is_none() {
+            return Err(unsupported_remote_arch_error(&status.arch))
+                .map_err(bootstrap_error_with_help);
+        }
         let used_prebuilt =
             upload_prebuilt_server(ssh_target, identity, Some(&ssh), &status.arch, &paths)
                 .map_err(bootstrap_error_with_help)?;
 
         if !used_prebuilt {
+            if missing_prebuilt_action(dev_remote_build_enabled())
+                == MissingPrebuiltAction::FailFast
+            {
+                return Err(missing_prebuilt_server_binary_error(&status.arch))
+                    .map_err(bootstrap_error_with_help);
+            }
             eprintln!(
-                "[onyx] no prebuilt server found for {}",
-                remote_arch_label(&status.arch)
+                "[onyx] {ONYX_DEV_REMOTE_BUILD_ENV}=1 enabled; building on remote from source"
             );
             if !status.has_cargo {
                 ensure_rust(ssh_target, identity, Some(&ssh))
@@ -4226,6 +4489,7 @@ fn proxy_session_id() -> String {
     format!("proxy-{}", new_session_id())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn connect_proxy_stream(
     endpoint: &Endpoint,
     server_addr: SocketAddr,
@@ -4264,7 +4528,7 @@ async fn connect_proxy_stream(
 async fn run_proxy_mode(target_host: String, target_port: u16, no_fallback: bool) -> Result<()> {
     let target = build_target(&target_host, None, None)
         .with_context(|| format!("resolving target '{target_host}'"))?;
-    let server_addr: SocketAddr = match {
+    let dns_result = {
         use std::net::ToSocketAddrs;
         let addr_str = format!("{}:{}", target.quic_host, target.quic_port);
         addr_str
@@ -4274,7 +4538,8 @@ async fn run_proxy_mode(target_host: String, target_port: u16, no_fallback: bool
                 it.next()
                     .ok_or_else(|| anyhow::anyhow!("no address resolved for {}", target.quic_host))
             })
-    } {
+    };
+    let server_addr: SocketAddr = match dns_result {
         Ok(a) => a,
         Err(e) if !no_fallback => {
             eprintln!("[proxy] DNS lookup failed ({e:#}); falling back to plain TCP");
@@ -4568,6 +4833,10 @@ fn exec_ssh_shell(ssh_target: &str, identity_file: Option<&str>) -> Result<()> {
     Err(anyhow::anyhow!("exec ssh: {}", cmd.exec()))
 }
 
+fn ssh_fallback_notice() -> &'static str {
+    "[onyx] UDP unavailable — falling back to SSH"
+}
+
 /// Shared target preparation used by every exec subcommand.
 struct PreparedExecTarget {
     endpoint: Endpoint,
@@ -4774,6 +5043,7 @@ fn exec_error_is_terminal(reason: &str) -> bool {
 /// `drain_exec_stream`. Output written to the local terminal is strictly
 /// the server's stdout/stderr chunks in non-JSON mode — all status goes to
 /// stderr (or NDJSON events in --json).
+#[allow(clippy::too_many_arguments)]
 async fn stream_exec_with_resume(
     endpoint: &Endpoint,
     server_addr: SocketAddr,
@@ -4984,6 +5254,7 @@ fn exec_reason_is_busy(reason: &str) -> bool {
     reason.to_ascii_lowercase().contains("already attached")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_exec_mode(
     raw_target: String,
     identity_file: Option<String>,
@@ -5357,6 +5628,7 @@ async fn run_jobs_mode(
 // Single connection attempt + I/O loop
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn try_once(
     server_addr: SocketAddr,
     endpoint: &Endpoint,
@@ -5365,7 +5637,12 @@ async fn try_once(
     capture: &FpCapture,
     forwards: &[(u16, u16)],
     mode: BandwidthMode,
+    raw_mode: &mut Option<RawMode>,
 ) -> Result<bool> {
+    let first_connect = session.is_none();
+    if first_connect {
+        eprintln!("[onyx] connecting...");
+    }
     let conn = connect_authenticated(
         server_addr,
         endpoint,
@@ -5378,13 +5655,20 @@ async fn try_once(
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
 
     let is_resume = session.is_some();
+    let (local_cols, local_rows) = get_terminal_size();
+    let (cols, rows) = sane_terminal_size(local_cols, local_rows);
+    let term = terminal_env_value();
     match session.as_ref() {
         None => {
+            eprintln!("[onyx] starting shell...");
             send_msg(
                 &mut send,
                 &Message::Hello {
                     session_id: new_session_id(),
                     resume_token: String::new(),
+                    term: Some(term),
+                    cols: Some(cols),
+                    rows: Some(rows),
                 },
             )
             .await?;
@@ -5449,13 +5733,12 @@ async fn try_once(
         .map(|&(lp, rp)| tokio::spawn(run_forward_listener(conn.clone(), lp, rp)))
         .collect();
 
-    let (cols, rows) = get_terminal_size();
+    let (cols, rows) = sane_terminal_size(cols, rows);
     send_msg(&mut send, &Message::Resize { cols, rows }).await?;
 
-    // NOTE: raw mode is entered ONCE in main() before the reconnect loop,
-    // not per try_once call. This prevents mouse-tracking escape sequences
-    // (enabled by the remote tmux) from being echoed in cooked mode during
-    // the brief gap between a drop and the next reconnect attempt.
+    if raw_mode.is_none() {
+        *raw_mode = Some(RawMode::enter()?);
+    }
 
     let mut stdin_jh = tokio::spawn(async move {
         use tokio::signal::unix::SignalKind;
@@ -5571,6 +5854,10 @@ async fn try_once(
             }
         }
     });
+
+    if first_connect {
+        eprintln!("[onyx] ready");
+    }
 
     let shell_exited = tokio::select! {
         _ = &mut stdin_jh   => { output_jh.abort(); true }  // local stdin closed — exit cleanly
@@ -5724,6 +6011,7 @@ async fn main() -> Result<()> {
 
     // SSH bootstrap (blocking, single SSH call on fast path).
     if target.ssh_mode && !no_bootstrap {
+        eprintln!("[onyx] connecting...");
         let info = bootstrap(
             &target.ssh_target,
             target.identity_file.as_deref(),
@@ -5732,7 +6020,7 @@ async fn main() -> Result<()> {
             SshAuthFlow::InteractivePrompt,
             ssh_pool.as_ref(),
             SshConnectMessages {
-                establishing: Some("[onyx] establishing SSH session…"),
+                establishing: Some("[onyx] authenticating..."),
                 authenticated: Some("[onyx] authenticated. continuing bootstrap…"),
             },
         )
@@ -5777,14 +6065,10 @@ async fn main() -> Result<()> {
     // successful reconnect (via try_once returning Ok).
     let mut backoff = INTERACTIVE_BACKOFF_INITIAL;
 
-    // Enter raw mode ONCE for the entire reconnect loop. Previously this
-    // was scoped to each try_once call, so between attempts the terminal
-    // briefly restored to cooked mode — long enough for mouse-tracking
-    // escapes from tmux to echo as garbage like `^[[<32;54;57M`. Keeping
-    // raw mode persistent, combined with the mouse-disable on Drop, means
-    // stdin is silent during gaps and the terminal is cleanly restored
-    // on exit.
-    let _raw = RawMode::enter();
+    // Enter raw mode only after the first shell stream is established, then
+    // keep it for post-ready reconnects. This leaves first-connect progress
+    // messages in normal cooked mode while preserving clean terminal restore.
+    let mut raw_mode: Option<RawMode> = None;
 
     loop {
         // Erase any live banner line before entering raw terminal mode so it
@@ -5799,7 +6083,7 @@ async fn main() -> Result<()> {
         if target.ssh_mode && !no_bootstrap {
             if let Some(t) = disconnect_at {
                 let rebootstrap_due =
-                    last_rebootstrap.map_or(true, |lr| lr.elapsed() > Duration::from_secs(30));
+                    last_rebootstrap.is_none_or(|lr| lr.elapsed() > Duration::from_secs(30));
                 if t.elapsed() > Duration::from_secs(20) && rebootstrap_due {
                     let ssh_target = target.ssh_target.clone();
                     let identity = target.identity_file.clone();
@@ -5831,6 +6115,7 @@ async fn main() -> Result<()> {
             &capture,
             &forwards,
             bandwidth_mode,
+            &mut raw_mode,
         )
         .await
         {
@@ -5854,13 +6139,15 @@ async fn main() -> Result<()> {
                 let hint = quic_error_hint(&e, target.quic_port);
                 if let Some(dl) = reconnect_deadline {
                     if Instant::now() < dl {
-                        // Still within retry window — show banner, back off,
-                        // and try again. Backoff grows so we don't hammer a
-                        // genuinely-down server between the 8 s handshake
-                        // timeouts, but stays short enough (max 3 s) that
-                        // short drops recover quickly.
-                        let t = *disconnect_at.get_or_insert_with(Instant::now);
-                        reconnect_banner(t, backoff).await;
+                        // Still within retry window. Before a shell has ever
+                        // been ready, keep this as a quiet initial connect
+                        // retry instead of showing reconnect/disconnect UI.
+                        if should_show_reconnect_ui(&session) {
+                            let t = *disconnect_at.get_or_insert_with(Instant::now);
+                            reconnect_banner(t, backoff).await;
+                        } else {
+                            tokio::time::sleep(backoff).await;
+                        }
                         backoff = std::cmp::min(backoff * 2, INTERACTIVE_BACKOFF_MAX);
                         continue;
                     }
@@ -5873,50 +6160,48 @@ async fn main() -> Result<()> {
 
                 if target.ssh_mode && session.is_none() {
                     // Never had a session — QUIC could not connect at all.
-                    // Fetch server.log to distinguish firewall vs handshake.
-                    eprintln!("onyx: QUIC failed — {e:#}{hint}");
-                    let ssh = ssh_pool.as_ref().and_then(|pool| {
-                        pool.get_or_connect(
+                    if no_fallback {
+                        eprintln!("onyx: QUIC failed — {e:#}{hint}");
+                        let ssh = ssh_pool.as_ref().and_then(|pool| {
+                            pool.get_or_connect(
+                                &target.ssh_target,
+                                target.identity_file.as_deref(),
+                                target.identity_hint.as_deref(),
+                                SshAuthFlow::NonInteractive,
+                                SshConnectMessages::default(),
+                            )
+                            .ok()
+                        });
+                        if let Ok(log) = ssh_capture(
                             &target.ssh_target,
                             target.identity_file.as_deref(),
-                            target.identity_hint.as_deref(),
-                            SshAuthFlow::NonInteractive,
-                            SshConnectMessages::default(),
-                        )
-                        .ok()
-                    });
-                    if let Ok(log) = ssh_capture(
-                        &target.ssh_target,
-                        target.identity_file.as_deref(),
-                        ssh.as_deref(),
-                        &format!("cat {REMOTE_DIR}/server.log 2>/dev/null"),
-                    ) {
-                        if log.is_empty() {
-                            eprintln!("  server.log is empty — server may not have started");
-                        } else {
-                            for line in log.lines() {
-                                eprintln!("  {line}");
-                            }
-                            if log.contains("incoming from") {
-                                eprintln!(
-                                    "  → UDP packets reach the server; QUIC handshake failing"
-                                );
+                            ssh.as_deref(),
+                            &format!("cat {REMOTE_DIR}/server.log 2>/dev/null"),
+                        ) {
+                            if log.is_empty() {
+                                eprintln!("  server.log is empty — server may not have started");
                             } else {
-                                eprintln!(
-                                    "  → No UDP packets logged — likely a cloud firewall issue"
-                                );
-                                eprintln!(
-                                    "    Open UDP {port} in your provider's firewall panel",
-                                    port = target.quic_port
-                                );
+                                for line in log.lines() {
+                                    eprintln!("  {line}");
+                                }
+                                if log.contains("incoming from") {
+                                    eprintln!(
+                                        "  → UDP packets reach the server; QUIC handshake failing"
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "  → No UDP packets logged — likely a cloud firewall issue"
+                                    );
+                                    eprintln!(
+                                        "    Open UDP {port} in your provider's firewall panel",
+                                        port = target.quic_port
+                                    );
+                                }
                             }
                         }
-                    }
-                    if no_fallback {
                         return Err(e);
                     }
-                    eprintln!("[onyx] UDP unavailable — falling back to SSH");
-                    eprintln!("       tip: use --no-fallback to require QUIC, or --port / ONYX_PORT for a custom port");
+                    eprintln!("{}", ssh_fallback_notice());
                     return exec_ssh_shell(&target.ssh_target, target.identity_file.as_deref());
                 }
                 // We previously had a session — reconnect window expired.

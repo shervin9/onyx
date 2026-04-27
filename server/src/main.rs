@@ -214,6 +214,72 @@ fn open_pty() -> Result<(libc::c_int, libc::c_int)> {
     Ok((master, slave))
 }
 
+fn sane_terminal_size(cols: Option<u16>, rows: Option<u16>) -> (u16, u16) {
+    let cols = cols.filter(|v| *v > 0).unwrap_or(80);
+    let rows = rows.filter(|v| *v > 0).unwrap_or(24);
+    (cols, rows)
+}
+
+fn sane_term(term: Option<String>) -> String {
+    let term = term.unwrap_or_default();
+    let term = term.trim();
+    let valid = !term.is_empty()
+        && term != "unknown"
+        && term != "dumb"
+        && term.len() <= 64
+        && term
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'));
+    if valid {
+        term.to_string()
+    } else {
+        "xterm-256color".to_string()
+    }
+}
+
+fn set_pty_size(fd: libc::c_int, cols: u16, rows: u16) {
+    let ws = libc::winsize {
+        ws_col: cols,
+        ws_row: rows,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    unsafe {
+        libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws);
+    }
+}
+
+fn set_sane_slave_termios(fd: libc::c_int) {
+    unsafe {
+        let mut t: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut t) != 0 {
+            return;
+        }
+        t.c_lflag |= libc::ECHO | libc::ICANON | libc::ISIG | libc::IEXTEN;
+        t.c_oflag |= libc::OPOST;
+        let _ = libc::tcsetattr(fd, libc::TCSANOW, &t);
+    }
+}
+
+fn login_shell() -> String {
+    unsafe {
+        let pw = libc::getpwuid(libc::geteuid());
+        if !pw.is_null() && !(*pw).pw_shell.is_null() {
+            if let Ok(shell) = CStr::from_ptr((*pw).pw_shell).to_str() {
+                if shell.starts_with('/') && std::path::Path::new(shell).exists() {
+                    return shell.to_string();
+                }
+            }
+        }
+    }
+    for shell in ["/bin/bash", "/bin/sh"] {
+        if std::path::Path::new(shell).exists() {
+            return shell.to_string();
+        }
+    }
+    "/bin/sh".to_string()
+}
+
 /// Owns a raw fd; closes on drop.
 struct OwnedFd(libc::c_int);
 impl std::os::unix::io::AsRawFd for OwnedFd {
@@ -464,10 +530,8 @@ async fn pty_task(
                         }
                     }
                     PtyCmd::Resize(cols, rows) => {
-                        let ws = libc::winsize {
-                            ws_col: cols, ws_row: rows, ws_xpixel: 0, ws_ypixel: 0,
-                        };
-                        unsafe { libc::ioctl(fd, libc::TIOCSWINSZ as _, &ws); }
+                        let (cols, rows) = sane_terminal_size(Some(cols), Some(rows));
+                        set_pty_size(fd, cols, rows);
                         println!("[server] resize → {cols}×{rows}");
                     }
                 }
@@ -774,14 +838,10 @@ async fn handle_proxy_message(
         Message::ProxyResume { proxy_session_id } => {
             let can_resume = {
                 let locked = proxy_sessions.lock().unwrap();
-                match locked.get(&proxy_session_id) {
-                    Some(meta)
-                        if meta.detached_at.is_some() && !meta.attached.load(Ordering::SeqCst) =>
-                    {
-                        true
-                    }
-                    _ => false,
-                }
+                matches!(
+                    locked.get(&proxy_session_id),
+                    Some(meta) if meta.detached_at.is_some() && !meta.attached.load(Ordering::SeqCst)
+                )
             };
             if !can_resume {
                 let mut send = send;
@@ -1158,6 +1218,7 @@ async fn stream_job_output(
     loop {
         // Snapshot new chunks + finished state under the lock, then send
         // outside the lock.
+        #[allow(clippy::type_complexity)]
         let (batch, finished_marker): (Vec<OutputChunk>, Option<(Option<i32>, u64, bool)>) = {
             let locked = jobs.lock().unwrap();
             let meta = match locked.get(job_id) {
@@ -1326,6 +1387,7 @@ async fn handle_exec_logs(
     jobs: Jobs,
     job_id: String,
 ) -> Result<()> {
+    #[allow(clippy::type_complexity)]
     let snapshot: Option<(Vec<OutputChunk>, u64, Option<(Option<i32>, u64)>)> = {
         let locked = jobs.lock().unwrap();
         locked.get(&job_id).map(|meta| {
@@ -1484,11 +1546,22 @@ async fn run_session(
 ) -> Result<()> {
     let session_id: String = match msg {
         // ── New session ──────────────────────────────────────────────────────
-        Message::Hello { session_id, .. } => {
+        Message::Hello {
+            session_id,
+            term,
+            cols,
+            rows,
+            ..
+        } => {
             let (master_raw, slave_raw) = open_pty().context("open_pty")?;
             let slave = OwnedFd(slave_raw);
+            let term = sane_term(term);
+            let (cols, rows) = sane_terminal_size(cols, rows);
+            set_pty_size(master_raw, cols, rows);
+            set_pty_size(slave_raw, cols, rows);
+            set_sane_slave_termios(slave_raw);
 
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let shell = login_shell();
             // Launch tmux with onyx's config (uploaded by bootstrap client).
             // Falls back to a bare minimal config if the file isn't there yet
             // (e.g. direct-mode connections that skipped bootstrap).
@@ -1503,7 +1576,7 @@ async fn run_session(
                  else \
                      echo '[onyx] tmux not found — running in basic mode (no persistent sessions)'; \
                      echo '[onyx] install tmux for full experience: sudo apt install tmux'; \
-                     exec \"$ONYX_LOGIN_SHELL\"; \
+                     exec \"$ONYX_LOGIN_SHELL\" -l; \
                  fi"
             );
             let mut cmd = std::process::Command::new("sh");
@@ -1511,11 +1584,9 @@ async fn run_session(
             // ONYX_MODE=quic is inherited by the exec-$SHELL fallback path.
             cmd.env("ONYX_MODE", "quic");
             cmd.env("ONYX_LOGIN_SHELL", shell);
-            // TERM must be set explicitly: onyx-server starts as a daemon (nohup, no
-            // controlling terminal) so TERM is unset in its environment.  tmux refuses
-            // to start without a recognisable TERM value and prints
-            // "open terminal failed: terminal does not support clear".
-            cmd.env("TERM", "xterm-256color");
+            cmd.env("TERM", &term);
+            cmd.env("COLUMNS", cols.to_string());
+            cmd.env("LINES", rows.to_string());
             // SAFETY: runs in the forked child (single-threaded) before exec.
             unsafe {
                 cmd.pre_exec(move || {
@@ -2160,5 +2231,28 @@ mod session_takeover_tests {
         assert_eq!(e0, u64::MAX);
         assert_eq!(e1, 0);
         assert_eq!(e2, 1);
+    }
+}
+
+#[cfg(test)]
+mod terminal_startup_tests {
+    use super::*;
+
+    #[test]
+    fn term_fallback_rejects_unknown_and_invalid_values() {
+        assert_eq!(sane_term(None), "xterm-256color");
+        assert_eq!(sane_term(Some("unknown".into())), "xterm-256color");
+        assert_eq!(sane_term(Some("dumb".into())), "xterm-256color");
+        assert_eq!(sane_term(Some("xterm-256color".into())), "xterm-256color");
+        assert_eq!(sane_term(Some("screen-256color".into())), "screen-256color");
+        assert_eq!(sane_term(Some("bad term".into())), "xterm-256color");
+    }
+
+    #[test]
+    fn initial_resize_defaults_zero_values_before_shell_start() {
+        assert_eq!(sane_terminal_size(None, None), (80, 24));
+        assert_eq!(sane_terminal_size(Some(0), Some(0)), (80, 24));
+        assert_eq!(sane_terminal_size(Some(120), Some(0)), (120, 24));
+        assert_eq!(sane_terminal_size(Some(0), Some(40)), (80, 40));
     }
 }

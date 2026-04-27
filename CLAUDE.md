@@ -32,11 +32,12 @@ A remote shell CLI with:
 
 1. Client SSH-calls `remote_status()` to check source hash, running server,
    config. If everything matches → skip to QUIC.
-2. Otherwise, **prefer uploading a prebuilt `onyx-server`** matching the
-   remote arch (looked up in installer dir, `target/release`, or
-   cross-compile dir).
-3. **Fall back to `cargo build --release` on the remote** only when no
-   matching prebuilt binary is available.
+2. Otherwise, upload a packaged `onyx-server` matching the remote arch.
+   Default lookup order: same directory as `onyx`, Homebrew/package
+   `libexec`, then `ONYX_SERVER_BINARY=/path/to/onyx-server-linux-<arch>`.
+3. If the packaged binary is missing, fail fast with a product error.
+   Remote `cargo build --release` is developer-only and requires
+   `ONYX_DEV_REMOTE_BUILD=1`.
 4. Remote install dir: `ONYX_REMOTE_DIR` → `~/.local/share/onyx/` →
    `/tmp/onyx`.
 5. `--no-bootstrap` skips the install/start check entirely.
@@ -78,7 +79,7 @@ A remote shell CLI with:
 
 ## Install surfaces (keep consistent everywhere)
 
-- Homebrew (coming soon): `brew install shervin9/onyx/onyx`
+- Homebrew: `brew install shervin9/onyx/onyx --formula`
 - Shell installer: `curl -fsSL https://useonyx.dev/install.sh | sh`
 - From source: `cargo build --release` → `target/release/onyx`
 

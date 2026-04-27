@@ -55,6 +55,15 @@ pub enum Message {
         session_id: String,
         /// Empty = new session. Non-empty = resume attempt.
         resume_token: String,
+        /// Client terminal type for the remote PTY. Older servers ignore this.
+        #[serde(default)]
+        term: Option<String>,
+        /// Initial terminal width. Older servers ignore this.
+        #[serde(default)]
+        cols: Option<u16>,
+        /// Initial terminal height. Older servers ignore this.
+        #[serde(default)]
+        rows: Option<u16>,
     },
     /// Server → Client: acknowledge Hello and supply the resume token.
     Welcome {

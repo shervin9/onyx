@@ -90,6 +90,25 @@
         </article>
       </div>
     </section>
+
+    <section class="doc-section">
+      <h2>Streaming</h2>
+      <p>Add <span class="inline-code">stream: true</span> to receive incremental <code>notifications/progress</code> events as output arrives, instead of buffering until completion.</p>
+      <div class="card-grid">
+        <article class="code-panel">
+          <div class="panel-head">Streaming exec</div>
+          <pre><code>{
+  "name": "onyx_exec",
+  "arguments": {
+    "target": "hetzner-dev",
+    "command": ["git", "status"],
+    "stream": true
+  }
+}</code></pre>
+        </article>
+      </div>
+      <p>Events forwarded as progress notifications: <span class="inline-code">started</span>, <span class="inline-code">stdout</span>, <span class="inline-code">stderr</span>, <span class="inline-code">reconnecting</span>, <span class="inline-code">resumed</span>, <span class="inline-code">timeout</span>, <span class="inline-code">finished</span>.</p>
+    </section>
   </main>
 
   <footer>

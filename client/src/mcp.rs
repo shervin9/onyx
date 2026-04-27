@@ -369,7 +369,7 @@ fn build_exec_cmd(tool_name: &str, args: &Value, onyx_bin: &PathBuf) -> Result<C
                 }
             }
             if let Some(timeout_ms) = args["timeout_ms"].as_u64() {
-                let secs = (timeout_ms + 999) / 1000;
+                let secs = timeout_ms.div_ceil(1000);
                 cmd.arg("--timeout").arg(format!("{secs}s"));
             }
             cmd.arg("--");
@@ -583,7 +583,7 @@ async fn capture_streaming<W: AsyncWriteExt + Unpin>(
 
 fn progress_notification_for_event(line: &str, request_id: &Value, seq: u64) -> Option<Value> {
     let event: Value = serde_json::from_str(line).ok()?;
-    if !event["type"].as_str().map_or(false, is_streamable_event) {
+    if !event["type"].as_str().is_some_and(is_streamable_event) {
         return None;
     }
     Some(json!({

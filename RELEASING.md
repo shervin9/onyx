@@ -20,8 +20,8 @@ The default `GITHUB_TOKEN` is intentionally **not** used for cross-repo pushes
 2. Tag and push:
 
    ```bash
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.2.11
+   git push origin v0.2.11
    ```
 
 3. The `Release` workflow (`.github/workflows/release.yml`) runs three jobs in
@@ -50,7 +50,8 @@ Attached to the GitHub release:
 - `onyx-sha256sums.txt`
 
 These exact names are what `install.sh` and the Homebrew formula expect — do
-not rename without updating both.
+not rename without updating both. Homebrew installs the server companions into
+`libexec`; the client searches that location during remote bootstrap.
 
 ## After automation: install commands
 
@@ -76,11 +77,21 @@ Release is fine — only the tap is stale. To recover:
 4. If you need to bump manually instead, in `shervin9/homebrew-onyx`:
 
    ```bash
-   VERSION=0.1.0
-   SHA256=$(curl -fsSL https://github.com/shervin9/onyx/releases/download/v${VERSION}/onyx-sha256sums.txt \
-     | awk '$2 == "onyx-macos-arm64" {print $1}')
+   VERSION=0.2.11
+   curl -fsSL https://github.com/shervin9/onyx/releases/download/v${VERSION}/onyx-sha256sums.txt > /tmp/onyx-sha256sums.txt
+   SHA256=$(awk '$2 == "onyx-macos-arm64" {print $1}' /tmp/onyx-sha256sums.txt)
+   SERVER_X86_SHA256=$(awk '$2 == "onyx-server-linux-x86_64" {print $1}' /tmp/onyx-sha256sums.txt)
+   SERVER_ARM_SHA256=$(awk '$2 == "onyx-server-linux-arm64" {print $1}' /tmp/onyx-sha256sums.txt)
    sed -i -E "s|^([[:space:]]*)version \"[^\"]*\"|\\1version \"${VERSION}\"|" Formula/onyx.rb
-   sed -i -E "s|^([[:space:]]*)sha256 \"[a-f0-9]+\"|\\1sha256 \"${SHA256}\"|" Formula/onyx.rb
+   awk -v client="$SHA256" -v x86="$SERVER_X86_SHA256" -v arm="$SERVER_ARM_SHA256" '
+     /sha256 "/ {
+       n++
+       if (n == 1) sub(/sha256 "[a-f0-9]+"/, "sha256 \"" client "\"")
+       if (n == 2) sub(/sha256 "[a-f0-9]+"/, "sha256 \"" x86 "\"")
+       if (n == 3) sub(/sha256 "[a-f0-9]+"/, "sha256 \"" arm "\"")
+     }
+     { print }
+   ' Formula/onyx.rb > Formula/onyx.rb.tmp && mv Formula/onyx.rb.tmp Formula/onyx.rb
    git commit -am "onyx v${VERSION}: bump formula"
    git push
    ```
