@@ -68,38 +68,35 @@ set -g set-titles-string '#(~/.config/onyx/status.sh title "#{pane_current_path}
 set -g automatic-rename on
 set -g automatic-rename-format '#(~/.config/onyx/status.sh window "#{pane_current_path}" "#{pane_current_command}")'
 
-# ── Status bar ────────────────────────────────────────────────────────────────
-# Near-black surface; minimal visual weight when healthy.
-# colour234 = #1c1c1c   colour240 = #585858   colour241 = #626262
-# colour238 = #444444   colour248 = #a8a8a8
-set -g status-style    'bg=colour234,fg=colour240'
+# -- Status bar ---------------------------------------------------------------
+# Modern/minimal: no solid slab, no brackets, no debug identifiers by default.
+# `bg=default` lets the terminal theme show through so the bar feels native.
+set -g status-style    'bg=default,fg=colour244'
 set -g status-interval 5
 
-# Left: one state dot + transport label — no brackets, no bold, no full-bar color.
+# Left: one state dot + transport label. The label stays small and quiet.
 # Dot color encodes connection state (all via tmux built-ins, no extra scripts):
-#   ● muted green  = QUIC, client attached
-#   ● gold         = SSH fallback, client attached
-#   ● amber        = no client attached (reconnecting or session idle)
-set -g status-left-length 20
-set -g status-left '#{?#{==:#{session_attached},0},#[fg=colour208],#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178],#[fg=colour71]}}●#[fg=colour242,nobold] #{E:ONYX_MODE} '
+#   green = QUIC attached, gold = SSH fallback, gray = detached/idle
+set -g status-left-length 28
+set -g status-left '#[bg=default] #{?#{==:#{session_attached},0},#[fg=colour240],#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178],#[fg=colour71]}}● #[fg=colour246,nobold]onyx #[fg=colour240]#{E:ONYX_MODE} '
 
-# Right: path · branch · cmd — dim, secondary info, no color pop
+# Right: path · branch · cmd — dim secondary context, no session hash.
 set -g status-right-length 100
-set -g status-right '#[fg=colour241]#(~/.config/onyx/status.sh right "#{pane_current_path}" "#{pane_current_command}")'
+set -g status-right '#[bg=default,fg=colour240]#(~/.config/onyx/status.sh right "#{pane_current_path}" "#{pane_current_command}") '
 
-# Window tabs — dim when inactive, barely lighter when active; no highlight slab
-set -g window-status-style         'fg=colour238,bg=colour234'
-set -g window-status-current-style 'fg=colour248,bg=colour234,bold'
-set -g window-status-format         '#W'
-set -g window-status-current-format '#W'
-set -g window-status-separator      '  '
+# Window tabs — present but subdued; no highlight slab.
+set -g window-status-style         'fg=colour238,bg=default'
+set -g window-status-current-style 'fg=colour246,bg=default'
+set -g window-status-format         ' #W '
+set -g window-status-current-format ' #W '
+set -g window-status-separator      ''
 
-# Pane borders — very subtle, no accent color
-set -g pane-border-style        'fg=colour236'
-set -g pane-active-border-style 'fg=colour240'
+# Pane borders — reduced contrast; avoid a boxed-in remote terminal feel.
+set -g pane-border-style        'fg=colour238'
+set -g pane-active-border-style 'fg=colour238'
 
 # Command/message prompt — neutral
-set -g message-style 'bg=colour234,fg=colour248'
+set -g message-style 'bg=default,fg=colour246'
 "##;
 
 /// Context script called from tmux. Dispatch on $1:
