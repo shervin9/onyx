@@ -2060,6 +2060,19 @@ mod reliability_tests {
     }
 
     #[test]
+    fn post_install_status_forces_restart_after_owned_server_replace() {
+        let mut status = parse_remote_status_output(
+            "h=old r=yes own=yes ready=yes c=yes arch=x86_64 cv=def tmux=yes",
+            "new",
+            "def",
+        );
+        mark_replaced_owned_server_stopped(&mut status);
+        assert!(!status.running);
+        assert!(!status.healthy);
+        assert!(!status.own_pid);
+    }
+
+    #[test]
     fn basic_mode_activation_requires_ssh_and_missing_tmux() {
         assert!(should_activate_basic_mode(true, Some(false)));
         assert!(!should_activate_basic_mode(true, Some(true)));
@@ -3317,6 +3330,14 @@ fn parse_remote_status_output(text: &str, expected_hash: &str, conf_hash: &str) 
     }
 }
 
+fn mark_replaced_owned_server_stopped(status: &mut RemoteStatus) {
+    if status.own_pid {
+        status.running = false;
+        status.healthy = false;
+        status.own_pid = false;
+    }
+}
+
 fn tmux_missing_warning_lines() -> [&'static str; 2] {
     [
         "[onyx] tmux not found — running in basic mode (no persistent sessions)",
@@ -4321,7 +4342,7 @@ fn bootstrap(
         .map_err(bootstrap_error_with_help)?;
 
     // Single SSH call: verify auth + get all state.
-    let status = remote_status(ssh_target, identity, Some(&ssh), &hash, quic_port, &paths)
+    let mut status = remote_status(ssh_target, identity, Some(&ssh), &hash, quic_port, &paths)
         .map_err(bootstrap_error_with_help)?;
     let info = BootstrapInfo {
         tmux_available: status.tmux_available,
@@ -4377,6 +4398,7 @@ fn bootstrap(
         // and before start_server.
         install_staged_server_binary(ssh_target, identity, Some(&ssh), &hash, &status, &paths)
             .map_err(bootstrap_error_with_help)?;
+        mark_replaced_owned_server_stopped(&mut status);
     }
 
     if status.tmux_available {
