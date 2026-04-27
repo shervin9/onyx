@@ -194,6 +194,8 @@ jobs:
           cp source/Formula/onyx.rb tap/Formula/onyx.rb
           cd tap
           sed -i -E "s|^([[:space:]]*)version \"[^\"]*\"|\\1version \"${VERSION}\"|" Formula/onyx.rb
+          sed -i -E "s|releases/download/v#\\{version\\}/|releases/download/${TAG}/|g" Formula/onyx.rb
+          sed -i -E "s|releases/download/v[0-9]+\\.[0-9]+\\.[0-9]+/|releases/download/${TAG}/|g" Formula/onyx.rb
           awk -v client="$CLIENT_SHA256" -v x86="$SERVER_X86_SHA256" -v arm="$SERVER_ARM_SHA256" '
             /sha256 "/ {
               n++
@@ -208,6 +210,9 @@ jobs:
           grep -E "^[[:space:]]*sha256 \"${CLIENT_SHA256}\"$" Formula/onyx.rb
           grep -E "^[[:space:]]*sha256 \"${SERVER_X86_SHA256}\"$" Formula/onyx.rb
           grep -E "^[[:space:]]*sha256 \"${SERVER_ARM_SHA256}\"$" Formula/onyx.rb
+          grep -E "releases/download/${TAG}/onyx-macos-arm64" Formula/onyx.rb
+          grep -E "releases/download/${TAG}/onyx-server-linux-x86_64" Formula/onyx.rb
+          grep -E "releases/download/${TAG}/onyx-server-linux-arm64" Formula/onyx.rb
           grep -E "libexec.install \"onyx-server-linux-x86_64\"" Formula/onyx.rb
           grep -E "libexec.install \"onyx-server-linux-arm64\"" Formula/onyx.rb
 
