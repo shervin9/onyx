@@ -54,7 +54,14 @@ const ONYX_DEV_REMOTE_BUILD_ENV: &str = "ONYX_DEV_REMOTE_BUILD";
 /// Kept minimal on purpose — all dynamic pieces go through status.sh so
 /// there's exactly one shell invocation per refresh class.
 const ONYX_TMUX_CONF: &str = r##"# onyx — auto-generated, do not edit (overwritten on update)
-set -g mouse on
+# Default to terminal-native selection, paste, clicks, and AI prompt editing.
+# tmux mouse mode is still available with prefix + m when wheel-scroll inside
+# tmux history is more important than native terminal selection.
+set -g mouse off
+bind-key m set -g mouse \; display-message 'mouse #{?#{==:#{mouse},on},off,on}'
+bind-key s copy-mode -e \; display-message 'scroll mode: q or Esc to exit'
+bind-key -n M-Up copy-mode -u
+bind-key -n M-PageUp copy-mode -u
 set -g history-limit 50000
 
 # Terminal title → "claude · ~/workspace/meviq". Warp's sidebar / tab
