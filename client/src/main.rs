@@ -1311,7 +1311,10 @@ INSTALL MODEL
   ONYX_SERVER_BINARY=/path/to/onyx-server-linux-<arch>.
   Remote source builds are developer-only and require
   ONYX_DEV_REMOTE_BUILD=1. Subsequent connects reuse the already-running
-  server.
+  server. Bootstrap also reads the remote server auth token used to
+  authorize QUIC streams. If you skip bootstrap, set
+  ONYX_AUTH_TOKEN to the value from
+  ~/.local/share/onyx/server.auth_token on the remote host.
 
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
@@ -1319,7 +1322,9 @@ OPTIONS
   --port <port>             QUIC port on the remote (default: 7272).
                               Also: ONYX_PORT=<port> env var (all modes).
                               Alternative: append :<port> to the target.
-  --no-bootstrap            skip remote install/start checks
+  --no-bootstrap            skip remote install/start checks; requires
+                              ONYX_AUTH_TOKEN because bootstrap normally
+                              reads the remote server auth token
   --no-fallback             exit on QUIC failure instead of falling back
                               (plain SSH exec for interactive, plain TCP
                                bridge for proxy mode)
@@ -3308,9 +3313,10 @@ struct RemoteStatus {
     arch: String, // uname -m on the remote host
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct BootstrapInfo {
     tmux_available: bool,
+    auth_token: String,
 }
 
 fn parse_remote_status_output(text: &str, expected_hash: &str, conf_hash: &str) -> RemoteStatus {
@@ -3440,6 +3446,39 @@ fn remote_status(
 
     let text = String::from_utf8_lossy(&out.stdout);
     Ok(parse_remote_status_output(&text, expected_hash, &conf_hash))
+}
+
+fn read_server_auth_token(
+    target: &str,
+    identity: Option<&str>,
+    session: Option<&SshSession>,
+    paths: &RemotePaths,
+) -> Result<String> {
+    let token_path = format!("{}/server.auth_token", paths.remote_dir);
+    let token = ssh_capture(
+        target,
+        identity,
+        session,
+        &format!("cat {}", shell_quote(&token_path)),
+    )
+    .context("reading remote server auth token")?;
+    let token = token.trim().to_string();
+    anyhow::ensure!(
+        token.len() >= 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "remote server auth token is missing or invalid"
+    );
+    Ok(token)
+}
+
+fn auth_token_from_env() -> Result<String> {
+    let token = std::env::var("ONYX_AUTH_TOKEN")
+        .context("ONYX_AUTH_TOKEN is required when using --no-bootstrap")?;
+    let token = token.trim().to_string();
+    anyhow::ensure!(
+        token.len() >= 64 && token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "ONYX_AUTH_TOKEN is invalid"
+    );
+    Ok(token)
 }
 
 // ---------------------------------------------------------------------------
@@ -4348,21 +4387,29 @@ fn bootstrap(
     // Single SSH call: verify auth + get all state.
     let mut status = remote_status(ssh_target, identity, Some(&ssh), &hash, quic_port, &paths)
         .map_err(bootstrap_error_with_help)?;
-    let info = BootstrapInfo {
-        tmux_available: status.tmux_available,
-    };
+    let tmux_available = status.tmux_available;
     let config_ready = !status.tmux_available || status.conf_ok;
 
     // ── Fast path ─────────────────────────────────────────────────────────────
     if status.hash_ok && status.healthy && config_ready {
-        return Ok(info);
+        let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
+            .map_err(bootstrap_error_with_help)?;
+        return Ok(BootstrapInfo {
+            tmux_available,
+            auth_token,
+        });
     }
 
     // Config files stale but server is running — just push the new files.
     if status.tmux_available && status.hash_ok && status.healthy && !status.conf_ok {
         ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
             .map_err(bootstrap_error_with_help)?;
-        return Ok(info);
+        let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
+            .map_err(bootstrap_error_with_help)?;
+        return Ok(BootstrapInfo {
+            tmux_available,
+            auth_token,
+        });
     }
 
     // ── Slow path ────────────────────────────────────────────────────────────
@@ -4411,9 +4458,14 @@ fn bootstrap(
     }
     start_server(ssh_target, identity, Some(&ssh), quic_port, &status, &paths)
         .map_err(bootstrap_error_with_help)?;
+    let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
+        .map_err(bootstrap_error_with_help)?;
 
     eprintln!("[onyx] ready");
-    Ok(info)
+    Ok(BootstrapInfo {
+        tmux_available,
+        auth_token,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -4424,7 +4476,12 @@ fn bootstrap(
 /// connection a new QUIC bidirectional stream is opened on `conn` and data
 /// flows in both directions until either side closes.
 /// The task runs until aborted (by try_once cleanup) or until the bind fails.
-async fn run_forward_listener(conn: quinn::Connection, local_port: u16, remote_port: u16) {
+async fn run_forward_listener(
+    conn: quinn::Connection,
+    auth_token: String,
+    local_port: u16,
+    remote_port: u16,
+) {
     let listener =
         match TcpListener::bind(std::net::SocketAddr::from(([127, 0, 0, 1], local_port))).await {
             Ok(l) => l,
@@ -4440,8 +4497,9 @@ async fn run_forward_listener(conn: quinn::Connection, local_port: u16, remote_p
             Err(_) => break,
         };
         let c = conn.clone();
+        let token = auth_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_forward_conn(c, tcp, remote_port).await {
+            if let Err(e) = handle_forward_conn(c, token, tcp, remote_port).await {
                 eprintln!("[forward] :{local_port}→:{remote_port}: {e:#}");
             }
         });
@@ -4452,11 +4510,19 @@ async fn run_forward_listener(conn: quinn::Connection, local_port: u16, remote_p
 /// bytes between the TCP socket and the QUIC stream until both sides close.
 async fn handle_forward_conn(
     conn: quinn::Connection,
+    auth_token: String,
     tcp: tokio::net::TcpStream,
     remote_port: u16,
 ) -> Result<()> {
     let (mut qs, mut qr) = conn.open_bi().await.context("open forward stream")?;
-    send_msg(&mut qs, &Message::ForwardConnect { remote_port }).await?;
+    send_msg(
+        &mut qs,
+        &Message::ForwardConnect {
+            auth_token,
+            remote_port,
+        },
+    )
+    .await?;
     match recv_msg(&mut qr).await? {
         Message::ForwardAck => {}
         Message::ForwardError { reason } => {
@@ -4523,6 +4589,7 @@ async fn connect_proxy_stream(
     server_addr: SocketAddr,
     host_port: &str,
     capture: &FpCapture,
+    auth_token: &str,
     proxy_session_id: &str,
     target_host: &str,
     target_port: u16,
@@ -4534,10 +4601,12 @@ async fn connect_proxy_stream(
     let (mut send, mut recv) = conn.open_bi().await.context("open proxy stream")?;
     let setup = if resume {
         Message::ProxyResume {
+            auth_token: auth_token.to_string(),
             proxy_session_id: proxy_session_id.to_string(),
         }
     } else {
         Message::ProxyConnect {
+            auth_token: auth_token.to_string(),
             proxy_session_id: proxy_session_id.to_string(),
             target_host: target_host.to_string(),
             target_port,
@@ -4580,6 +4649,7 @@ async fn run_proxy_mode(target_host: String, target_port: u16, no_fallback: bool
     let capture: FpCapture = Arc::new(Mutex::new(None));
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(make_client_config(capture.clone())?);
+    let auth_token = auth_token_from_env()?;
     let proxy_session_id = proxy_session_id();
 
     let (stdin_tx, mut stdin_rx) = mpsc::unbounded_channel::<ProxyStdinEvent>();
@@ -4634,6 +4704,7 @@ async fn run_proxy_mode(target_host: String, target_port: u16, no_fallback: bool
             server_addr,
             &host_port,
             &capture,
+            &auth_token,
             &proxy_session_id,
             &target_host,
             target_port,
@@ -4872,6 +4943,7 @@ struct PreparedExecTarget {
     host_port: String,
     capture: FpCapture,
     tmux_available: Option<bool>,
+    auth_token: String,
 }
 
 async fn prepare_exec_target(
@@ -4882,6 +4954,7 @@ async fn prepare_exec_target(
     let target = build_target(&raw_target, identity_file, None)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
     let mut tmux_available = None;
+    let mut auth_token = None;
 
     if target.ssh_mode && !no_bootstrap {
         let ssh_target = target.ssh_target.clone();
@@ -4906,7 +4979,12 @@ async fn prepare_exec_target(
         .map_err(|e| anyhow::anyhow!("bootstrap task: {e}"))?
         .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
         tmux_available = Some(info.tmux_available);
+        auth_token = Some(info.auth_token);
     }
+    let auth_token = match auth_token {
+        Some(token) => token,
+        None => auth_token_from_env()?,
+    };
 
     let server_addr: SocketAddr = {
         use std::net::ToSocketAddrs;
@@ -4927,6 +5005,7 @@ async fn prepare_exec_target(
         host_port,
         capture,
         tmux_available,
+        auth_token,
     })
 }
 
@@ -5077,6 +5156,7 @@ async fn stream_exec_with_resume(
     server_addr: SocketAddr,
     host_port: &str,
     capture: &FpCapture,
+    auth_token: &str,
     job_id: &str,
     started_at_unix: u64,
     json: bool,
@@ -5098,6 +5178,7 @@ async fn stream_exec_with_resume(
                     server_addr,
                     host_port,
                     capture,
+                    auth_token,
                     job_id,
                     last_seq,
                 )
@@ -5242,6 +5323,7 @@ async fn reconnect_and_attach(
     server_addr: SocketAddr,
     host_port: &str,
     capture: &FpCapture,
+    auth_token: &str,
     job_id: &str,
     last_seq: u64,
 ) -> Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream), ExecAttachError> {
@@ -5266,6 +5348,7 @@ async fn reconnect_and_attach(
     send_msg(
         &mut send,
         &Message::ExecAttach {
+            auth_token: auth_token.to_string(),
             job_id: job_id.to_string(),
             last_seq,
         },
@@ -5300,6 +5383,7 @@ async fn run_exec_mode(
         host_port,
         capture,
         tmux_available,
+        auth_token,
     } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
         server_addr,
@@ -5314,6 +5398,7 @@ async fn run_exec_mode(
     send_msg(
         &mut send,
         &Message::ExecStart {
+            auth_token: auth_token.clone(),
             command: command.clone(),
             cwd,
             env,
@@ -5366,6 +5451,7 @@ async fn run_exec_mode(
         server_addr,
         &host_port,
         &capture,
+        &auth_token,
         &job_id,
         started_at_unix,
         json,
@@ -5397,6 +5483,7 @@ async fn run_attach_mode(
         server_addr,
         host_port,
         capture,
+        auth_token,
         ..
     } = prepared;
 
@@ -5408,6 +5495,7 @@ async fn run_attach_mode(
         server_addr,
         &host_port,
         &capture,
+        &auth_token,
         &job_id,
         0,
         json,
@@ -5433,6 +5521,7 @@ async fn run_logs_mode(
         server_addr,
         host_port,
         capture,
+        auth_token,
         ..
     } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
@@ -5447,6 +5536,7 @@ async fn run_logs_mode(
     send_msg(
         &mut send,
         &Message::ExecLogs {
+            auth_token,
             job_id: job_id.clone(),
         },
     )
@@ -5472,6 +5562,7 @@ async fn run_kill_mode(
         server_addr,
         host_port,
         capture,
+        auth_token,
         ..
     } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
@@ -5486,6 +5577,7 @@ async fn run_kill_mode(
     send_msg(
         &mut send,
         &Message::Kill {
+            auth_token,
             job_id: job_id.clone(),
         },
     )
@@ -5615,6 +5707,7 @@ async fn run_jobs_mode(
         server_addr,
         host_port,
         capture,
+        auth_token,
         ..
     } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
@@ -5626,7 +5719,7 @@ async fn run_jobs_mode(
     )
     .await?;
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
-    send_msg(&mut send, &Message::JobsList).await?;
+    send_msg(&mut send, &Message::JobsList { auth_token }).await?;
     let msg = recv_msg(&mut recv).await?;
     conn.close(0u32.into(), b"bye");
     endpoint.wait_idle().await;
@@ -5663,6 +5756,7 @@ async fn try_once(
     session: &mut Option<(String, String)>,
     host_port: &str,
     capture: &FpCapture,
+    auth_token: &str,
     forwards: &[(u16, u16)],
     mode: BandwidthMode,
     raw_mode: &mut Option<RawMode>,
@@ -5692,6 +5786,7 @@ async fn try_once(
             send_msg(
                 &mut send,
                 &Message::Hello {
+                    auth_token: auth_token.to_string(),
                     session_id: new_session_id(),
                     resume_token: String::new(),
                     term: Some(term),
@@ -5705,6 +5800,7 @@ async fn try_once(
             send_msg(
                 &mut send,
                 &Message::Resume {
+                    auth_token: auth_token.to_string(),
                     session_id: sid.clone(),
                     resume_token: tok.clone(),
                     last_seq: 0,
@@ -5758,7 +5854,14 @@ async fn try_once(
     // are aborted when this function returns (connection dropped or shell exit).
     let forward_handles: Vec<tokio::task::JoinHandle<()>> = forwards
         .iter()
-        .map(|&(lp, rp)| tokio::spawn(run_forward_listener(conn.clone(), lp, rp)))
+        .map(|&(lp, rp)| {
+            tokio::spawn(run_forward_listener(
+                conn.clone(),
+                auth_token.to_string(),
+                lp,
+                rp,
+            ))
+        })
         .collect();
 
     let (cols, rows) = sane_terminal_size(cols, rows);
@@ -6036,6 +6139,7 @@ async fn main() -> Result<()> {
         .with_context(|| format!("resolving target '{raw_target}'"))?;
     let ssh_pool = target.ssh_mode.then(SshSessionPool::default);
     let mut tmux_available = None;
+    let mut auth_token = None;
 
     // SSH bootstrap (blocking, single SSH call on fast path).
     if target.ssh_mode && !no_bootstrap {
@@ -6054,7 +6158,12 @@ async fn main() -> Result<()> {
         )
         .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
         tmux_available = Some(info.tmux_available);
+        auth_token = Some(info.auth_token);
     }
+    let mut auth_token = match auth_token {
+        Some(token) => token,
+        None => auth_token_from_env()?,
+    };
 
     if should_activate_basic_mode(target.ssh_mode, tmux_available) {
         emit_tmux_missing_warning();
@@ -6129,7 +6238,12 @@ async fn main() -> Result<()> {
                             SshConnectMessages::default(),
                         )
                     })
-                    .await;
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .map(|info| {
+                        auth_token = info.auth_token;
+                    });
                     last_rebootstrap = Some(Instant::now());
                 }
             }
@@ -6141,6 +6255,7 @@ async fn main() -> Result<()> {
             &mut session,
             &host_port,
             &capture,
+            &auth_token,
             &forwards,
             bandwidth_mode,
             &mut raw_mode,

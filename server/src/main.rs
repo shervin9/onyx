@@ -118,11 +118,12 @@ fn random_token() -> Result<String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Load a persistent self-signed cert from disk, or generate + save a new one.
-/// Returns (ServerConfig, fingerprint_string).
+/// Load a persistent self-signed cert and auth token from disk, or generate
+/// and save new values.
+/// Returns (ServerConfig, fingerprint_string, auth_token).
 /// The fingerprint is also written to server.fingerprint so the client can
 /// read it during bootstrap and perform TOFU cert pinning.
-fn make_server_config() -> Result<(ServerConfig, String)> {
+fn make_server_config() -> Result<(ServerConfig, String, String)> {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let data_dir = std::path::PathBuf::from(&home).join(".local/share/onyx");
     std::fs::create_dir_all(&data_dir).context("creating data dir")?;
@@ -135,6 +136,7 @@ fn make_server_config() -> Result<(ServerConfig, String)> {
 
     let cert_path = data_dir.join("server.crt");
     let key_path = data_dir.join("server.key");
+    let auth_token_path = data_dir.join("server.auth_token");
 
     // Load existing cert+key, or generate and persist a new pair.
     let (cert_der, key_der): (Vec<u8>, Vec<u8>) = if cert_path.exists() && key_path.exists() {
@@ -158,6 +160,26 @@ fn make_server_config() -> Result<(ServerConfig, String)> {
     let fingerprint = cert_fingerprint(&cert_der);
     // Write fingerprint so bootstrap can read it via SSH and send to client.
     write_private_file(&data_dir.join("server.fingerprint"), fingerprint.as_bytes())?;
+    let auth_token = if auth_token_path.exists() {
+        std::fs::read_to_string(&auth_token_path)
+            .context("reading server.auth_token")?
+            .trim()
+            .to_string()
+    } else {
+        let token = random_token()?;
+        write_private_file(&auth_token_path, token.as_bytes())?;
+        token
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&auth_token_path, std::fs::Permissions::from_mode(0o600))
+            .context("setting server.auth_token permissions")?;
+    }
+    anyhow::ensure!(
+        auth_token.len() >= 64 && auth_token.bytes().all(|b| b.is_ascii_hexdigit()),
+        "server.auth_token is invalid"
+    );
 
     let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_der));
     let cert = rustls::pki_types::CertificateDer::from(cert_der);
@@ -168,7 +190,11 @@ fn make_server_config() -> Result<(ServerConfig, String)> {
     tls.alpn_protocols = vec![b"onyx".to_vec()];
     let quic =
         quinn::crypto::rustls::QuicServerConfig::try_from(tls).context("wrapping for QUIC")?;
-    Ok((ServerConfig::with_crypto(Arc::new(quic)), fingerprint))
+    Ok((
+        ServerConfig::with_crypto(Arc::new(quic)),
+        fingerprint,
+        auth_token,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -764,6 +790,7 @@ async fn handle_proxy_message(
             proxy_session_id,
             target_host,
             target_port,
+            ..
         } => {
             if proxy_sessions
                 .lock()
@@ -835,7 +862,9 @@ async fn handle_proxy_message(
             );
             run_proxy_stream(send, recv, proxy_sessions, proxy_session_id, true).await
         }
-        Message::ProxyResume { proxy_session_id } => {
+        Message::ProxyResume {
+            proxy_session_id, ..
+        } => {
             let can_resume = {
                 let locked = proxy_sessions.lock().unwrap();
                 matches!(
@@ -1511,10 +1540,15 @@ async fn handle_stream(
     sessions: Sessions,
     proxy_sessions: ProxySessions,
     jobs: Jobs,
+    auth_token: Arc<String>,
 ) -> Result<()> {
     let first = recv_msg(&mut recv).await.context("reading first message")?;
+    if !message_auth_token_matches(&first, auth_token.as_str()) {
+        reject_unauthorized(send).await?;
+        anyhow::bail!("unauthorized QUIC stream");
+    }
     match first {
-        Message::ForwardConnect { remote_port } => run_forward(send, recv, remote_port).await,
+        Message::ForwardConnect { remote_port, .. } => run_forward(send, recv, remote_port).await,
         Message::ProxyConnect { .. } | Message::ProxyResume { .. } => {
             handle_proxy_message(send, recv, proxy_sessions, first).await
         }
@@ -1523,15 +1557,56 @@ async fn handle_stream(
             cwd,
             env,
             timeout_secs,
+            ..
         } => handle_exec_start(send, recv, jobs, command, cwd, env, timeout_secs).await,
-        Message::Kill { job_id } => handle_kill(send, jobs, job_id).await,
-        Message::ExecAttach { job_id, last_seq } => {
-            handle_exec_attach(send, recv, jobs, job_id, last_seq).await
-        }
-        Message::ExecLogs { job_id } => handle_exec_logs(send, recv, jobs, job_id).await,
-        Message::JobsList => handle_jobs_list(send, jobs).await,
+        Message::Kill { job_id, .. } => handle_kill(send, jobs, job_id).await,
+        Message::ExecAttach {
+            job_id, last_seq, ..
+        } => handle_exec_attach(send, recv, jobs, job_id, last_seq).await,
+        Message::ExecLogs { job_id, .. } => handle_exec_logs(send, recv, jobs, job_id).await,
+        Message::JobsList { .. } => handle_jobs_list(send, jobs).await,
         msg => run_session(send, recv, sessions, msg).await,
     }
+}
+
+fn message_auth_token_matches(msg: &Message, expected: &str) -> bool {
+    let supplied = match msg {
+        Message::Hello { auth_token, .. }
+        | Message::Resume { auth_token, .. }
+        | Message::ForwardConnect { auth_token, .. }
+        | Message::ProxyConnect { auth_token, .. }
+        | Message::ProxyResume { auth_token, .. }
+        | Message::ExecStart { auth_token, .. }
+        | Message::ExecAttach { auth_token, .. }
+        | Message::ExecLogs { auth_token, .. }
+        | Message::JobsList { auth_token }
+        | Message::Kill { auth_token, .. } => auth_token.as_str(),
+        _ => "",
+    };
+    !supplied.is_empty() && constant_time_eq(supplied.as_bytes(), expected.as_bytes())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    let mut diff = a.len() ^ b.len();
+    for i in 0..a.len().max(b.len()) {
+        let av = a.get(i).copied().unwrap_or(0);
+        let bv = b.get(i).copied().unwrap_or(0);
+        diff |= (av ^ bv) as usize;
+    }
+    diff == 0
+}
+
+async fn reject_unauthorized(mut send: quinn::SendStream) -> Result<()> {
+    send_msg(
+        &mut send,
+        &Message::Close {
+            reason: "unauthorized".into(),
+        },
+    )
+    .await
+    .ok();
+    send.finish().ok();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1937,6 +2012,7 @@ async fn handle_connection(
     sessions: Sessions,
     proxy_sessions: ProxySessions,
     jobs: Jobs,
+    auth_token: Arc<String>,
 ) -> Result<()> {
     let remote = incoming.remote_address();
     println!("[server] incoming from {remote} (pre-handshake)");
@@ -1957,8 +2033,9 @@ async fn handle_connection(
                 let s = sessions.clone();
                 let p = proxy_sessions.clone();
                 let j = jobs.clone();
+                let token = auth_token.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_stream(send, recv, s, p, j).await {
+                    if let Err(e) = handle_stream(send, recv, s, p, j, token).await {
                         eprintln!("[server] stream error: {e:#}");
                     }
                 });
@@ -2007,7 +2084,8 @@ async fn main() -> Result<()> {
         .unwrap_or(DEFAULT_PORT)
     };
     let addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse()?;
-    let (server_cfg, fingerprint) = make_server_config()?;
+    let (server_cfg, fingerprint, auth_token) = make_server_config()?;
+    let auth_token = Arc::new(auth_token);
     let endpoint = Endpoint::server(server_cfg, addr)?;
     let bound = endpoint.local_addr()?;
     println!("[server] listening on {bound}  (ALPN: onyx)");
@@ -2017,8 +2095,9 @@ async fn main() -> Result<()> {
         let s = sessions.clone();
         let p = proxy_sessions.clone();
         let j = jobs.clone();
+        let token = auth_token.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(incoming, s, p, j).await {
+            if let Err(e) = handle_connection(incoming, s, p, j, token).await {
                 eprintln!("[server] connection error: {e:#}");
             }
         });
@@ -2037,6 +2116,24 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod job_tests {
     use super::*;
+
+    #[test]
+    fn stream_auth_rejects_missing_or_wrong_token() {
+        let expected = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let missing = Message::JobsList {
+            auth_token: String::new(),
+        };
+        let wrong = Message::JobsList {
+            auth_token: "bad".into(),
+        };
+        let right = Message::JobsList {
+            auth_token: expected.into(),
+        };
+
+        assert!(!message_auth_token_matches(&missing, expected));
+        assert!(!message_auth_token_matches(&wrong, expected));
+        assert!(message_auth_token_matches(&right, expected));
+    }
 
     fn mk_meta() -> JobMeta {
         let (tx, _rx) = watch::channel(0u64);

@@ -57,6 +57,25 @@
         </article>
       </div>
     </section>
+
+    <section class="doc-section">
+      <h2>Bootstrap model</h2>
+      <p>On first connect, Onyx uses SSH to upload and start the matching remote server binary. Bootstrap also reads the remote server auth token used to authorize QUIC streams.</p>
+      <div class="mini-grid">
+        <article class="note">
+          <h3>Normal path</h3>
+          <p><span class="inline-code">onyx user@host</span> handles bootstrap and token reading automatically.</p>
+        </article>
+        <article class="note">
+          <h3>No bootstrap</h3>
+          <p><span class="inline-code">--no-bootstrap</span> requires <span class="inline-code">ONYX_AUTH_TOKEN</span>.</p>
+        </article>
+        <article class="note">
+          <h3>Security</h3>
+          <p>QUIC uses TOFU certificate pinning plus a per-server auth token.</p>
+        </article>
+      </div>
+    </section>
   </main>
 
   <footer>

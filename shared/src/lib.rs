@@ -52,6 +52,8 @@ pub struct JobSummary {
 pub enum Message {
     /// Client → Server: open or attempt to resume a session.
     Hello {
+        #[serde(default)]
+        auth_token: String,
         session_id: String,
         /// Empty = new session. Non-empty = resume attempt.
         resume_token: String,
@@ -72,6 +74,8 @@ pub enum Message {
     },
     /// Client → Server: resume after reconnect, supply last received seq.
     Resume {
+        #[serde(default)]
+        auth_token: String,
         session_id: String,
         resume_token: String,
         last_seq: u64,
@@ -85,15 +89,25 @@ pub enum Message {
     /// Either direction: graceful shutdown.
     Close { reason: String },
     /// Client → Server: open a TCP tunnel to remote_port on the server host.
-    ForwardConnect { remote_port: u16 },
+    ForwardConnect {
+        #[serde(default)]
+        auth_token: String,
+        remote_port: u16,
+    },
     /// Client → Server: open a TCP connection to target_host:target_port from the server.
     ProxyConnect {
+        #[serde(default)]
+        auth_token: String,
         proxy_session_id: String,
         target_host: String,
         target_port: u16,
     },
     /// Client → Server: resume a proxy session after a short QUIC interruption.
-    ProxyResume { proxy_session_id: String },
+    ProxyResume {
+        #[serde(default)]
+        auth_token: String,
+        proxy_session_id: String,
+    },
     /// Server → Client: proxy session is ready for transparent byte forwarding.
     ProxySessionReady { proxy_session_id: String },
     /// Server → Client: tunnel accepted, remote TCP connection established.
@@ -111,6 +125,8 @@ pub enum Message {
     //
     /// Client → Server: start a new job. The server allocates a job_id.
     ExecStart {
+        #[serde(default)]
+        auth_token: String,
         command: Vec<String>,
         /// Optional working directory on the remote host.
         cwd: Option<String>,
@@ -121,12 +137,24 @@ pub enum Message {
     },
     /// Client → Server: attach to an existing job. Server replays any
     /// buffered output with seq > last_seq, then streams new chunks.
-    ExecAttach { job_id: String, last_seq: u64 },
+    ExecAttach {
+        #[serde(default)]
+        auth_token: String,
+        job_id: String,
+        last_seq: u64,
+    },
     /// Client → Server: snapshot-dump the job's full buffered output and
     /// final status, then close. Does not subscribe to live output.
-    ExecLogs { job_id: String },
+    ExecLogs {
+        #[serde(default)]
+        auth_token: String,
+        job_id: String,
+    },
     /// Client → Server: enumerate jobs known to this server.
-    JobsList,
+    JobsList {
+        #[serde(default)]
+        auth_token: String,
+    },
     /// Server → Client: job accepted and started.
     ExecStarted {
         job_id: String,
@@ -155,7 +183,11 @@ pub enum Message {
     /// Server → Client: job was killed by the server-side timeout.
     ExecTimedOut,
     /// Client → Server: kill a running job.
-    Kill { job_id: String },
+    Kill {
+        #[serde(default)]
+        auth_token: String,
+        job_id: String,
+    },
     /// Server → Client: result of a Kill request.
     KillResult {
         job_id: String,

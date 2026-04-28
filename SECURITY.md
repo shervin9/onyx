@@ -1,12 +1,19 @@
 # Security policy
 
-Onyx is early-stage software. This document describes the trust model, known
-limitations, and how to report security issues.
+This document describes the Onyx trust model, known limitations, and how to
+report security issues.
 
-## Trust model (TOFU)
+## Trust model
 
-Onyx uses a **Trust-On-First-Use (TOFU)** model for its QUIC transport,
-similar in spirit to how OpenSSH handles host keys.
+Onyx uses two checks for its QUIC transport:
+
+- **Server identity:** Trust-On-First-Use (TOFU), similar in spirit to how
+  OpenSSH handles host keys.
+- **Client authorization:** a random 256-bit server auth token stored on the
+  remote host at `~/.local/share/onyx/server.auth_token` with `0600`
+  permissions. The client reads this token through the SSH bootstrap flow and
+  includes it on every QUIC stream before any shell, exec, proxy, or forward
+  action is accepted.
 
 1. On the first connection to a new host, Onyx shows the server's TLS
    certificate SHA-256 fingerprint and asks you to confirm it.
@@ -35,6 +42,9 @@ sed -i '/^host.example.com:7272 /d' ~/.local/share/onyx/known_hosts
 The initial `onyx user@host` call uses your existing **SSH** credentials to
 install or update the remote `onyx-server`. This leverages your existing SSH
 `known_hosts` and key-based auth and is outside Onyx's TOFU layer.
+
+The same SSH bootstrap reads the server auth token. If you intentionally skip
+bootstrap with `--no-bootstrap`, provide the token through `ONYX_AUTH_TOKEN`.
 
 ## Current limitations
 

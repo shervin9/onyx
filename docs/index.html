@@ -40,7 +40,7 @@
 
     <section class="doc-section">
       <h2>Overview</h2>
-      <p>Onyx is a resilient remote shell, a resumable remote exec layer, and a local MCP backend for agents.</p>
+      <p>Onyx is a resilient remote shell, a resumable remote exec layer, and a local MCP backend for agents. It bootstraps over SSH, then uses QUIC with TOFU certificate pinning and a per-server auth token.</p>
       <div class="doc-grid">
         <article class="doc-card">
           <h2>Install</h2>
@@ -61,6 +61,11 @@
           <h2>MCP</h2>
           <p>Expose remote execution locally to agent clients with a small stdio server.</p>
           <a href="./mcp.html">Open MCP docs</a>
+        </article>
+        <article class="doc-card">
+          <h2>Security</h2>
+          <p>Read the trust model, current limits, and vulnerability reporting policy.</p>
+          <a href="../SECURITY.md">Open security policy</a>
         </article>
       </div>
     </section>
