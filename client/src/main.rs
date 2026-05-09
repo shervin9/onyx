@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 mod mcp;
+mod workspace;
 
 // ---------------------------------------------------------------------------
 // Source files embedded at compile time for remote bootstrap.
@@ -866,6 +867,14 @@ enum CliMode {
         low_bandwidth: bool,
         forwards: Vec<(u16, u16)>,
         port_override: Option<u16>,
+        workspace: Option<String>,
+    },
+    /// `onyx ls` — list known named workspaces.
+    Ls,
+    /// `onyx attach <workspace-name>` — resume a named workspace.
+    AttachWorkspace {
+        name: String,
+        identity_file: Option<String>,
     },
     Proxy {
         target_host: String,
@@ -954,6 +963,14 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             "--version" | "-V" => return Ok(ParseOutcome::Version),
             _ => {}
         }
+    }
+
+    if matches!(it.peek(), Some(cmd) if cmd == "ls") {
+        it.next();
+        if let Some(extra) = it.next() {
+            return Err(format!("ls: unexpected argument: {extra}"));
+        }
+        return Ok(ParseOutcome::Run(CliMode::Ls));
     }
 
     if matches!(it.peek(), Some(cmd) if cmd == "mcp") {
@@ -1167,22 +1184,29 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 if detach {
                     return Err(format!("{sub}: --detach is not valid here"));
                 }
-                let job_id = positional
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| format!("{sub}: missing <job-id>"))?;
                 if !command.is_empty() {
-                    return Err(format!("{sub}: unexpected arguments after <job-id>"));
+                    return Err(format!("{sub}: unexpected arguments"));
                 }
+                let job_id_opt = positional.into_iter().next();
                 if sub == "attach" {
-                    Ok(ParseOutcome::Run(CliMode::Attach {
-                        raw_target,
-                        identity_file: identity,
-                        no_bootstrap,
-                        json,
-                        job_id,
-                    }))
+                    match job_id_opt {
+                        // Two-arg form: `onyx attach <target> <job-id>` — exec job attach.
+                        Some(job_id) => Ok(ParseOutcome::Run(CliMode::Attach {
+                            raw_target,
+                            identity_file: identity,
+                            no_bootstrap,
+                            json,
+                            job_id,
+                        })),
+                        // Single-arg form: `onyx attach <workspace-name>` — workspace resume.
+                        None => Ok(ParseOutcome::Run(CliMode::AttachWorkspace {
+                            name: raw_target,
+                            identity_file: identity,
+                        })),
+                    }
                 } else {
+                    let job_id = job_id_opt
+                        .ok_or_else(|| "logs: missing <job-id>".to_string())?;
                     Ok(ParseOutcome::Run(CliMode::Logs {
                         raw_target,
                         identity_file: identity,
@@ -1203,6 +1227,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     let mut low_bandwidth = false;
     let mut forwards: Vec<(u16, u16)> = Vec::new();
     let mut port_override: Option<u16> = None;
+    let mut workspace: Option<String> = None;
 
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1231,6 +1256,12 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 let (lp, rp) = parse_forward_spec(&spec)?;
                 forwards.push((lp, rp));
             }
+            "--workspace" | "-w" => {
+                workspace = Some(
+                    it.next()
+                        .ok_or_else(|| "--workspace requires a name".to_string())?,
+                );
+            }
             // A leading `-` that isn't a known flag is almost always a
             // mistyped flag — reject it clearly rather than silently
             // treating it as a hostname and failing much later in
@@ -1253,6 +1284,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         low_bandwidth,
         forwards,
         port_override,
+        workspace,
     }))
 }
 
@@ -1274,10 +1306,13 @@ onyx — stable remote shell for unreliable networks (QUIC + SSH fallback)
 
 USAGE
   onyx [OPTIONS] [user@]<host>[:<quic-port>]       interactive shell
+  onyx [OPTIONS] [user@]<host> --workspace <name>  connect to a named workspace
+  onyx ls                                           list named workspaces
+  onyx attach <workspace-name>                      resume a named workspace
   onyx proxy <host> <port>                          SSH ProxyCommand transport
   onyx exec   <target> [--json] [--detach] [--cwd <dir>] [--env K=V]... [--timeout <dur>] -- <cmd...>
   onyx jobs   <target> [--json]
-  onyx attach <target> <job-id> [--json]
+  onyx attach <target> <job-id> [--json]            attach to a background exec job
   onyx logs   <target> <job-id> [--json]
   onyx kill   <target> <job-id> [--json]
   onyx doctor <target>                              run diagnostics for a target
@@ -1327,6 +1362,7 @@ INSTALL MODEL
 
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
+  -w, --workspace <name>    bind this session to a named workspace
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
   --port <port>             QUIC port on the remote (default: 7272).
                               Also: ONYX_PORT=<port> env var (all modes).
@@ -6124,27 +6160,92 @@ async fn main() -> Result<()> {
             raw_target,
             identity_file,
         } => return run_doctor_mode(raw_target, identity_file).await,
-        CliMode::Interactive { .. } => {}
+        CliMode::Ls => return run_ls_mode(),
+        CliMode::AttachWorkspace { name, identity_file } => {
+            return run_attach_workspace_mode(name, identity_file).await;
+        }
+        CliMode::Interactive {
+            raw_target,
+            identity_file,
+            no_fallback,
+            no_bootstrap,
+            low_bandwidth,
+            forwards,
+            port_override,
+            workspace,
+        } => {
+            let bandwidth_mode = if low_bandwidth {
+                BandwidthMode::low_bandwidth()
+            } else {
+                BandwidthMode::normal()
+            };
+            return run_interactive_session(
+                raw_target,
+                identity_file,
+                no_fallback,
+                no_bootstrap,
+                bandwidth_mode,
+                forwards,
+                port_override,
+                workspace,
+                None,
+            )
+            .await;
+        }
     }
+}
 
-    let CliMode::Interactive {
-        raw_target,
+// ---------------------------------------------------------------------------
+// Named workspace commands
+// ---------------------------------------------------------------------------
+
+fn run_ls_mode() -> Result<()> {
+    let store = workspace::WorkspaceStore::load();
+    workspace::print_workspaces(store.all());
+    Ok(())
+}
+
+async fn run_attach_workspace_mode(name: String, identity_file: Option<String>) -> Result<()> {
+    let store = workspace::WorkspaceStore::load();
+    let ws = store.find_by_name(&name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "workspace '{}' not found.\nRun 'onyx ls' to see workspaces, or create one with:\n  onyx <host> --workspace {}",
+            name, name
+        )
+    })?;
+    eprintln!("[onyx] resuming workspace '{}' on {}", ws.name, ws.host);
+    let initial_session = Some((ws.session_id.clone(), ws.resume_token.clone()));
+    let host = ws.host.clone();
+    run_interactive_session(
+        host,
         identity_file,
-        no_fallback,
-        no_bootstrap,
-        low_bandwidth,
-        forwards,
-        port_override,
-    } = cli_mode
-    else {
-        unreachable!();
-    };
-    let bandwidth_mode = if low_bandwidth {
-        BandwidthMode::low_bandwidth()
-    } else {
-        BandwidthMode::normal()
-    };
+        false,
+        false,
+        BandwidthMode::normal(),
+        vec![],
+        None,
+        Some(name),
+        initial_session,
+    )
+    .await
+}
 
+// ---------------------------------------------------------------------------
+// Interactive session (extracted so workspace attach can call it too)
+// ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_session(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_fallback: bool,
+    no_bootstrap: bool,
+    bandwidth_mode: BandwidthMode,
+    forwards: Vec<(u16, u16)>,
+    port_override: Option<u16>,
+    workspace: Option<String>,
+    initial_session: Option<(String, String)>,
+) -> Result<()> {
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
     let target = build_target(&raw_target, identity_file, port_override)
@@ -6198,7 +6299,8 @@ async fn main() -> Result<()> {
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(make_client_config(capture.clone())?);
 
-    let mut session: Option<(String, String)> = None;
+    // Pre-seed session from workspace store (cross-process resume).
+    let mut session: Option<(String, String)> = initial_session;
     let mut reconnect_deadline: Option<Instant> = if target.ssh_mode {
         Some(Instant::now() + INTERACTIVE_INITIAL_CONNECT_WINDOW)
     } else {
@@ -6216,6 +6318,8 @@ async fn main() -> Result<()> {
     // Whether the "Connection lost" status line is currently visible.
     // Shown once per disconnect episode; cleared before re-entering raw mode.
     let mut status_shown = false;
+    // Whether workspace credentials have been persisted for this run.
+    let mut workspace_saved = session.is_some(); // pre-seeded sessions are already saved
 
     // Enter raw mode only after the first shell stream is established, then
     // keep it for post-ready reconnects. This leaves first-connect progress
@@ -6277,13 +6381,25 @@ async fn main() -> Result<()> {
         )
         .await
         {
-            // Shell exited cleanly — just exit.
-            Ok(true) => break,
+            // Shell exited cleanly — update workspace state and exit.
+            Ok(true) => {
+                if let Some(ws_name) = &workspace {
+                    save_workspace_state(ws_name, &raw_target, &session, "detached");
+                }
+                break;
+            }
 
             // Network dropped mid-session. `Ok(false)` means try_once
             // previously handshook successfully, so this is a *fresh* drop
             // — reset the disconnect timer, window, and backoff.
             Ok(false) => {
+                // Persist workspace credentials on first confirmed session.
+                if !workspace_saved {
+                    if let Some(ws_name) = &workspace {
+                        save_workspace_state(ws_name, &raw_target, &session, "connected");
+                        workspace_saved = true;
+                    }
+                }
                 let now = Instant::now();
                 disconnect_at = Some(now);
                 reconnect_deadline = Some(now + INTERACTIVE_RECONNECT_WINDOW);
@@ -6318,6 +6434,9 @@ async fn main() -> Result<()> {
                 // ── Retry window exhausted ────────────────────────────────
                 if disconnect_at.take().is_some() {
                     clear_status_line();
+                }
+                if let Some(ws_name) = &workspace {
+                    save_workspace_state(ws_name, &raw_target, &session, "detached");
                 }
 
                 if target.ssh_mode && session.is_none() {
@@ -6366,24 +6485,22 @@ async fn main() -> Result<()> {
                     eprintln!("{}", ssh_fallback_notice());
                     return exec_ssh_shell(&target.ssh_target, target.identity_file.as_deref());
                 }
-                // We previously had a session — reconnect window expired.
-                // Be explicit about what that means instead of just
-                // surfacing the raw anyhow chain: the remote tmux session
-                // is still retained on the server, but client state
-                // (session_id + resume_token) is per-process and lives only
-                // in this binary. Re-running `onyx <target>` opens a fresh
-                // session rather than resuming; true cross-process resume
-                // would require on-disk session state, which isn't built
-                // yet.
+                // Reconnect window expired while a session existed.
                 if session.is_some() {
                     eprintln!("[session] connection lost — reconnect window expired.");
                     eprintln!(
                         "          the remote tmux session is retained on the server for up to 12h."
                     );
-                    eprintln!(
-                        "          re-run `onyx {}` to start a new session.",
-                        raw_target
-                    );
+                    if let Some(ws_name) = &workspace {
+                        eprintln!(
+                            "          resume with: onyx attach {ws_name}"
+                        );
+                    } else {
+                        eprintln!(
+                            "          re-run `onyx {}` to start a new session.",
+                            raw_target
+                        );
+                    }
                 }
                 if !hint.is_empty() {
                     eprintln!("onyx:{hint}");
@@ -6391,8 +6508,32 @@ async fn main() -> Result<()> {
                 return Err(e);
             }
         }
+
+        // Persist workspace credentials after the first confirmed session
+        // (raw_mode enters on first successful shell, so check after Ok(true/false)).
+        if !workspace_saved && raw_mode.is_some() {
+            if let Some(ws_name) = &workspace {
+                save_workspace_state(ws_name, &raw_target, &session, "connected");
+                workspace_saved = true;
+            }
+        }
     }
 
     endpoint.wait_idle().await;
     Ok(())
+}
+
+/// Persist workspace credentials and state to the local store (best-effort).
+fn save_workspace_state(
+    ws_name: &str,
+    host: &str,
+    session: &Option<(String, String)>,
+    state: &str,
+) {
+    let mut store = workspace::WorkspaceStore::load();
+    if let Some((sid, tok)) = session {
+        store.upsert(ws_name, host, sid, tok);
+    }
+    store.set_state(ws_name, state);
+    store.save().ok();
 }

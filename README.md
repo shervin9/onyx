@@ -78,6 +78,26 @@ Use a working directory, extra environment, and timeout:
 onyx exec prod --cwd /srv/app --env RUST_LOG=info --timeout 60s -- cargo test
 ```
 
+## Named Workspaces
+
+Bind a name to a remote session so you can resume it across terminal sessions:
+
+```bash
+# Start a named workspace
+onyx user@host --workspace myserver
+
+# List all workspaces
+onyx ls
+
+# Resume by name (picks up the session from any terminal)
+onyx attach myserver
+```
+
+The session ID and resume token are stored in `~/.onyx/workspaces.json`. If the
+remote tmux session is still alive, `onyx attach` drops you straight back in.
+The workspace `STATE` column in `onyx ls` shows `connected`, `detached`, or
+`unknown`.
+
 ## MCP For Agents
 
 Start the local stdio MCP server:
