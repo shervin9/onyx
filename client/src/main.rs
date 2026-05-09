@@ -81,12 +81,14 @@ set -g automatic-rename-format '#(~/.config/onyx/status.sh window "#{pane_curren
 set -g status-style    'bg=default,fg=colour244'
 set -g status-interval 5
 
-# Left: connection state dot + label + state text. All via tmux built-ins.
-#   green ●  Connected = QUIC attached
-#   amber ●  SSH       = SSH fallback mode
-#   gray  ●  onyx      = detached / server running, no active client
-set -g status-left-length 36
-set -g status-left '#[bg=default] #{?#{==:#{session_attached},0},#[fg=colour240]●  #[fg=colour244]onyx,#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178]●  #[fg=colour246]onyx  #[fg=colour178]SSH,#[fg=colour71]●  #[fg=colour246]onyx  #[fg=colour71]Connected}} '
+# Left: connection state dot + label + state text.
+# ONYX_STATE is written by onyx-server on every client connect/disconnect,
+# so this reflects the live QUIC session state, not just tmux attachment.
+#   green ●  Connected      = QUIC client actively attached
+#   amber ●  Connection lost = QUIC client disconnected (server still running)
+#   amber ●  SSH            = SSH fallback transport
+set -g status-left-length 40
+set -g status-left '#[bg=default] #{?#{==:#{E:ONYX_STATE},disconnected},#[fg=colour214]●  #[fg=colour246]onyx  #[fg=colour214]Connection lost,#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178]●  #[fg=colour246]onyx  #[fg=colour178]SSH,#[fg=colour71]●  #[fg=colour246]onyx  #[fg=colour71]Connected}} '
 
 # Right: path · branch · cmd — dim secondary context, no session hash.
 set -g status-right-length 100
@@ -4424,8 +4426,7 @@ fn bootstrap(
 
     if !status.hash_ok {
         if server_artifact_name(&status.arch).is_none() {
-            return Err(unsupported_remote_arch_error(&status.arch))
-                .map_err(bootstrap_error_with_help);
+            return Err(bootstrap_error_with_help(unsupported_remote_arch_error(&status.arch)));
         }
         let used_prebuilt =
             upload_prebuilt_server(ssh_target, identity, Some(&ssh), &status.arch, &paths)
@@ -4435,8 +4436,9 @@ fn bootstrap(
             if missing_prebuilt_action(dev_remote_build_enabled())
                 == MissingPrebuiltAction::FailFast
             {
-                return Err(missing_prebuilt_server_binary_error(&status.arch))
-                    .map_err(bootstrap_error_with_help);
+                return Err(bootstrap_error_with_help(missing_prebuilt_server_binary_error(
+                    &status.arch,
+                )));
             }
             eprintln!(
                 "[onyx] {ONYX_DEV_REMOTE_BUILD_ENV}=1 enabled; building on remote from source"
@@ -5855,13 +5857,23 @@ async fn try_once(
     };
 
     *session = Some((session_id.clone(), resume_token));
-    if is_resume {
-        eprintln!("[mode] QUIC  (resumed session {session_id})");
+    // Only print transport info on the initial connect.  On reconnects
+    // raw mode is already active, so eprintln would corrupt the terminal
+    // display.  State is conveyed through the tmux status bar instead.
+    if raw_mode.is_none() {
+        if is_resume {
+            eprintln!("[mode] QUIC  (resumed session {session_id})");
+        } else {
+            eprintln!("[mode] QUIC  (session {session_id})");
+        }
+        if mode.low_bandwidth {
+            eprintln!("[mode] low-bandwidth");
+        }
     } else {
-        eprintln!("[mode] QUIC  (session {session_id})");
-    }
-    if mode.low_bandwidth {
-        eprintln!("[mode] low-bandwidth");
+        debug_log(&format!(
+            "session {} (reconnect)",
+            &session_id[..8.min(session_id.len())]
+        ));
     }
 
     // Spawn one TCP listener per --forward spec.  Each listener opens new QUIC

@@ -434,6 +434,29 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+/// Write ONYX_STATE into the tmux session environment and force an immediate
+/// status-bar refresh.  Called on every client connect and disconnect so the
+/// status bar is the single source of truth for connection state.
+///
+/// Both commands are fire-and-forget: errors are silently ignored (tmux may
+/// not be installed, or the session may not exist yet on the very first Hello).
+fn tmux_set_state(session_id: &str, state: &str) {
+    let target = format!("onyx-{session_id}");
+    println!("[session {session_id}] ONYX_STATE → {state}");
+    let _ = std::process::Command::new("tmux")
+        .args(["set-environment", "-t", &target, "ONYX_STATE", state])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    // Force an immediate status-bar redraw so the change is visible without
+    // waiting for the 5-second status-interval tick.
+    let _ = std::process::Command::new("tmux")
+        .args(["refresh-client", "-S"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+}
+
 fn new_job_id() -> Result<String> {
     let mut buf = [0u8; 8];
     SystemRandom::new()
@@ -1823,6 +1846,8 @@ async fn run_session(
         },
     )
     .await?;
+    // Update the tmux status bar to reflect the live connection.
+    tmux_set_state(&session_id, "connected");
 
     // Client → PTY (runs in a separate task so we can drive the output loop here)
     let mut input_task = tokio::spawn(async move {
@@ -1919,6 +1944,7 @@ async fn run_session(
                 println!(
                     "[session {session_id}] detached (retention {hrs}h, reason: {exit_reason})"
                 );
+                tmux_set_state(&session_id, "disconnected");
             } else {
                 println!(
                     "[session {session_id}] epoch {my_epoch} retired ({exit_reason}; current epoch {})",
