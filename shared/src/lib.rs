@@ -205,3 +205,346 @@ pub fn encode(msg: &Message) -> Result<Vec<u8>, bincode::Error> {
 pub fn decode(buf: &[u8]) -> Result<Message, bincode::Error> {
     bincode::deserialize(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip(msg: Message) -> Message {
+        let bytes = encode(&msg).expect("encode failed");
+        decode(&bytes).expect("decode failed")
+    }
+
+    #[test]
+    fn default_port_value() {
+        assert_eq!(DEFAULT_PORT, 7272);
+    }
+
+    #[test]
+    fn decode_garbage_returns_error() {
+        assert!(decode(&[0xFF, 0xFE, 0x00, 0x01]).is_err());
+    }
+
+    #[test]
+    fn hello_round_trip() {
+        let msg = Message::Hello {
+            auth_token: "tok".into(),
+            session_id: "sess-1".into(),
+            resume_token: "".into(),
+            term: Some("xterm-256color".into()),
+            cols: Some(220),
+            rows: Some(50),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::Hello { session_id, cols: Some(220), rows: Some(50), .. }
+            if session_id == "sess-1"
+        ));
+    }
+
+    #[test]
+    fn hello_defaults_for_optional_fields() {
+        // Verify that optional fields can be None without breaking encode/decode.
+        let msg = Message::Hello {
+            auth_token: String::new(),
+            session_id: "s".into(),
+            resume_token: String::new(),
+            term: None,
+            cols: None,
+            rows: None,
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::Hello { term: None, cols: None, rows: None, .. }
+        ));
+    }
+
+    #[test]
+    fn welcome_round_trip() {
+        let msg = Message::Welcome {
+            session_id: "sid".into(),
+            resume_token: "rtok".into(),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::Welcome { resume_token, .. } if resume_token == "rtok"
+        ));
+    }
+
+    #[test]
+    fn resume_round_trip() {
+        let msg = Message::Resume {
+            auth_token: "t".into(),
+            session_id: "s".into(),
+            resume_token: "r".into(),
+            last_seq: 42,
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::Resume { last_seq: 42, .. }
+        ));
+    }
+
+    #[test]
+    fn input_round_trip() {
+        let data = b"ls -la\n".to_vec();
+        let msg = Message::Input { data: data.clone() };
+        assert!(matches!(round_trip(msg), Message::Input { data: d } if d == data));
+    }
+
+    #[test]
+    fn output_round_trip() {
+        let msg = Message::Output { seq: 99, data: vec![1, 2, 3] };
+        assert!(matches!(round_trip(msg), Message::Output { seq: 99, data: d } if d == [1, 2, 3]));
+    }
+
+    #[test]
+    fn resize_round_trip() {
+        let msg = Message::Resize { cols: 80, rows: 24 };
+        assert!(matches!(round_trip(msg), Message::Resize { cols: 80, rows: 24 }));
+    }
+
+    #[test]
+    fn close_round_trip() {
+        let msg = Message::Close { reason: "done".into() };
+        assert!(matches!(round_trip(msg), Message::Close { reason } if reason == "done"));
+    }
+
+    #[test]
+    fn forward_connect_round_trip() {
+        let msg = Message::ForwardConnect { auth_token: String::new(), remote_port: 8080 };
+        assert!(matches!(round_trip(msg), Message::ForwardConnect { remote_port: 8080, .. }));
+    }
+
+    #[test]
+    fn forward_ack_round_trip() {
+        assert!(matches!(round_trip(Message::ForwardAck), Message::ForwardAck));
+    }
+
+    #[test]
+    fn forward_error_round_trip() {
+        let msg = Message::ForwardError { reason: "refused".into() };
+        assert!(matches!(round_trip(msg), Message::ForwardError { reason } if reason == "refused"));
+    }
+
+    #[test]
+    fn proxy_connect_round_trip() {
+        let msg = Message::ProxyConnect {
+            auth_token: String::new(),
+            proxy_session_id: "ps1".into(),
+            target_host: "example.com".into(),
+            target_port: 443,
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ProxyConnect { target_port: 443, target_host, .. } if target_host == "example.com"
+        ));
+    }
+
+    #[test]
+    fn proxy_resume_round_trip() {
+        let msg = Message::ProxyResume {
+            auth_token: String::new(),
+            proxy_session_id: "ps2".into(),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ProxyResume { proxy_session_id, .. } if proxy_session_id == "ps2"
+        ));
+    }
+
+    #[test]
+    fn proxy_session_ready_round_trip() {
+        let msg = Message::ProxySessionReady { proxy_session_id: "ps3".into() };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ProxySessionReady { proxy_session_id } if proxy_session_id == "ps3"
+        ));
+    }
+
+    #[test]
+    fn exec_start_round_trip() {
+        let msg = Message::ExecStart {
+            auth_token: String::new(),
+            command: vec!["cargo".into(), "test".into()],
+            cwd: Some("/home/user".into()),
+            env: vec![("RUST_LOG".into(), "info".into())],
+            timeout_secs: Some(60),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ExecStart { timeout_secs: Some(60), cwd: Some(c), .. } if c == "/home/user"
+        ));
+    }
+
+    #[test]
+    fn exec_attach_round_trip() {
+        let msg = Message::ExecAttach {
+            auth_token: String::new(),
+            job_id: "job-abc".into(),
+            last_seq: 7,
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ExecAttach { job_id, last_seq: 7, .. } if job_id == "job-abc"
+        ));
+    }
+
+    #[test]
+    fn exec_logs_round_trip() {
+        let msg = Message::ExecLogs { auth_token: String::new(), job_id: "jid".into() };
+        assert!(matches!(round_trip(msg), Message::ExecLogs { job_id, .. } if job_id == "jid"));
+    }
+
+    #[test]
+    fn jobs_list_round_trip() {
+        let msg = Message::JobsList { auth_token: String::new() };
+        assert!(matches!(round_trip(msg), Message::JobsList { .. }));
+    }
+
+    #[test]
+    fn exec_started_round_trip() {
+        let msg = Message::ExecStarted { job_id: "j1".into(), started_at_unix: 1_700_000_000 };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ExecStarted { started_at_unix: 1_700_000_000, .. }
+        ));
+    }
+
+    #[test]
+    fn exec_output_round_trip() {
+        let msg = Message::ExecOutput {
+            seq: 5,
+            stream: StdStream::Stderr,
+            data: b"error!".to_vec(),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ExecOutput { seq: 5, stream: StdStream::Stderr, .. }
+        ));
+    }
+
+    #[test]
+    fn exec_gap_round_trip() {
+        let msg = Message::ExecGap { oldest_seq: 3 };
+        assert!(matches!(round_trip(msg), Message::ExecGap { oldest_seq: 3 }));
+    }
+
+    #[test]
+    fn exec_finished_round_trip_zero_exit() {
+        let msg = Message::ExecFinished { exit_code: Some(0), finished_at_unix: 1_700_000_001 };
+        assert!(matches!(
+            round_trip(msg),
+            Message::ExecFinished { exit_code: Some(0), .. }
+        ));
+    }
+
+    #[test]
+    fn exec_finished_round_trip_signal_killed() {
+        // exit_code is None when killed by a signal
+        let msg = Message::ExecFinished { exit_code: None, finished_at_unix: 1_700_000_002 };
+        assert!(matches!(round_trip(msg), Message::ExecFinished { exit_code: None, .. }));
+    }
+
+    #[test]
+    fn jobs_list_response_round_trip() {
+        let jobs = vec![JobSummary {
+            job_id: "j2".into(),
+            command: "echo hi".into(),
+            status: JobStatus::Succeeded,
+            started_at_unix: 100,
+            finished_at_unix: Some(200),
+            exit_code: Some(0),
+            attached: false,
+            buffered_bytes: 42,
+        }];
+        let msg = Message::JobsListResponse { jobs };
+        assert!(matches!(
+            round_trip(msg),
+            Message::JobsListResponse { jobs } if jobs.len() == 1 && jobs[0].job_id == "j2"
+        ));
+    }
+
+    #[test]
+    fn exec_error_round_trip() {
+        let msg = Message::ExecError { reason: "not found".into() };
+        assert!(matches!(round_trip(msg), Message::ExecError { reason } if reason == "not found"));
+    }
+
+    #[test]
+    fn exec_timed_out_round_trip() {
+        assert!(matches!(round_trip(Message::ExecTimedOut), Message::ExecTimedOut));
+    }
+
+    #[test]
+    fn kill_round_trip() {
+        let msg = Message::Kill { auth_token: String::new(), job_id: "kill-me".into() };
+        assert!(matches!(round_trip(msg), Message::Kill { job_id, .. } if job_id == "kill-me"));
+    }
+
+    #[test]
+    fn kill_result_killed_round_trip() {
+        let msg = Message::KillResult {
+            job_id: "k1".into(),
+            killed: true,
+            message: "done".into(),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::KillResult { killed: true, job_id, .. } if job_id == "k1"
+        ));
+    }
+
+    #[test]
+    fn kill_result_not_found_round_trip() {
+        let msg = Message::KillResult {
+            job_id: "k2".into(),
+            killed: false,
+            message: "not found".into(),
+        };
+        assert!(matches!(
+            round_trip(msg),
+            Message::KillResult { killed: false, .. }
+        ));
+    }
+
+    #[test]
+    fn job_status_all_variants_survive_round_trip() {
+        for status in [
+            JobStatus::Running,
+            JobStatus::Detached,
+            JobStatus::Succeeded,
+            JobStatus::Failed,
+            JobStatus::Expired,
+        ] {
+            let job = JobSummary {
+                job_id: "x".into(),
+                command: "x".into(),
+                status,
+                started_at_unix: 0,
+                finished_at_unix: None,
+                exit_code: None,
+                attached: false,
+                buffered_bytes: 0,
+            };
+            let bytes = encode(&Message::JobsListResponse { jobs: vec![job] }).unwrap();
+            if let Message::JobsListResponse { jobs } = decode(&bytes).unwrap() {
+                assert_eq!(jobs[0].status, status);
+            } else {
+                panic!("unexpected variant");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_produces_non_empty_bytes() {
+        let bytes = encode(&Message::ForwardAck).unwrap();
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn same_message_encodes_to_same_bytes() {
+        let msg = || Message::Resize { cols: 80, rows: 24 };
+        assert_eq!(encode(&msg()).unwrap(), encode(&msg()).unwrap());
+    }
+}

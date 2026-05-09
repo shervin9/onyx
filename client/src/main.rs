@@ -81,11 +81,12 @@ set -g automatic-rename-format '#(~/.config/onyx/status.sh window "#{pane_curren
 set -g status-style    'bg=default,fg=colour244'
 set -g status-interval 5
 
-# Left: one state dot + transport label. The label stays small and quiet.
-# Dot color encodes connection state (all via tmux built-ins, no extra scripts):
-#   green = QUIC attached, gold = SSH fallback, gray = detached/idle
-set -g status-left-length 28
-set -g status-left '#[bg=default] #{?#{==:#{session_attached},0},#[fg=colour240],#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178],#[fg=colour71]}}● #[fg=colour246,nobold]onyx #[fg=colour240]#{E:ONYX_MODE} '
+# Left: connection state dot + label + state text. All via tmux built-ins.
+#   green ●  Connected = QUIC attached
+#   amber ●  SSH       = SSH fallback mode
+#   gray  ●  onyx      = detached / server running, no active client
+set -g status-left-length 36
+set -g status-left '#[bg=default] #{?#{==:#{session_attached},0},#[fg=colour240]●  #[fg=colour244]onyx,#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178]●  #[fg=colour246]onyx  #[fg=colour178]SSH,#[fg=colour71]●  #[fg=colour246]onyx  #[fg=colour71]Connected}} '
 
 # Right: path · branch · cmd — dim secondary context, no session hash.
 set -g status-right-length 100
@@ -609,6 +610,12 @@ fn terminal_env_value() -> String {
 
 fn should_show_reconnect_ui(session: &Option<(String, String)>) -> bool {
     session.is_some()
+}
+
+fn debug_log(msg: &str) {
+    if std::env::var_os("ONYX_DEBUG").is_some() {
+        eprintln!("[onyx:debug] {msg}");
+    }
 }
 
 /// Escape sequences emitted on RawMode drop to clean up terminal modes that
@@ -5765,6 +5772,8 @@ async fn try_once(
     if first_connect {
         eprintln!("[onyx] connecting...");
     }
+    let t_connect = Instant::now();
+    debug_log(if session.is_some() { "resuming QUIC handshake" } else { "starting QUIC handshake" });
     let conn = connect_authenticated(
         server_addr,
         endpoint,
@@ -5773,8 +5782,11 @@ async fn try_once(
         INTERACTIVE_HANDSHAKE_TIMEOUT,
     )
     .await?;
+    debug_log(&format!("QUIC handshake: {}ms", t_connect.elapsed().as_millis()));
 
+    let t_stream = Instant::now();
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    debug_log(&format!("stream open: {}ms", t_stream.elapsed().as_millis()));
 
     let is_resume = session.is_some();
     let (local_cols, local_rows) = get_terminal_size();
@@ -5810,11 +5822,14 @@ async fn try_once(
         }
     }
 
+    debug_log("waiting for Welcome");
+    let t_welcome = Instant::now();
     let (session_id, resume_token) = match recv_msg(&mut recv).await? {
         Message::Welcome {
             session_id,
             resume_token,
         } => {
+            debug_log(&format!("session ready: {}ms (total {}ms)", t_welcome.elapsed().as_millis(), t_connect.elapsed().as_millis()));
             // Successful reclaim — clear the throttle flag so a future
             // disconnect episode can print the message once again.
             SESSION_BUSY_LOGGED.store(false, Ordering::Relaxed);
@@ -6003,37 +6018,22 @@ async fn try_once(
 }
 
 // ---------------------------------------------------------------------------
-// Connection-loss banner — mosh-style live overlay
+// Connection status line — calm, native-feeling state indicator
 // ---------------------------------------------------------------------------
 
-/// Draws a single-line status banner directly on the local terminal (stderr),
-/// updating every 250 ms for `wait`.  The line is overwritten in-place, so
-/// it never scrolls the display.  Call clear_banner() before re-entering raw
-/// mode so the tmux redraw is not polluted.
-async fn reconnect_banner(since: Instant, wait: Duration) {
+/// Shows a single, non-animated status line on the local terminal (stderr).
+/// Matches the visual grammar of the tmux status bar: dot · label · state.
+/// Written once per disconnect episode — no elapsed timer, no animation.
+/// Call clear_status_line() before re-entering raw mode.
+fn show_reconnect_status() {
     use std::io::Write;
-    let steps = (wait.as_millis() / 250).max(1) as u32;
-    for _ in 0..steps {
-        let s = since.elapsed().as_secs();
-        let elapsed = if s < 60 {
-            format!("{s}s")
-        } else {
-            format!("{}m {:02}s", s / 60, s % 60)
-        };
-        // \x1b[2K  — erase entire line
-        // \x1b[38;5;214m — amber (256-colour)
-        // \x1b[2m  — dim (for the trailing hint)
-        eprint!(
-            "\r\x1b[2K\x1b[38;5;214m ⚡  onyx — connection lost · {elapsed}  \
-             \x1b[2mreconnecting…\x1b[0m"
-        );
-        std::io::stderr().flush().ok();
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    // amber ● · "onyx  Connection lost" — mirrors the tmux status-left format
+    eprint!("\r\x1b[2K\x1b[38;5;214m●\x1b[0m  onyx  \x1b[38;5;214mConnection lost\x1b[0m");
+    std::io::stderr().flush().ok();
 }
 
-/// Erase the banner line.  Always call this before entering raw terminal mode.
-fn clear_banner() {
+/// Erase the status line before re-entering raw terminal mode.
+fn clear_status_line() {
     use std::io::Write;
     eprint!("\r\x1b[2K");
     std::io::stderr().flush().ok();
@@ -6201,6 +6201,9 @@ async fn main() -> Result<()> {
     // Exponential backoff between reconnect attempts. Resets after every
     // successful reconnect (via try_once returning Ok).
     let mut backoff = INTERACTIVE_BACKOFF_INITIAL;
+    // Whether the "Connection lost" status line is currently visible.
+    // Shown once per disconnect episode; cleared before re-entering raw mode.
+    let mut status_shown = false;
 
     // Enter raw mode only after the first shell stream is established, then
     // keep it for post-ready reconnects. This leaves first-connect progress
@@ -6208,10 +6211,10 @@ async fn main() -> Result<()> {
     let mut raw_mode: Option<RawMode> = None;
 
     loop {
-        // Erase any live banner line before entering raw terminal mode so it
+        // Erase any live status line before entering raw terminal mode so it
         // does not appear as garbage inside the tmux session.
         if disconnect_at.is_some() {
-            clear_banner();
+            clear_status_line();
         }
 
         // After 20 s of failed reconnects, re-run bootstrap via SSH.
@@ -6273,9 +6276,12 @@ async fn main() -> Result<()> {
                 disconnect_at = Some(now);
                 reconnect_deadline = Some(now + INTERACTIVE_RECONNECT_WINDOW);
                 backoff = INTERACTIVE_BACKOFF_INITIAL;
-                // The banner itself waits 2 s before the next reconnect
-                // attempt, which is our first-retry gap.
-                reconnect_banner(now, Duration::from_secs(2)).await;
+                // Show status once for this disconnect episode, then wait
+                // 2 s before the first reconnect attempt.
+                show_reconnect_status();
+                status_shown = true;
+                debug_log("connection dropped — waiting 2s before first retry");
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
 
             Err(e) => {
@@ -6285,12 +6291,13 @@ async fn main() -> Result<()> {
                         // Still within retry window. Before a shell has ever
                         // been ready, keep this as a quiet initial connect
                         // retry instead of showing reconnect/disconnect UI.
-                        if should_show_reconnect_ui(&session) {
-                            let t = *disconnect_at.get_or_insert_with(Instant::now);
-                            reconnect_banner(t, backoff).await;
-                        } else {
-                            tokio::time::sleep(backoff).await;
+                        if should_show_reconnect_ui(&session) && !status_shown {
+                            disconnect_at.get_or_insert_with(Instant::now);
+                            show_reconnect_status();
+                            status_shown = true;
                         }
+                        debug_log(&format!("retry in {}ms (backoff)", backoff.as_millis()));
+                        tokio::time::sleep(backoff).await;
                         backoff = std::cmp::min(backoff * 2, INTERACTIVE_BACKOFF_MAX);
                         continue;
                     }
@@ -6298,7 +6305,7 @@ async fn main() -> Result<()> {
 
                 // ── Retry window exhausted ────────────────────────────────
                 if disconnect_at.take().is_some() {
-                    clear_banner();
+                    clear_status_line();
                 }
 
                 if target.ssh_mode && session.is_none() {
