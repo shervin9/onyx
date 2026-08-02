@@ -104,15 +104,25 @@ remote tmux session is still alive, `onyx attach` drops you straight back in.
 The workspace `STATE` column in `onyx ls` shows `connected`, `detached`, or
 `unknown`.
 
-## Copying Output
+## Copying Output & URLs
 
 In the interactive shell, mouse mode is off by default so your terminal's
 native click-drag selection and copy work as usual. To copy from tmux's
 scroll history instead: press `s` to enter copy-mode, select text, then
 `Enter`/`y` — the selection is copied straight to your local system
 clipboard via OSC 52, whether you're on the QUIC or SSH-fallback transport.
-Requires an OSC-52-capable terminal (iTerm2, Warp, kitty, Alacritty, Windows
-Terminal, VSCode's integrated terminal).
+
+**Grabbing a URL (e.g. an auth link):** press `prefix + u` (`Ctrl-b` then
+`u`). Onyx pulls URLs off the current screen — re-joining wrapped lines so a
+long link stays intact — and copies it to your local clipboard. One URL is
+copied instantly; if several are on screen, a small menu lets you pick. This
+works even inside full-screen tools like Claude Code, needs no mouse, and
+installs nothing extra on the remote.
+
+Both require an OSC-52-capable terminal with clipboard-write allowed —
+iTerm2 (enable *Preferences → General → Selection → "Applications in terminal
+may access the clipboard"*), Warp, kitty, Alacritty, WezTerm, Windows
+Terminal, or VSCode's integrated terminal.
 
 ## Agents & Audit
 

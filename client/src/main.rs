@@ -73,6 +73,13 @@ set -g history-limit 50000
 # Terminal, VSCode's integrated terminal).
 set -g set-clipboard on
 
+# prefix + u — grab a URL off the current screen and copy it to your *local*
+# clipboard (OSC 52). Built to solve "I can't copy the auth link Claude Code
+# printed": it captures the visible pane with wrapped lines re-joined, so long
+# URLs survive intact, works inside full-screen TUIs, and needs no mouse and no
+# plugins. One URL → copied instantly; several → a built-in menu to pick.
+bind-key u run-shell "~/.config/onyx/url.sh '#{pane_id}'"
+
 # Terminal title → "claude · ~/workspace/meviq". Warp's sidebar / tab
 # detection reads this. set-titles fires on window/pane changes, not per
 # tick, so the shell cost is negligible.
@@ -182,6 +189,78 @@ case "$mode" in
     ;;
 esac
 "#;
+
+/// URL picker invoked by `prefix + u`. Grabs URLs from the visible pane and
+/// copies the chosen one to the local system clipboard via OSC 52 (tmux
+/// `set-buffer -w`, honoring `set-clipboard on`). Dependency-free — pure tmux
+/// built-ins + POSIX sh, so it works on any remote without fzf/plugins.
+///
+/// Invoked two ways:
+///   url.sh <pane_id>          → capture, extract, then copy (1 URL) or menu (N)
+///   url.sh <pane_id> <index>  → copy the <index>-th URL from the stashed list
+/// The two-phase design lets the multi-URL menu re-select from a stable list
+/// (written to a temp file) rather than re-capturing a screen that may have
+/// redrawn, and keeps arbitrary URL text out of tmux command strings.
+const ONYX_URL_SH: &str = r##"#!/bin/sh
+# onyx url picker — auto-generated, do not edit (overwritten on update)
+self=$0
+pane=$1
+idx=$2
+# Per-pane stash of the extracted URL list; pane_id like "%3" → "3".
+tmp="${TMPDIR:-/tmp}/onyx-urls-$(printf '%s' "$pane" | tr -cd 'A-Za-z0-9')"
+
+# Phase 2: copy the idx-th URL from the stash (from a menu selection).
+if [ -n "$idx" ]; then
+  u=$(sed -n "${idx}p" "$tmp" 2>/dev/null)
+  if [ -z "$u" ]; then
+    tmux display-message "onyx: that URL is gone"
+    exit 0
+  fi
+  tmux set-buffer -w -- "$u"
+  tmux display-message "onyx: copied $u"
+  exit 0
+fi
+
+# Phase 1: capture the visible pane, -J re-joins wrapped lines so a long URL
+# (e.g. a Datadog auth link) is not split by the terminal's soft wrap.
+tmux capture-pane -p -J -t "$pane" -S -300 2>/dev/null \
+  | grep -oE 'https?://[^[:space:]]+' \
+  | sed 's/[].,;:)>"]*$//' \
+  | awk '!seen[$0]++' > "$tmp"
+
+n=$(grep -c . "$tmp" 2>/dev/null)
+[ -n "$n" ] || n=0
+
+if [ "$n" -eq 0 ]; then
+  tmux display-message "onyx: no URL on screen"
+  rm -f "$tmp"
+  exit 0
+fi
+
+if [ "$n" -eq 1 ]; then
+  u=$(sed -n '1p' "$tmp")
+  tmux set-buffer -w -- "$u"
+  tmux display-message "onyx: copied $u"
+  rm -f "$tmp"
+  exit 0
+fi
+
+# Multiple URLs → a built-in tmux menu (no external picker). Each item calls
+# back into this script with its 1-based index; only the pane id and integer
+# are interpolated into the tmux command, never the URL text itself.
+oldifs=$IFS
+IFS='
+'
+set -- -T "onyx: copy which URL?"
+i=1
+for u in $(cat "$tmp"); do
+  [ "$i" -gt 9 ] && break
+  set -- "$@" "$i  $u" "$i" "run-shell '$self $pane $i'"
+  i=$((i + 1))
+done
+IFS=$oldifs
+tmux display-menu "$@"
+"##;
 
 // ---------------------------------------------------------------------------
 // TLS — TOFU cert pinning (all connection modes)
@@ -3764,13 +3843,17 @@ fn source_hash() -> u64 {
     h
 }
 
-/// FNV-1a hash of the remote config files (tmux.conf + status.sh).
+/// FNV-1a hash of the remote config files (tmux.conf + status.sh + url.sh).
 /// Separate from source_hash so config tweaks don't force a server rebuild.
 fn config_hash() -> u64 {
     const OFFSET: u64 = 14695981039346656037;
     const PRIME: u64 = 1099511628211;
     let mut h = OFFSET;
-    for b in ONYX_TMUX_CONF.bytes().chain(ONYX_STATUS_SH.bytes()) {
+    for b in ONYX_TMUX_CONF
+        .bytes()
+        .chain(ONYX_STATUS_SH.bytes())
+        .chain(ONYX_URL_SH.bytes())
+    {
         h ^= b as u64;
         h = h.wrapping_mul(PRIME);
     }
@@ -3998,6 +4081,13 @@ fn ensure_config_files(
         &format!("{}/status.sh", paths.conf_dir),
         ONYX_STATUS_SH.as_bytes(),
     )?;
+    ssh_upload(
+        target,
+        identity,
+        session,
+        &format!("{}/url.sh", paths.conf_dir),
+        ONYX_URL_SH.as_bytes(),
+    )?;
     let conf_hash_path = format!("{}/.conf-hash", paths.conf_dir);
     ssh_capture(
         target,
@@ -4005,7 +4095,7 @@ fn ensure_config_files(
         session,
         &format!(
             "chmod 700 {conf_dir} && chmod 600 {conf_dir}/tmux.conf && \
-                  chmod 700 {conf_dir}/status.sh && \
+                  chmod 700 {conf_dir}/status.sh && chmod 700 {conf_dir}/url.sh && \
                   printf %s {conf_hash} > {conf_hash_path} && chmod 600 {conf_hash_path}",
             conf_dir = shell_quote(&paths.conf_dir),
             conf_hash = shell_quote(&conf_hash),

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.1
+
+### Added
+- `prefix + u` grabs a URL off the current screen and copies it to your local
+  clipboard via OSC 52 — wrapped lines are re-joined so long links (e.g. auth
+  URLs from Claude Code) stay intact. One URL copies instantly; several show a
+  built-in picker. Dependency-free (no fzf/plugins on the remote).
+
 ## v0.3.0
 
 ### Changed
