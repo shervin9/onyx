@@ -1,8 +1,10 @@
+mod db;
+
 use anyhow::{Context, Result};
 use quinn::{Endpoint, ServerConfig};
 use ring::rand::{SecureRandom, SystemRandom};
 use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-use shared::{JobStatus, JobSummary, Message, StdStream, DEFAULT_PORT};
+use shared::{AuditRecord, JobStatus, JobSummary, Message, SessionSummary, StdStream, DEFAULT_PORT};
 use std::{
     collections::{HashMap, VecDeque},
     ffi::CStr,
@@ -123,9 +125,14 @@ fn random_token() -> Result<String> {
 /// Returns (ServerConfig, fingerprint_string, auth_token).
 /// The fingerprint is also written to server.fingerprint so the client can
 /// read it during bootstrap and perform TOFU cert pinning.
-fn make_server_config() -> Result<(ServerConfig, String, String)> {
+/// The on-disk directory for onyx-server state (cert, auth token, job database).
+fn onyx_data_dir() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
-    let data_dir = std::path::PathBuf::from(&home).join(".local/share/onyx");
+    std::path::PathBuf::from(home).join(".local/share/onyx")
+}
+
+fn make_server_config() -> Result<(ServerConfig, String, String)> {
+    let data_dir = onyx_data_dir();
     std::fs::create_dir_all(&data_dir).context("creating data dir")?;
     #[cfg(unix)]
     {
@@ -336,6 +343,12 @@ struct SessionMeta {
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Set when client disconnects; None while a client is attached.
     detached_at: Option<Instant>,
+    /// Unix-time twin of `detached_at`/session creation, for `onyx`'s
+    /// resume picker (`Message::SessionsList`) — `Instant` can't be sent
+    /// over the wire. Mirrors the `finished_at`/`finished_at_unix` pattern
+    /// used for jobs.
+    started_at_unix: u64,
+    detached_at_unix: Option<u64>,
     /// Forced-takeover channel: when a new Hello/Resume arrives, it
     /// signals this to evict whatever handler currently owns the session
     /// stream. The old handler exits without touching `detached_at` or
@@ -1004,12 +1017,13 @@ async fn job_runner(
                     Err(_) => (None, JobStatus::Failed),
                 };
 
+                let finished_at_unix = unix_now();
                 let mut locked = jobs.lock().unwrap();
-                if let Some(meta) = locked.get_mut(&job_id) {
+                let durable = locked.get_mut(&job_id).map(|meta| {
                     meta.status = status_enum;
                     meta.exit_code = code;
                     meta.finished_at = Some(Instant::now());
-                    meta.finished_at_unix = Some(unix_now());
+                    meta.finished_at_unix = Some(finished_at_unix);
                     // Bump version one last time so attachers wake and see
                     // the finished state.
                     let v = meta.last_seq + 1;
@@ -1017,6 +1031,19 @@ async fn job_runner(
                     println!(
                         "[job {}] finished exit={:?} status={:?}",
                         meta.job_id, meta.exit_code, meta.status
+                    );
+                    (meta.timed_out, meta.last_seq)
+                });
+                drop(locked);
+                // Persist the terminal state outside the jobs lock (best-effort).
+                if let Some((timed_out, last_seq)) = durable {
+                    db::record_finished(
+                        &job_id,
+                        status_enum,
+                        code,
+                        finished_at_unix,
+                        timed_out,
+                        last_seq,
                     );
                 }
                 return;
@@ -1182,6 +1209,7 @@ async fn handle_exec_start(
         );
     }
 
+    db::record_started(&job_id, &command, &command_display, started_at_unix);
     println!("[job {job_id}] started: {command_display}");
 
     // Ack so the client gets the id immediately (important for --detach).
@@ -1515,6 +1543,59 @@ async fn handle_jobs_list(mut send: quinn::SendStream, jobs: Jobs) -> Result<()>
     Ok(())
 }
 
+/// Serve `onyx audit` — durable job history from the SQLite store, newest
+/// first. Independent of the in-memory registry, so it includes jobs evicted
+/// or expired after their in-memory retention window.
+async fn handle_audit_list(mut send: quinn::SendStream, limit: Option<u32>) -> Result<()> {
+    let limit = limit.unwrap_or(100).clamp(1, 1000);
+    let records: Vec<AuditRecord> = db::recent(limit)
+        .into_iter()
+        .map(|r| AuditRecord {
+            job_id: r.job_id,
+            command: r.command_display,
+            status: r.status,
+            started_at_unix: r.started_at_unix,
+            finished_at_unix: r.finished_at_unix,
+            exit_code: r.exit_code,
+            timed_out: r.timed_out,
+        })
+        .collect();
+    send_msg(&mut send, &Message::AuditListResponse { records }).await?;
+    send.finish().ok();
+    Ok(())
+}
+
+/// Detached interactive sessions only — an attached session is in use and
+/// isn't offerable as a resume target — newest-detached-first. Pure so it's
+/// unit-testable without a stream.
+fn detached_summaries(sessions: &HashMap<String, SessionMeta>) -> Vec<SessionSummary> {
+    let mut v: Vec<SessionSummary> = sessions
+        .iter()
+        .filter_map(|(id, meta)| {
+            meta.detached_at_unix.map(|detached_at_unix| SessionSummary {
+                session_id: id.clone(),
+                resume_token: meta.resume_token.clone(),
+                started_at_unix: meta.started_at_unix,
+                detached_at_unix: Some(detached_at_unix),
+            })
+        })
+        .collect();
+    v.sort_by_key(|s| std::cmp::Reverse(s.detached_at_unix));
+    v
+}
+
+/// Serve `Message::SessionsList` — lets a fresh client discover a detached
+/// interactive session to resume instead of always starting a new one.
+async fn handle_sessions_list(mut send: quinn::SendStream, sessions: Sessions) -> Result<()> {
+    let summaries = {
+        let locked = sessions.lock().unwrap();
+        detached_summaries(&locked)
+    };
+    send_msg(&mut send, &Message::SessionsListResponse { sessions: summaries }).await?;
+    send.finish().ok();
+    Ok(())
+}
+
 async fn handle_kill(mut send: quinn::SendStream, jobs: Jobs, job_id: String) -> Result<()> {
     let shutdown_tx = {
         let mut locked = jobs.lock().unwrap();
@@ -1588,6 +1669,8 @@ async fn handle_stream(
         } => handle_exec_attach(send, recv, jobs, job_id, last_seq).await,
         Message::ExecLogs { job_id, .. } => handle_exec_logs(send, recv, jobs, job_id).await,
         Message::JobsList { .. } => handle_jobs_list(send, jobs).await,
+        Message::AuditList { limit, .. } => handle_audit_list(send, limit).await,
+        Message::SessionsList { .. } => handle_sessions_list(send, sessions).await,
         msg => run_session(send, recv, sessions, msg).await,
     }
 }
@@ -1603,6 +1686,8 @@ fn message_auth_token_matches(msg: &Message, expected: &str) -> bool {
         | Message::ExecAttach { auth_token, .. }
         | Message::ExecLogs { auth_token, .. }
         | Message::JobsList { auth_token }
+        | Message::AuditList { auth_token, .. }
+        | Message::SessionsList { auth_token }
         | Message::Kill { auth_token, .. } => auth_token.as_str(),
         _ => "",
     };
@@ -1731,6 +1816,8 @@ async fn run_session(
                     output_tx: out_tx,
                     shutdown_tx: Some(shut_tx),
                     detached_at: None,
+                    started_at_unix: unix_now(),
+                    detached_at_unix: None,
                     // Takeover channel + epoch are installed by the
                     // common attach path below, so Hello and Resume share
                     // one path for takeover semantics.
@@ -1828,6 +1915,7 @@ async fn run_session(
         meta.takeover_tx = Some(takeover_tx);
         meta.attach_epoch = meta.attach_epoch.wrapping_add(1);
         meta.detached_at = None;
+        meta.detached_at_unix = None;
         let epoch = meta.attach_epoch;
 
         (
@@ -1939,6 +2027,7 @@ async fn run_session(
         if let Some(meta) = locked.get_mut(&session_id) {
             if meta.attach_epoch == my_epoch {
                 meta.detached_at = Some(Instant::now());
+                meta.detached_at_unix = Some(unix_now());
                 meta.takeover_tx = None;
                 let hrs = DETACHED_SESSION_TTL.as_secs() / 3600;
                 println!(
@@ -2111,6 +2200,10 @@ async fn main() -> Result<()> {
     };
     let addr: SocketAddr = format!("0.0.0.0:{quic_port}").parse()?;
     let (server_cfg, fingerprint, auth_token) = make_server_config()?;
+    // Durable job records survive restarts (make_server_config ensured the dir).
+    // Best-effort: a failure here disables persistence but never blocks serving.
+    db::init(&onyx_data_dir().join("jobs.db"));
+    db::recover_interrupted(unix_now());
     let auth_token = Arc::new(auth_token);
     let endpoint = Endpoint::server(server_cfg, addr)?;
     let bound = endpoint.local_addr()?;
@@ -2286,6 +2379,8 @@ mod session_takeover_tests {
             output_tx: out_tx,
             shutdown_tx: Some(shut_tx),
             detached_at: Some(Instant::now()),
+            started_at_unix: 0,
+            detached_at_unix: Some(0),
             takeover_tx: None,
             attach_epoch: 0,
         }
@@ -2303,6 +2398,7 @@ mod session_takeover_tests {
         meta.takeover_tx = Some(tx);
         meta.attach_epoch = meta.attach_epoch.wrapping_add(1);
         meta.detached_at = None;
+        meta.detached_at_unix = None;
         (meta.attach_epoch, rx)
     }
 
@@ -2355,6 +2451,48 @@ mod session_takeover_tests {
         assert_eq!(e0, u64::MAX);
         assert_eq!(e1, 0);
         assert_eq!(e2, 1);
+    }
+}
+
+#[cfg(test)]
+mod detached_summaries_tests {
+    //! Pure-logic tests for the resume-picker's session listing.
+    use super::*;
+
+    fn mk(detached_at_unix: Option<u64>, started_at_unix: u64) -> SessionMeta {
+        let (pty_tx, _pty_rx) = mpsc::channel::<PtyCmd>(1);
+        let (out_tx, _out_rx) = broadcast::channel::<(u64, Vec<u8>)>(1);
+        let (shut_tx, _shut_rx) = oneshot::channel::<()>();
+        SessionMeta {
+            resume_token: "tok".into(),
+            pty_cmd_tx: pty_tx,
+            output_tx: out_tx,
+            shutdown_tx: Some(shut_tx),
+            detached_at: detached_at_unix.map(|_| Instant::now()),
+            started_at_unix,
+            detached_at_unix,
+            takeover_tx: None,
+            attach_epoch: 0,
+        }
+    }
+
+    #[test]
+    fn empty_map_yields_empty_list() {
+        assert!(detached_summaries(&HashMap::new()).is_empty());
+    }
+
+    #[test]
+    fn skips_attached_sessions_and_sorts_newest_detached_first() {
+        let mut sessions = HashMap::new();
+        sessions.insert("attached".to_string(), mk(None, 100));
+        sessions.insert("old".to_string(), mk(Some(200), 100));
+        sessions.insert("new".to_string(), mk(Some(300), 150));
+
+        let summaries = detached_summaries(&sessions);
+        let ids: Vec<&str> = summaries.iter().map(|s| s.session_id.as_str()).collect();
+        assert_eq!(ids, ["new", "old"]);
+        assert_eq!(summaries[0].started_at_unix, 150);
+        assert_eq!(summaries[0].detached_at_unix, Some(300));
     }
 }
 

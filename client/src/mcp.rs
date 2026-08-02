@@ -254,6 +254,49 @@ fn tools_schema() -> Value {
                 },
                 "required": ["target", "job_id"]
             }
+        },
+        {
+            "name": "onyx_agent_run",
+            "description": "Run a coding-agent CLI (claude, codex, aider, gemini) headlessly on a remote Onyx target, as a resumable exec job. Only the claude adapter is verified. Use detach:true for long-running prompts (returns job_id immediately; retrieve output with onyx_attach or onyx_logs).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Remote host or SSH config alias"},
+                    "prompt": {"type": "string", "description": "The prompt/task to give the agent"},
+                    "agent": {"type": "string", "enum": ["claude", "codex", "aider", "gemini"], "description": "Which agent CLI to run. Defaults to claude."},
+                    "model": {"type": "string", "description": "Model name to pass through to the agent CLI"},
+                    "yolo": {"type": "boolean", "description": "Skip the agent's permission prompts so it can act fully unattended. Dangerous: the agent can run arbitrary commands on the remote host."},
+                    "detach": {"type": "boolean", "description": "Start job in background; returns job_id. Retrieve output with onyx_attach or onyx_logs."},
+                    "cwd": {"type": "string", "description": "Working directory on the remote host."}
+                },
+                "required": ["target", "prompt"]
+            }
+        },
+        {
+            "name": "onyx_audit",
+            "description": "Read durable job history from a remote Onyx target's store. Unlike onyx_jobs (live, in-memory), these records survive onyx-server restarts.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Remote host or SSH config alias"},
+                    "limit": {"type": "integer", "description": "Max number of records to return, newest first (default 100)."}
+                },
+                "required": ["target"]
+            }
+        },
+        {
+            "name": "onyx_diff",
+            "description": "Run `git diff` on a remote Onyx target's working tree — useful for reviewing what an agent (or anyone) changed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "Remote host or SSH config alias"},
+                    "staged": {"type": "boolean", "description": "Show index-vs-HEAD (staged) changes instead of the working tree."},
+                    "stat": {"type": "boolean", "description": "Show a summary (files changed, insertions/deletions) instead of the full diff."},
+                    "cwd": {"type": "string", "description": "Working directory (git repo) on the remote host."}
+                },
+                "required": ["target"]
+            }
         }
     ])
 }
@@ -269,6 +312,9 @@ async fn call_tool(name: &str, args: &Value, onyx_bin: &PathBuf) -> Result<Value
         "onyx_attach" => attach_tool(args, onyx_bin).await,
         "onyx_logs" => logs_tool(args, onyx_bin).await,
         "onyx_kill" => kill_tool(args, onyx_bin).await,
+        "onyx_agent_run" => agent_run_tool(args, onyx_bin).await,
+        "onyx_audit" => audit_tool(args, onyx_bin).await,
+        "onyx_diff" => diff_tool(args, onyx_bin).await,
         _ => Err(anyhow::anyhow!("unknown tool: {name}")),
     }
 }
@@ -476,6 +522,90 @@ async fn kill_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
     if result["job_id"].is_null() {
         result["job_id"] = json!(job_id);
     }
+    result["diagnostics"] = json!(diagnostics);
+    Ok(result)
+}
+
+async fn agent_run_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
+    let target = require_str(args, "target")?;
+    let prompt = require_str(args, "prompt")?;
+    let agent = args["agent"].as_str().unwrap_or("claude");
+    let detach = args["detach"].as_bool().unwrap_or(false);
+
+    let mut cmd = Command::new(onyx_bin);
+    cmd.args(["agent", "run", target, "--agent", agent, "--json"]);
+    if let Some(model) = args["model"].as_str() {
+        cmd.arg("--model").arg(model);
+    }
+    if args["yolo"].as_bool().unwrap_or(false) {
+        cmd.arg("--yolo");
+    }
+    if detach {
+        cmd.arg("--detach");
+    }
+    if let Some(cwd) = args["cwd"].as_str() {
+        cmd.arg("--cwd").arg(cwd);
+    }
+    cmd.arg("--").arg(prompt);
+
+    let (ndjson, diagnostics) = capture(&mut cmd).await?;
+
+    if detach {
+        let job_id = ndjson
+            .lines()
+            .find_map(|l| {
+                let v: Value = serde_json::from_str(l.trim()).ok()?;
+                if v["type"].as_str() == Some("started") {
+                    Some(v["job_id"].as_str().unwrap_or("").to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default();
+        return Ok(json!({
+            "job_id": job_id,
+            "status": "detached",
+            "hint": "use onyx_attach or onyx_logs to retrieve output",
+            "diagnostics": diagnostics
+        }));
+    }
+
+    let mut result = parse_exec_stream(&ndjson);
+    result["diagnostics"] = json!(diagnostics);
+    Ok(result)
+}
+
+async fn audit_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
+    let target = require_str(args, "target")?;
+    let mut cmd = Command::new(onyx_bin);
+    cmd.args(["audit", target, "--json"]);
+    if let Some(limit) = args["limit"].as_u64() {
+        cmd.arg("--limit").arg(limit.to_string());
+    }
+
+    let (ndjson, diagnostics) = capture(&mut cmd).await?;
+    Ok(json!({
+        "records": parse_audit_ndjson(&ndjson),
+        "diagnostics": diagnostics
+    }))
+}
+
+async fn diff_tool(args: &Value, onyx_bin: &PathBuf) -> Result<Value> {
+    let target = require_str(args, "target")?;
+    let mut cmd = Command::new(onyx_bin);
+    cmd.args(["diff", target, "--json"]);
+    if args["staged"].as_bool().unwrap_or(false) {
+        cmd.arg("--staged");
+    }
+    if args["stat"].as_bool().unwrap_or(false) {
+        cmd.arg("--stat");
+    }
+    if let Some(cwd) = args["cwd"].as_str() {
+        cmd.arg("--cwd").arg(cwd);
+    }
+
+    let (ndjson, diagnostics) = capture(&mut cmd).await?;
+    let mut result = parse_exec_stream(&ndjson);
     result["diagnostics"] = json!(diagnostics);
     Ok(result)
 }
@@ -792,6 +922,30 @@ pub fn parse_jobs_ndjson(ndjson: &str) -> Value {
     json!(jobs)
 }
 
+/// Parse the `{"type":"audit",...}` NDJSON lines emitted by `onyx audit --json`.
+pub fn parse_audit_ndjson(ndjson: &str) -> Value {
+    let records: Vec<Value> = ndjson
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["type"].as_str() == Some("audit"))
+        .map(|v| {
+            json!({
+                "job_id":           v["job_id"],
+                "status":           v["status"],
+                "command":          v["command"],
+                "started_at_unix":  v["started_at_unix"],
+                "finished_at_unix": v["finished_at_unix"],
+                "exit_code":        v["exit_code"],
+                "timed_out":        v["timed_out"]
+            })
+        })
+        .collect();
+
+    json!(records)
+}
+
 // ---------------------------------------------------------------------------
 // Error helpers
 // ---------------------------------------------------------------------------
@@ -1044,6 +1198,30 @@ not json at all
         assert_eq!(r[0]["job_id"], "job_real");
     }
 
+    // -- parse_audit_ndjson ---------------------------------------------------
+
+    #[test]
+    fn audit_ndjson_empty() {
+        assert_eq!(parse_audit_ndjson(""), json!([]));
+    }
+
+    #[test]
+    fn audit_ndjson_multiple_skips_non_audit_lines() {
+        let ndjson = r#"
+{"type":"other","job_id":"x"}
+{"type":"audit","job_id":"job_a","status":"succeeded","command":"claude --print fix","started_at_unix":1000,"finished_at_unix":1005,"exit_code":0,"timed_out":false}
+{"type":"audit","job_id":"job_b","status":"expired","command":"echo hi","started_at_unix":900,"finished_at_unix":null,"exit_code":null,"timed_out":false}
+"#;
+        let r = parse_audit_ndjson(ndjson);
+        let arr = r.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["job_id"], "job_a");
+        assert_eq!(arr[0]["exit_code"], 0);
+        assert_eq!(arr[1]["job_id"], "job_b");
+        assert_eq!(arr[1]["status"], "expired");
+        assert!(arr[1]["exit_code"].is_null());
+    }
+
     // -- error helpers -------------------------------------------------------
 
     #[test]
@@ -1172,13 +1350,16 @@ not json at all
         let req = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
         let resp = handle_message(req, &dummy).await.unwrap();
         let tools = resp["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 5);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"onyx_exec"));
         assert!(names.contains(&"onyx_jobs"));
         assert!(names.contains(&"onyx_attach"));
         assert!(names.contains(&"onyx_logs"));
         assert!(names.contains(&"onyx_kill"));
+        assert!(names.contains(&"onyx_agent_run"));
+        assert!(names.contains(&"onyx_audit"));
+        assert!(names.contains(&"onyx_diff"));
         // Each tool must have inputSchema with required fields
         for tool in tools {
             assert!(tool["inputSchema"]["properties"]["target"].is_object());

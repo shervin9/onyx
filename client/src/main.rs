@@ -5,7 +5,7 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
     DigitallySignedStruct, SignatureScheme,
 };
-use shared::{JobStatus, JobSummary, Message, StdStream, DEFAULT_PORT};
+use shared::{AuditRecord, JobStatus, JobSummary, Message, SessionSummary, StdStream, DEFAULT_PORT};
 use std::{
     collections::HashMap,
     fs,
@@ -24,6 +24,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
+mod agent;
 mod mcp;
 mod workspace;
 
@@ -65,6 +66,13 @@ bind-key -n M-Up copy-mode -u
 bind-key -n M-PageUp copy-mode -u
 set -g history-limit 50000
 
+# Copy in copy-mode ('s' then select then Enter/y) goes to the *local*
+# system clipboard via OSC 52, relayed through tmux and the onyx transport
+# (QUIC or SSH fallback) unchanged. Works even when mouse mode is off, and
+# in any OSC-52-capable terminal (iTerm2, Warp, kitty, Alacritty, Windows
+# Terminal, VSCode's integrated terminal).
+set -g set-clipboard on
+
 # Terminal title → "claude · ~/workspace/meviq". Warp's sidebar / tab
 # detection reads this. set-titles fires on window/pane changes, not per
 # tick, so the shell cost is negligible.
@@ -86,10 +94,10 @@ set -g status-interval 5
 # ONYX_STATE is written by onyx-server on every client connect/disconnect,
 # so this reflects the live QUIC session state, not just tmux attachment.
 #   green ●  Connected      = QUIC client actively attached
-#   amber ●  Connection lost = QUIC client disconnected (server still running)
+#   amber ●  Reconnecting…  = QUIC client disconnected, still retrying (server still running)
 #   amber ●  SSH            = SSH fallback transport
 set -g status-left-length 40
-set -g status-left '#[bg=default] #{?#{==:#{E:ONYX_STATE},disconnected},#[fg=colour214]●  #[fg=colour246]onyx  #[fg=colour214]Connection lost,#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178]●  #[fg=colour246]onyx  #[fg=colour178]SSH,#[fg=colour71]●  #[fg=colour246]onyx  #[fg=colour71]Connected}} '
+set -g status-left '#[bg=default] #{?#{==:#{E:ONYX_STATE},disconnected},#[fg=colour214]●  #[fg=colour246]onyx  #[fg=colour214]Reconnecting…,#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178]●  #[fg=colour246]onyx  #[fg=colour178]SSH,#[fg=colour71]●  #[fg=colour246]onyx  #[fg=colour71]Connected}} '
 
 # Right: path · branch · cmd — dim secondary context, no session hash.
 set -g status-right-length 100
@@ -795,8 +803,11 @@ async fn tcp_proxy_fallback(target_host: &str, target_port: u16) -> Result<()> {
 /// that a truly blocked UDP port fails within ~10 s.
 const INTERACTIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Retry window after first successful session is dropped. Covers laptop
-/// sleep, VPN reconnect, multi-minute transitions.
-const INTERACTIVE_RECONNECT_WINDOW: Duration = Duration::from_secs(600);
+/// sleep, VPN reconnect, multi-minute transitions, and flaky networks —
+/// the server-side tmux session outlives this by far (12h, see
+/// `DETACHED_SESSION_TTL` server-side), so this is purely how long the
+/// *client* keeps retrying before giving up and printing resume instructions.
+const INTERACTIVE_RECONNECT_WINDOW: Duration = Duration::from_secs(1800);
 /// Retry window before the very first successful session. Short because the
 /// common failure here is "server is down / firewalled" and we want to fall
 /// back to SSH quickly rather than hang.
@@ -868,6 +879,8 @@ enum CliMode {
         forwards: Vec<(u16, u16)>,
         port_override: Option<u16>,
         workspace: Option<String>,
+        /// Skip the resume picker and always start a fresh session.
+        new_session: bool,
     },
     /// `onyx ls` — list known named workspaces.
     Ls,
@@ -923,6 +936,40 @@ enum CliMode {
     Doctor {
         raw_target: String,
         identity_file: Option<String>,
+    },
+    /// `onyx audit <target>` — durable job history from the server's store.
+    Audit {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        limit: Option<u32>,
+    },
+    /// `onyx diff <target>` — `git diff` on the remote, for reviewing what an
+    /// agent (or anyone) changed in a working tree.
+    Diff {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        cwd: Option<String>,
+        staged: bool,
+        stat: bool,
+    },
+    /// `onyx agent run <target> --agent <kind> -- <prompt...>` — run a coding
+    /// agent CLI headlessly on the remote as a resumable exec job.
+    AgentRun {
+        raw_target: String,
+        identity_file: Option<String>,
+        no_bootstrap: bool,
+        json: bool,
+        detach: bool,
+        agent_kind: agent::AgentKind,
+        model: Option<String>,
+        prompt: String,
+        cwd: Option<String>,
+        timeout_secs: Option<u64>,
+        yolo: bool,
     },
 }
 
@@ -1036,6 +1083,213 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         return Ok(ParseOutcome::Run(CliMode::Doctor {
             raw_target,
             identity_file: identity,
+        }));
+    }
+
+    // ── audit ───────────────────────────────────────────────────────────
+    //
+    // `onyx audit <target> [--limit N] [--json]` — durable job history.
+    if matches!(it.peek(), Some(cmd) if cmd == "audit") {
+        it.next();
+        let raw_target = it
+            .next()
+            .ok_or_else(|| "audit: missing <target>".to_string())?;
+        let mut identity: Option<String> = None;
+        let mut no_bootstrap = false;
+        let mut json = false;
+        let mut limit: Option<u32> = None;
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--json" => json = true,
+                "--no-bootstrap" => no_bootstrap = true,
+                "-i" => {
+                    identity = Some(
+                        it.next()
+                            .ok_or_else(|| "-i requires an argument".to_string())?,
+                    );
+                }
+                "--limit" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| "--limit requires a number".to_string())?;
+                    limit = Some(
+                        raw.parse::<u32>()
+                            .map_err(|_| format!("--limit: invalid number '{raw}'"))?,
+                    );
+                }
+                other => {
+                    return Err(format!("audit: unexpected argument: {other} (try --help)"));
+                }
+            }
+        }
+        return Ok(ParseOutcome::Run(CliMode::Audit {
+            raw_target,
+            identity_file: identity,
+            no_bootstrap,
+            json,
+            limit,
+        }));
+    }
+
+    // ── diff ────────────────────────────────────────────────────────────
+    //
+    // `onyx diff <target> [--cwd <dir>] [--staged] [--stat] [--json]` —
+    // `git diff` on the remote, for reviewing what changed.
+    if matches!(it.peek(), Some(cmd) if cmd == "diff") {
+        it.next();
+        let raw_target = it
+            .next()
+            .ok_or_else(|| "diff: missing <target>".to_string())?;
+        let mut identity: Option<String> = None;
+        let mut no_bootstrap = false;
+        let mut json = false;
+        let mut cwd: Option<String> = None;
+        let mut staged = false;
+        let mut stat = false;
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--json" => json = true,
+                "--no-bootstrap" => no_bootstrap = true,
+                "--staged" => staged = true,
+                "--stat" => stat = true,
+                "--cwd" => {
+                    cwd = Some(
+                        it.next()
+                            .ok_or_else(|| "--cwd requires an argument".to_string())?,
+                    );
+                }
+                "-i" => {
+                    identity = Some(
+                        it.next()
+                            .ok_or_else(|| "-i requires an argument".to_string())?,
+                    );
+                }
+                other => {
+                    return Err(format!("diff: unexpected argument: {other} (try --help)"));
+                }
+            }
+        }
+        return Ok(ParseOutcome::Run(CliMode::Diff {
+            raw_target,
+            identity_file: identity,
+            no_bootstrap,
+            json,
+            cwd,
+            staged,
+            stat,
+        }));
+    }
+
+    // ── agent run ───────────────────────────────────────────────────────
+    //
+    // `onyx agent run <target> [--agent <kind>] [--model <m>] [flags] -- <prompt...>`
+    // The prompt is the bare-positional tail (or everything after `--`), joined
+    // with spaces. Like `exec`, once the prompt tail starts, later args
+    // (including things that look like flags) are part of the prompt.
+    if matches!(it.peek(), Some(cmd) if cmd == "agent") {
+        it.next();
+        let action = it
+            .next()
+            .ok_or_else(|| "agent: missing action (try `agent run`)".to_string())?;
+        if action != "run" {
+            return Err(format!("agent: unknown action '{action}' (try `agent run`)"));
+        }
+        let raw_target = it
+            .next()
+            .ok_or_else(|| "agent run: missing <target>".to_string())?;
+
+        let mut identity: Option<String> = None;
+        let mut no_bootstrap = false;
+        let mut json = false;
+        let mut detach = false;
+        let mut yolo = false;
+        let mut agent_name: Option<String> = None;
+        let mut model: Option<String> = None;
+        let mut cwd: Option<String> = None;
+        let mut timeout_secs: Option<u64> = None;
+        let mut prompt_parts: Vec<String> = Vec::new();
+        let mut seen_dashdash = false;
+        let mut in_prompt_tail = false;
+
+        while let Some(a) = it.next() {
+            if seen_dashdash || in_prompt_tail {
+                prompt_parts.push(a);
+                continue;
+            }
+            match a.as_str() {
+                "--" => seen_dashdash = true,
+                "--json" => json = true,
+                "--detach" => detach = true,
+                "--no-bootstrap" => no_bootstrap = true,
+                "--yolo" => yolo = true,
+                "-i" => {
+                    identity = Some(
+                        it.next()
+                            .ok_or_else(|| "-i requires an argument".to_string())?,
+                    );
+                }
+                "--agent" => {
+                    agent_name = Some(
+                        it.next()
+                            .ok_or_else(|| "--agent requires a name".to_string())?,
+                    );
+                }
+                "--model" => {
+                    model = Some(
+                        it.next()
+                            .ok_or_else(|| "--model requires an argument".to_string())?,
+                    );
+                }
+                "--cwd" => {
+                    cwd = Some(
+                        it.next()
+                            .ok_or_else(|| "--cwd requires an argument".to_string())?,
+                    );
+                }
+                "--timeout" => {
+                    let raw = it.next().ok_or_else(|| {
+                        "--timeout requires a duration (e.g. 30s, 5m)".to_string()
+                    })?;
+                    timeout_secs = Some(parse_duration_secs(&raw).ok_or_else(|| {
+                        format!("--timeout: invalid duration '{raw}' (use e.g. 30s, 5m, 2h)")
+                    })?);
+                }
+                other if other.starts_with('-') => {
+                    return Err(format!("unknown flag for agent run: {other} (try --help)"));
+                }
+                _ => {
+                    prompt_parts.push(a);
+                    in_prompt_tail = true;
+                }
+            }
+        }
+
+        let agent_kind = match agent_name.as_deref() {
+            None => agent::AgentKind::Claude,
+            Some(name) => agent::AgentKind::parse(name).ok_or_else(|| {
+                format!(
+                    "agent run: unknown agent '{name}' (supported: {})",
+                    agent::SUPPORTED.join(", ")
+                )
+            })?,
+        };
+        let prompt = prompt_parts.join(" ");
+        if prompt.trim().is_empty() {
+            return Err("agent run: missing prompt (e.g. `-- \"fix the failing test\"`)".to_string());
+        }
+
+        return Ok(ParseOutcome::Run(CliMode::AgentRun {
+            raw_target,
+            identity_file: identity,
+            no_bootstrap,
+            json,
+            detach,
+            agent_kind,
+            model,
+            prompt,
+            cwd,
+            timeout_secs,
+            yolo,
         }));
     }
 
@@ -1228,6 +1482,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     let mut forwards: Vec<(u16, u16)> = Vec::new();
     let mut port_override: Option<u16> = None;
     let mut workspace: Option<String> = None;
+    let mut new_session = false;
 
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1262,6 +1517,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                         .ok_or_else(|| "--workspace requires a name".to_string())?,
                 );
             }
+            "--new" => new_session = true,
             // A leading `-` that isn't a known flag is almost always a
             // mistyped flag — reject it clearly rather than silently
             // treating it as a hostname and failing much later in
@@ -1285,6 +1541,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         forwards,
         port_override,
         workspace,
+        new_session,
     }))
 }
 
@@ -1312,9 +1569,12 @@ USAGE
   onyx proxy <host> <port>                          SSH ProxyCommand transport
   onyx exec   <target> [--json] [--detach] [--cwd <dir>] [--env K=V]... [--timeout <dur>] -- <cmd...>
   onyx jobs   <target> [--json]
+  onyx audit  <target> [--limit N] [--json]         durable job history (survives restart)
+  onyx diff   <target> [--cwd <dir>] [--staged] [--stat] [--json]   git diff on the remote
   onyx attach <target> <job-id> [--json]            attach to a background exec job
   onyx logs   <target> <job-id> [--json]
   onyx kill   <target> <job-id> [--json]
+  onyx agent run <target> [--agent <kind>] [--model <m>] [--yolo] [--detach] [--cwd <dir>] [--timeout <dur>] [--json] -- <prompt...>
   onyx doctor <target>                              run diagnostics for a target
   onyx mcp serve                                    stdio MCP server (for AI agents)
   onyx --help | --version
@@ -1345,6 +1605,17 @@ MODES
                   disconnects but NOT onyx-server restart or host
                   reboot (in-memory). Finished jobs are retained for
                   1 hour.
+  Agent           Runs a coding-agent CLI (claude, codex, aider, gemini)
+                  headlessly on the remote as an exec job, so it survives
+                  disconnects and is reattachable. The agent must already
+                  be installed and authenticated on the remote host; Onyx
+                  does not inject credentials. Only the claude adapter is
+                  verified today. Use --yolo to let the agent act without
+                  approval (it can run arbitrary commands on the remote).
+  Diff            `git diff` on the remote (foreground `onyx exec` under the
+                  hood) — review what changed in a working tree, e.g. right
+                  after `onyx agent run`. --staged for index-vs-HEAD,
+                  --stat for a summary.
 
 INSTALL MODEL
   onyx is a local CLI. On first connect to a host it provisions
@@ -1363,6 +1634,7 @@ INSTALL MODEL
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
   -w, --workspace <name>    bind this session to a named workspace
+  --new                     start a fresh session; skip the resume picker
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
   --port <port>             QUIC port on the remote (default: 7272).
                               Also: ONYX_PORT=<port> env var (all modes).
@@ -1437,6 +1709,136 @@ mod parse_args_tests {
     }
 
     #[test]
+    fn agent_run_defaults_to_claude_and_joins_prompt() {
+        let out = parse_args_from(s(&[
+            "agent", "run", "gpu-box", "--", "fix", "the", "failing", "test",
+        ]))
+        .unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::AgentRun {
+                raw_target,
+                agent_kind,
+                prompt,
+                yolo,
+                ..
+            }) => {
+                assert_eq!(raw_target, "gpu-box");
+                assert_eq!(agent_kind, agent::AgentKind::Claude);
+                assert_eq!(prompt, "fix the failing test");
+                assert!(!yolo);
+            }
+            other => panic!("expected AgentRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_run_parses_flags_and_bare_prompt() {
+        let out = parse_args_from(s(&[
+            "agent", "run", "host", "--agent", "claude", "--model", "opus", "--yolo",
+            "--detach", "refactor auth",
+        ]))
+        .unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::AgentRun {
+                agent_kind,
+                model,
+                prompt,
+                detach,
+                yolo,
+                ..
+            }) => {
+                assert_eq!(agent_kind, agent::AgentKind::Claude);
+                assert_eq!(model.as_deref(), Some("opus"));
+                assert_eq!(prompt, "refactor auth");
+                assert!(detach);
+                assert!(yolo);
+            }
+            other => panic!("expected AgentRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_run_rejects_unknown_agent_and_missing_prompt() {
+        assert!(parse_args_from(s(&["agent", "run", "host", "--agent", "nope", "--", "hi"]))
+            .is_err());
+        assert!(parse_args_from(s(&["agent", "run", "host", "--agent", "claude"])).is_err());
+        assert!(parse_args_from(s(&["agent", "frobnicate", "host"])).is_err());
+    }
+
+    #[test]
+    fn audit_parses_target_limit_and_json() {
+        let out = parse_args_from(s(&["audit", "gpu-box", "--limit", "25", "--json"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Audit {
+                raw_target,
+                json,
+                limit,
+                ..
+            }) => {
+                assert_eq!(raw_target, "gpu-box");
+                assert!(json);
+                assert_eq!(limit, Some(25));
+            }
+            other => panic!("expected Audit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn audit_rejects_bad_limit_and_missing_target() {
+        assert!(parse_args_from(s(&["audit", "host", "--limit", "nope"])).is_err());
+        assert!(parse_args_from(s(&["audit"])).is_err());
+    }
+
+    #[test]
+    fn diff_parses_target_flags_and_json() {
+        let out = parse_args_from(s(&[
+            "diff", "gpu-box", "--staged", "--stat", "--cwd", "/srv/app", "--json",
+        ]))
+        .unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Diff {
+                raw_target,
+                json,
+                cwd,
+                staged,
+                stat,
+                ..
+            }) => {
+                assert_eq!(raw_target, "gpu-box");
+                assert!(json);
+                assert_eq!(cwd.as_deref(), Some("/srv/app"));
+                assert!(staged);
+                assert!(stat);
+            }
+            other => panic!("expected Diff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_defaults_have_no_flags_and_requires_target() {
+        let out = parse_args_from(s(&["diff", "host"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Diff {
+                raw_target,
+                json,
+                cwd,
+                staged,
+                stat,
+                ..
+            }) => {
+                assert_eq!(raw_target, "host");
+                assert!(!json);
+                assert_eq!(cwd, None);
+                assert!(!staged);
+                assert!(!stat);
+            }
+            other => panic!("expected Diff, got {other:?}"),
+        }
+        assert!(parse_args_from(s(&["diff"])).is_err());
+        assert!(parse_args_from(s(&["diff", "host", "--nope"])).is_err());
+    }
+
+    #[test]
     fn help_flag_long_and_short() {
         assert!(matches!(
             parse_args_from(s(&["--help"])).unwrap(),
@@ -1479,13 +1881,26 @@ mod parse_args_tests {
                 no_bootstrap,
                 no_fallback,
                 low_bandwidth,
+                new_session,
                 ..
             }) => {
                 assert!(no_bootstrap);
                 assert!(no_fallback);
                 assert!(!low_bandwidth);
+                assert!(!new_session);
             }
             _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn new_flag_sets_new_session() {
+        let out = parse_args_from(s(&["--new", "host"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Interactive { new_session, .. }) => {
+                assert!(new_session);
+            }
+            _ => panic!("expected Interactive"),
         }
     }
 
@@ -1850,9 +2265,15 @@ mod parse_args_tests {
     }
 
     #[test]
-    fn attach_requires_job_id() {
-        let err = parse_args_from(s(&["attach", "host"])).unwrap_err();
-        assert!(err.contains("missing <job-id>"), "err was: {err}");
+    fn attach_one_arg_is_workspace_two_args_is_job() {
+        // Single-arg `attach <name>` resumes a named workspace (see named
+        // workspaces feature); two-arg `attach <target> <job-id>` attaches an
+        // exec job.
+        let out = parse_args_from(s(&["attach", "host"])).unwrap();
+        assert!(matches!(
+            out,
+            ParseOutcome::Run(CliMode::AttachWorkspace { name, .. }) if name == "host"
+        ));
 
         let out = parse_args_from(s(&["attach", "host", "job_abc", "--json"])).unwrap();
         match out {
@@ -2316,6 +2737,20 @@ mod reliability_tests {
         let truncated = truncate_display(&long, 10);
         assert_eq!(truncated.chars().count(), 10);
         assert!(truncated.ends_with('…'));
+    }
+
+    #[test]
+    fn parse_session_pick_handles_all_inputs() {
+        assert_eq!(parse_session_pick("", 3), SessionPick::MostRecent);
+        assert_eq!(parse_session_pick("  \n", 3), SessionPick::MostRecent);
+        assert_eq!(parse_session_pick("2", 3), SessionPick::Index(1));
+        assert_eq!(parse_session_pick("1", 3), SessionPick::Index(0));
+        assert_eq!(parse_session_pick("n", 3), SessionPick::Fresh);
+        assert_eq!(parse_session_pick("N", 3), SessionPick::Fresh);
+        // Out of range and garbage both fall back to Fresh, never panic.
+        assert_eq!(parse_session_pick("9", 3), SessionPick::Fresh);
+        assert_eq!(parse_session_pick("0", 3), SessionPick::Fresh);
+        assert_eq!(parse_session_pick("xyz", 3), SessionPick::Fresh);
     }
 
     // ───────── exec auto-resume classifiers + tuning ─────────
@@ -5410,7 +5845,104 @@ fn exec_reason_is_busy(reason: &str) -> bool {
     reason.to_ascii_lowercase().contains("already attached")
 }
 
+/// Run a coding-agent CLI headlessly on the remote, as a resumable exec job.
+///
+/// This is a thin wrapper over [`run_exec_mode`]: the agent adapter turns the
+/// request into a concrete argv, and the existing exec machinery owns the
+/// process lifecycle, output buffering, detach/attach, and resume-on-drop.
 #[allow(clippy::too_many_arguments)]
+async fn run_agent_run_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    detach: bool,
+    agent_kind: agent::AgentKind,
+    model: Option<String>,
+    prompt: String,
+    cwd: Option<String>,
+    timeout_secs: Option<u64>,
+    yolo: bool,
+) -> Result<()> {
+    let command = agent::build_command(&agent::AgentRequest {
+        kind: agent_kind,
+        prompt: &prompt,
+        model: model.as_deref(),
+        json,
+        yolo,
+    });
+
+    // Human-mode preamble. In --json mode we stay silent so stdout is a clean
+    // event stream.
+    if !json {
+        eprintln!(
+            "onyx: running {} agent on {raw_target}",
+            agent_kind.as_str()
+        );
+        if !agent_kind.verified() {
+            eprintln!(
+                "onyx: warning: the '{}' adapter is best-effort and unverified; \
+                 its flags may not match the installed CLI",
+                agent_kind.as_str()
+            );
+        }
+        if yolo {
+            eprintln!(
+                "onyx: warning: --yolo lets the agent act without approval on {raw_target}"
+            );
+        }
+    }
+
+    // The agent reads its own credentials on the remote host (e.g. the
+    // remote's configured Claude/Codex auth). Onyx does not inject secrets.
+    run_exec_mode(
+        raw_target,
+        identity_file,
+        no_bootstrap,
+        json,
+        detach,
+        command,
+        cwd,
+        Vec::new(),
+        timeout_secs,
+    )
+    .await
+}
+
+/// Run `git diff` on the remote, for reviewing what changed in a working
+/// tree (e.g. right after an `onyx agent run`). Thin wrapper over
+/// [`run_exec_mode`], same pattern as `run_agent_run_mode`. Foreground only —
+/// a diff is fast, no need for detach.
+async fn run_diff_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    cwd: Option<String>,
+    staged: bool,
+    stat: bool,
+) -> Result<()> {
+    let mut command = vec!["git".to_string(), "diff".to_string()];
+    if staged {
+        command.push("--staged".to_string());
+    }
+    if stat {
+        command.push("--stat".to_string());
+    }
+    run_exec_mode(
+        raw_target,
+        identity_file,
+        no_bootstrap,
+        json,
+        false,
+        command,
+        cwd,
+        Vec::new(),
+        None,
+    )
+    .await
+}
+
 async fn run_exec_mode(
     raw_target: String,
     identity_file: Option<String>,
@@ -5741,6 +6273,112 @@ fn print_jobs_json(jobs: &[JobSummary]) {
     }
 }
 
+async fn run_audit_mode(
+    raw_target: String,
+    identity_file: Option<String>,
+    no_bootstrap: bool,
+    json: bool,
+    limit: Option<u32>,
+) -> Result<()> {
+    let PreparedExecTarget {
+        endpoint,
+        server_addr,
+        host_port,
+        capture,
+        auth_token,
+        ..
+    } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
+    let conn = connect_authenticated(
+        server_addr,
+        &endpoint,
+        &host_port,
+        &capture,
+        INTERACTIVE_HANDSHAKE_TIMEOUT,
+    )
+    .await?;
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    send_msg(&mut send, &Message::AuditList { auth_token, limit }).await?;
+    let msg = recv_msg(&mut recv).await?;
+    conn.close(0u32.into(), b"bye");
+    endpoint.wait_idle().await;
+
+    match msg {
+        Message::AuditListResponse { records } => {
+            if json {
+                print_audit_json(&records);
+            } else {
+                print_audit_table(&records);
+            }
+            Ok(())
+        }
+        Message::ExecError { reason } => {
+            if json {
+                emit_error_json(&reason);
+            } else {
+                eprintln!("onyx: {reason}");
+            }
+            Err(anyhow::anyhow!("{reason}"))
+        }
+        other => anyhow::bail!("unexpected audit response: {other:?}"),
+    }
+}
+
+fn print_audit_table(records: &[AuditRecord]) {
+    if records.is_empty() {
+        println!("no job history (durable store empty or disabled)");
+        return;
+    }
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    println!(
+        "{:<24}  {:<10}  {:<10}  {:<7}  COMMAND",
+        "JOB ID", "STATUS", "STARTED", "EXIT"
+    );
+    for r in records {
+        let exit = match r.exit_code {
+            Some(c) => c.to_string(),
+            None if r.timed_out => "t/o".to_string(),
+            None => "-".to_string(),
+        };
+        println!(
+            "{:<24}  {:<10}  {:<10}  {:<7}  {}",
+            truncate_display(&r.job_id, 24),
+            truncate_display(&r.status, 10),
+            format_relative_time(now_unix, r.started_at_unix),
+            exit,
+            truncate_display(&r.command, 60),
+        );
+    }
+}
+
+fn print_audit_json(records: &[AuditRecord]) {
+    for r in records {
+        let finished = match r.finished_at_unix {
+            Some(v) => v.to_string(),
+            None => "null".to_string(),
+        };
+        let exit = match r.exit_code {
+            Some(c) => c.to_string(),
+            None => "null".to_string(),
+        };
+        println!(
+            "{{\"type\":\"audit\",\"job_id\":{},\"status\":{},\"command\":{},\
+             \"started_at_unix\":{},\"finished_at_unix\":{},\"exit_code\":{},\
+             \"timed_out\":{}}}",
+            jq(&r.job_id),
+            jq(&r.status),
+            jq(&r.command),
+            r.started_at_unix,
+            finished,
+            exit,
+            r.timed_out,
+        );
+    }
+}
+
 async fn run_jobs_mode(
     raw_target: String,
     identity_file: Option<String>,
@@ -5791,6 +6429,121 @@ async fn run_jobs_mode(
 }
 
 // ---------------------------------------------------------------------------
+// Resume picker — offer detached sessions on a fresh interactive connect
+// ---------------------------------------------------------------------------
+
+/// A user's choice at the multi-session prompt.
+#[derive(Debug, PartialEq)]
+enum SessionPick {
+    /// Blank / Enter — resume the most recent (index 0).
+    MostRecent,
+    /// A 1-based selection, stored 0-based.
+    Index(usize),
+    /// "n" or anything unrecognized — start a fresh session.
+    Fresh,
+}
+
+/// Parse one line of picker input against `count` offered sessions. Pure so it
+/// can be unit-tested. Out-of-range numbers and garbage both fall back to
+/// `Fresh` rather than erroring, so the prompt never traps the user.
+fn parse_session_pick(input: &str, count: usize) -> SessionPick {
+    let t = input.trim();
+    if t.is_empty() {
+        return SessionPick::MostRecent;
+    }
+    if t.eq_ignore_ascii_case("n") {
+        return SessionPick::Fresh;
+    }
+    match t.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= count => SessionPick::Index(n - 1),
+        _ => SessionPick::Fresh,
+    }
+}
+
+/// Ask the server for detached sessions and, if any exist, let the user pick
+/// one to resume. Returns Some((session_id, resume_token)) to resume, or None
+/// to start fresh. Best-effort: any transport/parse error → None (fresh
+/// session), so the picker never blocks a connection from proceeding.
+async fn pick_session(
+    conn: &quinn::Connection,
+    auth_token: &str,
+) -> Option<(String, String)> {
+    let sessions = query_sessions(conn, auth_token).await.ok()?;
+    if sessions.is_empty() {
+        return None;
+    }
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    if sessions.len() == 1 {
+        let s = &sessions[0];
+        let idle = s
+            .detached_at_unix
+            .map(|d| format_relative_time(now_unix, d))
+            .unwrap_or_else(|| "recently".into());
+        eprintln!(
+            "[onyx] found a detached session (idle {idle}) — resuming it. Use --new to start fresh."
+        );
+        return Some((s.session_id.clone(), s.resume_token.clone()));
+    }
+
+    eprintln!("[onyx] {} detached sessions on this host:", sessions.len());
+    for (i, s) in sessions.iter().enumerate() {
+        let idle = s
+            .detached_at_unix
+            .map(|d| format_relative_time(now_unix, d))
+            .unwrap_or_else(|| "recently".into());
+        eprintln!(
+            "  {}) {}  idle {idle}",
+            i + 1,
+            truncate_display(&s.session_id, 12)
+        );
+    }
+    eprint!("Resume which? [Enter = most recent, number, or 'n' for new] ");
+    use std::io::Write;
+    std::io::stderr().flush().ok();
+
+    let mut line = String::new();
+    if std::io::stdin().read_line(&mut line).is_err() {
+        return None;
+    }
+    match parse_session_pick(&line, sessions.len()) {
+        SessionPick::MostRecent => {
+            let s = &sessions[0];
+            Some((s.session_id.clone(), s.resume_token.clone()))
+        }
+        SessionPick::Index(i) => {
+            let s = &sessions[i];
+            Some((s.session_id.clone(), s.resume_token.clone()))
+        }
+        SessionPick::Fresh => None,
+    }
+}
+
+/// One request/response on its own stream: SessionsList → SessionsListResponse.
+async fn query_sessions(
+    conn: &quinn::Connection,
+    auth_token: &str,
+) -> Result<Vec<SessionSummary>> {
+    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    send_msg(
+        &mut send,
+        &Message::SessionsList {
+            auth_token: auth_token.to_string(),
+        },
+    )
+    .await?;
+    send.finish().ok();
+    match recv_msg(&mut recv).await? {
+        Message::SessionsListResponse { sessions } => Ok(sessions),
+        other => anyhow::bail!("unexpected sessions response: {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Single connection attempt + I/O loop
 // ---------------------------------------------------------------------------
 
@@ -5805,6 +6558,7 @@ async fn try_once(
     forwards: &[(u16, u16)],
     mode: BandwidthMode,
     raw_mode: &mut Option<RawMode>,
+    allow_picker: bool,
 ) -> Result<bool> {
     let first_connect = session.is_none();
     if first_connect {
@@ -5821,6 +6575,17 @@ async fn try_once(
     )
     .await?;
     debug_log(&format!("QUIC handshake: {}ms", t_connect.elapsed().as_millis()));
+
+    // On a genuinely fresh connect, ask the server for detached sessions and
+    // let the user resume one instead of always starting a new tmux session.
+    // Runs once per process (only when session is still None); on any later
+    // reconnect `first_connect` is false so this is skipped. Uses its own
+    // short-lived stream on the already-open connection — no extra handshake.
+    if first_connect && allow_picker {
+        if let Some(picked) = pick_session(&conn, auth_token).await {
+            *session = Some(picked);
+        }
+    }
 
     let t_stream = Instant::now();
     let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
@@ -6075,8 +6840,12 @@ async fn try_once(
 /// Call clear_status_line() before re-entering raw mode.
 fn show_reconnect_status() {
     use std::io::Write;
-    // amber ● · "onyx  Connection lost" — mirrors the tmux status-left format
-    eprint!("\r\x1b[2K\x1b[38;5;214m●\x1b[0m  onyx  \x1b[38;5;214mConnection lost\x1b[0m");
+    // amber ● · "onyx  Reconnecting…" — says Onyx is actively retrying and
+    // for how long, rather than a bare "Connection lost" that reads as final.
+    eprint!(
+        "\r\x1b[2K\x1b[38;5;214m●\x1b[0m  onyx  \x1b[38;5;214mReconnecting… (retrying up to {} min)\x1b[0m",
+        INTERACTIVE_RECONNECT_WINDOW.as_secs() / 60
+    );
     std::io::stderr().flush().ok();
 }
 
@@ -6160,6 +6929,53 @@ async fn main() -> Result<()> {
             raw_target,
             identity_file,
         } => return run_doctor_mode(raw_target, identity_file).await,
+        CliMode::Audit {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            limit,
+        } => return run_audit_mode(raw_target, identity_file, no_bootstrap, json, limit).await,
+        CliMode::Diff {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            cwd,
+            staged,
+            stat,
+        } => {
+            return run_diff_mode(raw_target, identity_file, no_bootstrap, json, cwd, staged, stat)
+                .await
+        }
+        CliMode::AgentRun {
+            raw_target,
+            identity_file,
+            no_bootstrap,
+            json,
+            detach,
+            agent_kind,
+            model,
+            prompt,
+            cwd,
+            timeout_secs,
+            yolo,
+        } => {
+            return run_agent_run_mode(
+                raw_target,
+                identity_file,
+                no_bootstrap,
+                json,
+                detach,
+                agent_kind,
+                model,
+                prompt,
+                cwd,
+                timeout_secs,
+                yolo,
+            )
+            .await
+        }
         CliMode::Ls => return run_ls_mode(),
         CliMode::AttachWorkspace { name, identity_file } => {
             return run_attach_workspace_mode(name, identity_file).await;
@@ -6173,6 +6989,7 @@ async fn main() -> Result<()> {
             forwards,
             port_override,
             workspace,
+            new_session,
         } => {
             let bandwidth_mode = if low_bandwidth {
                 BandwidthMode::low_bandwidth()
@@ -6189,6 +7006,7 @@ async fn main() -> Result<()> {
                 port_override,
                 workspace,
                 None,
+                new_session,
             )
             .await;
         }
@@ -6226,6 +7044,7 @@ async fn run_attach_workspace_mode(name: String, identity_file: Option<String>) 
         None,
         Some(name),
         initial_session,
+        false,
     )
     .await
 }
@@ -6245,6 +7064,7 @@ async fn run_interactive_session(
     port_override: Option<u16>,
     workspace: Option<String>,
     initial_session: Option<(String, String)>,
+    new_session: bool,
 ) -> Result<()> {
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
@@ -6301,6 +7121,11 @@ async fn run_interactive_session(
 
     // Pre-seed session from workspace store (cross-process resume).
     let mut session: Option<(String, String)> = initial_session;
+    // Offer the resume picker only on a genuinely fresh, interactive connect:
+    // not when a workspace already pinned a session, not with --new, and not
+    // when stdin isn't a tty (scripts / pipes must never block on a prompt).
+    let allow_picker =
+        session.is_none() && !new_session && std::io::stdin().is_terminal();
     let mut reconnect_deadline: Option<Instant> = if target.ssh_mode {
         Some(Instant::now() + INTERACTIVE_INITIAL_CONNECT_WINDOW)
     } else {
@@ -6378,6 +7203,7 @@ async fn run_interactive_session(
             &forwards,
             bandwidth_mode,
             &mut raw_mode,
+            allow_picker,
         )
         .await
         {
@@ -6497,7 +7323,8 @@ async fn run_interactive_session(
                         );
                     } else {
                         eprintln!(
-                            "          re-run `onyx {}` to start a new session.",
+                            "          re-run `onyx {}` — it will offer to resume this \
+                             session automatically. Use --new to start fresh instead.",
                             raw_target
                         );
                     }

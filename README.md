@@ -51,6 +51,12 @@ Interactive shell:
 onyx user@host
 ```
 
+If you reconnect to a host where you have a detached session still alive on
+the server, Onyx offers to resume it — it reattaches automatically when
+there's just one, or shows a numbered picker when there are several. Pass
+`--new` to skip that and always start a fresh session. On a dropped
+connection, the client keeps retrying the same session for up to 30 minutes.
+
 Run a remote command:
 
 ```bash
@@ -98,6 +104,43 @@ remote tmux session is still alive, `onyx attach` drops you straight back in.
 The workspace `STATE` column in `onyx ls` shows `connected`, `detached`, or
 `unknown`.
 
+## Copying Output
+
+In the interactive shell, mouse mode is off by default so your terminal's
+native click-drag selection and copy work as usual. To copy from tmux's
+scroll history instead: press `s` to enter copy-mode, select text, then
+`Enter`/`y` — the selection is copied straight to your local system
+clipboard via OSC 52, whether you're on the QUIC or SSH-fallback transport.
+Requires an OSC-52-capable terminal (iTerm2, Warp, kitty, Alacritty, Windows
+Terminal, VSCode's integrated terminal).
+
+## Agents & Audit
+
+Run a coding-agent CLI headlessly on a remote host, as a resumable job:
+
+```bash
+onyx agent run gpu-box --agent claude -- "fix the failing test"
+```
+
+Only the `claude` adapter is verified; `codex`/`aider`/`gemini` are
+best-effort. The agent must already be installed and authenticated on the
+remote — Onyx does not inject credentials. Add `--yolo` to skip permission
+prompts (dangerous: the agent can then run arbitrary commands unattended).
+
+Review what an agent (or anyone) changed:
+
+```bash
+onyx diff gpu-box
+onyx diff gpu-box --stat
+```
+
+Durable job history, independent of the in-memory job registry, survives
+`onyx-server` restarts:
+
+```bash
+onyx audit gpu-box --limit 25
+```
+
 ## MCP For Agents
 
 Start the local stdio MCP server:
@@ -113,6 +156,9 @@ Available tools:
 - `onyx_attach`
 - `onyx_logs`
 - `onyx_kill`
+- `onyx_agent_run`
+- `onyx_audit`
+- `onyx_diff`
 
 Example tool call:
 
@@ -161,8 +207,11 @@ See [SECURITY.md](SECURITY.md) for the full trust model and reporting policy.
 
 - Shell persistence is tmux-backed. Without tmux, Onyx falls back to a basic
   shell mode.
-- Jobs and shell metadata are in-memory on `onyx-server`; they do not survive a
-  server process restart or host reboot.
+- Live job state and output buffers are in-memory on `onyx-server`; they do
+  not survive a server process restart or host reboot. Job lifecycle history
+  (`onyx audit`) is persisted separately and does survive restarts, but a
+  running job is always marked `expired` on the next boot since its child
+  process is gone.
 - Release binaries are checksumed but not yet signed or attested.
 - Direct `--no-bootstrap` usage requires `ONYX_AUTH_TOKEN` because bootstrap is
   what reads the remote server auth token automatically.

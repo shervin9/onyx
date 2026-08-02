@@ -45,6 +45,35 @@ pub struct JobSummary {
     pub buffered_bytes: u64,
 }
 
+/// One row in `onyx audit <target>` — a durable job record from the server's
+/// SQLite store. Unlike `JobSummary` (live, in-memory) these survive restarts
+/// and outlive the in-memory retention window. `status` is the persisted
+/// string (e.g. "running", "succeeded", "failed", "expired").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditRecord {
+    pub job_id: String,
+    /// Reconstructed command line for display — the argv joined with spaces.
+    pub command: String,
+    pub status: String,
+    pub started_at_unix: u64,
+    pub finished_at_unix: Option<u64>,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+}
+
+/// One detached interactive session on the server, as returned by
+/// `Message::SessionsList` — lets a fresh client discover and resume a prior
+/// session instead of always starting a new tmux session on connect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub resume_token: String,
+    pub started_at_unix: u64,
+    /// None means the session is currently attached (should not normally
+    /// appear here — the server only lists detached sessions).
+    pub detached_at_unix: Option<u64>,
+}
+
 /// All messages exchanged between client and server over QUIC streams.
 /// Each stream carries exactly one request/response pair (Step 1).
 /// Later steps will extend this to a continuous bidirectional stream.
@@ -80,6 +109,14 @@ pub enum Message {
         resume_token: String,
         last_seq: u64,
     },
+    /// Client → Server: list detached interactive sessions, for the client's
+    /// resume picker on a fresh connect (no pinned session/workspace yet).
+    SessionsList {
+        #[serde(default)]
+        auth_token: String,
+    },
+    /// Server → Client: response to SessionsList, newest-detached-first.
+    SessionsListResponse { sessions: Vec<SessionSummary> },
     /// Client → Server: raw PTY input bytes.
     Input { data: Vec<u8> },
     /// Server → Client: raw PTY output bytes, sequenced for gap-free resume.
@@ -178,6 +215,15 @@ pub enum Message {
     },
     /// Server → Client: response to JobsList.
     JobsListResponse { jobs: Vec<JobSummary> },
+    /// Client → Server: read persisted job history (durable audit log).
+    AuditList {
+        #[serde(default)]
+        auth_token: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// Server → Client: response to AuditList, newest first.
+    AuditListResponse { records: Vec<AuditRecord> },
     /// Server → Client: exec-layer error (job not found, spawn failed, ...).
     ExecError { reason: String },
     /// Server → Client: job was killed by the server-side timeout.
@@ -462,6 +508,56 @@ mod tests {
         assert!(matches!(
             round_trip(msg),
             Message::JobsListResponse { jobs } if jobs.len() == 1 && jobs[0].job_id == "j2"
+        ));
+    }
+
+    #[test]
+    fn sessions_list_round_trip() {
+        let msg = Message::SessionsList { auth_token: "tok".into() };
+        assert!(matches!(round_trip(msg), Message::SessionsList { .. }));
+    }
+
+    #[test]
+    fn sessions_list_response_round_trip() {
+        let sessions = vec![SessionSummary {
+            session_id: "s1".into(),
+            resume_token: "rt".into(),
+            started_at_unix: 100,
+            detached_at_unix: Some(200),
+        }];
+        let msg = Message::SessionsListResponse { sessions };
+        assert!(matches!(
+            round_trip(msg),
+            Message::SessionsListResponse { sessions }
+                if sessions.len() == 1 && sessions[0].session_id == "s1"
+        ));
+    }
+
+    #[test]
+    fn audit_list_round_trip() {
+        let msg = Message::AuditList { auth_token: "tok".into(), limit: Some(50) };
+        assert!(matches!(
+            round_trip(msg),
+            Message::AuditList { limit: Some(50), .. }
+        ));
+    }
+
+    #[test]
+    fn audit_list_response_round_trip() {
+        let records = vec![AuditRecord {
+            job_id: "j9".into(),
+            command: "claude -p fix".into(),
+            status: "expired".into(),
+            started_at_unix: 100,
+            finished_at_unix: None,
+            exit_code: None,
+            timed_out: false,
+        }];
+        let msg = Message::AuditListResponse { records };
+        assert!(matches!(
+            round_trip(msg),
+            Message::AuditListResponse { records }
+                if records.len() == 1 && records[0].status == "expired"
         ));
     }
 
