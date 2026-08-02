@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.3.2
+
+### Added
+- `--no-tmux` (or `ONYX_NO_TMUX=1`): run a plain login shell instead of tmux,
+  so the local terminal's own scrollback, selection, and copy work natively —
+  for terminals without OSC 52 clipboard support (e.g. macOS Terminal.app).
+  Keeps onyx's QUIC reconnect; trades away tmux persistence and the status bar.
+
 ## v0.3.1
 
 ### Added

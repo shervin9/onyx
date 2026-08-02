@@ -1734,6 +1734,7 @@ async fn run_session(
             term,
             cols,
             rows,
+            no_tmux,
             ..
         } => {
             let (master_raw, slave_raw) = open_pty().context("open_pty")?;
@@ -1748,23 +1749,30 @@ async fn run_session(
             // Launch tmux with onyx's config (uploaded by bootstrap client).
             // Falls back to a bare minimal config if the file isn't there yet
             // (e.g. direct-mode connections that skipped bootstrap).
-            let tmux_cmd = format!(
-                "if command -v tmux >/dev/null 2>&1; then \
-                     conf=~/.config/onyx/tmux.conf; \
-                 if [ ! -f \"$conf\" ]; then \
-                         mkdir -p ~/.config/onyx; \
-                         printf 'set -g mouse on\\nset -g history-limit 50000\\nset -g status-style bg=colour234,fg=colour240\\nset -g pane-border-style fg=colour236\\nset -g pane-active-border-style fg=colour240\\n' > \"$conf\"; \
-                     fi; \
-                     tmux -f \"$conf\" start-server \\; source-file \"$conf\" >/dev/null 2>&1 || true; \
-                     tmux -f \"$conf\" new-session -A -s \"onyx-{session_id}\" -e ONYX_MODE=quic; \
-                 else \
-                     echo '[onyx] tmux not found — running in basic mode (no persistent sessions)'; \
-                     echo '[onyx] install tmux for full experience: sudo apt install tmux'; \
-                     exec \"$ONYX_LOGIN_SHELL\" -l; \
-                 fi"
-            );
+            // When the client asks for --no-tmux, run a plain login shell so
+            // the local terminal's own scrollback and selection work (no tmux
+            // status bar or cross-restart persistence).
+            let shell_cmd = if no_tmux {
+                "exec \"$ONYX_LOGIN_SHELL\" -l".to_string()
+            } else {
+                format!(
+                    "if command -v tmux >/dev/null 2>&1; then \
+                         conf=~/.config/onyx/tmux.conf; \
+                     if [ ! -f \"$conf\" ]; then \
+                             mkdir -p ~/.config/onyx; \
+                             printf 'set -g mouse on\\nset -g history-limit 50000\\nset -g status-style bg=colour234,fg=colour240\\nset -g pane-border-style fg=colour236\\nset -g pane-active-border-style fg=colour240\\n' > \"$conf\"; \
+                         fi; \
+                         tmux -f \"$conf\" start-server \\; source-file \"$conf\" >/dev/null 2>&1 || true; \
+                         tmux -f \"$conf\" new-session -A -s \"onyx-{session_id}\" -e ONYX_MODE=quic; \
+                     else \
+                         echo '[onyx] tmux not found — running in basic mode (no persistent sessions)'; \
+                         echo '[onyx] install tmux for full experience: sudo apt install tmux'; \
+                         exec \"$ONYX_LOGIN_SHELL\" -l; \
+                     fi"
+                )
+            };
             let mut cmd = std::process::Command::new("sh");
-            cmd.arg("-c").arg(&tmux_cmd);
+            cmd.arg("-c").arg(&shell_cmd);
             // ONYX_MODE=quic is inherited by the exec-$SHELL fallback path.
             cmd.env("ONYX_MODE", "quic");
             cmd.env("ONYX_LOGIN_SHELL", shell);

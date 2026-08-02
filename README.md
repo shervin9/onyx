@@ -124,6 +124,13 @@ iTerm2 (enable *Preferences → General → Selection → "Applications in termi
 may access the clipboard"*), Warp, kitty, Alacritty, WezTerm, Windows
 Terminal, or VSCode's integrated terminal.
 
+**On a terminal without OSC 52** (notably macOS's built-in Terminal.app),
+remote-to-local clipboard isn't possible through tmux. Run with `--no-tmux`
+(or `export ONYX_NO_TMUX=1`) to get a plain login shell instead — then your
+terminal's own scrollback and mouse-selection copy work natively, exactly like
+plain SSH. You keep onyx's QUIC reconnect, but lose tmux's persistence across
+server restarts and the status bar.
+
 ## Agents & Audit
 
 Run a coding-agent CLI headlessly on a remote host, as a resumable job:

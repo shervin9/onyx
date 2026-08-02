@@ -960,6 +960,9 @@ enum CliMode {
         workspace: Option<String>,
         /// Skip the resume picker and always start a fresh session.
         new_session: bool,
+        /// Run a plain login shell instead of tmux (native terminal
+        /// scrollback/selection; no tmux). Also settable via ONYX_NO_TMUX.
+        no_tmux: bool,
     },
     /// `onyx ls` — list known named workspaces.
     Ls,
@@ -1562,6 +1565,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     let mut port_override: Option<u16> = None;
     let mut workspace: Option<String> = None;
     let mut new_session = false;
+    let mut no_tmux = false;
 
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1597,6 +1601,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 );
             }
             "--new" => new_session = true,
+            "--no-tmux" => no_tmux = true,
             // A leading `-` that isn't a known flag is almost always a
             // mistyped flag — reject it clearly rather than silently
             // treating it as a hostname and failing much later in
@@ -1621,6 +1626,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         port_override,
         workspace,
         new_session,
+        no_tmux,
     }))
 }
 
@@ -1714,6 +1720,10 @@ OPTIONS
   -i <file>                 SSH identity file for bootstrap
   -w, --workspace <name>    bind this session to a named workspace
   --new                     start a fresh session; skip the resume picker
+  --no-tmux                 run a plain login shell instead of tmux, so your
+                              local terminal's native scroll/selection/copy
+                              work (no tmux status bar or persistence). Also:
+                              ONYX_NO_TMUX=1 env var.
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
   --port <port>             QUIC port on the remote (default: 7272).
                               Also: ONYX_PORT=<port> env var (all modes).
@@ -1976,8 +1986,20 @@ mod parse_args_tests {
     fn new_flag_sets_new_session() {
         let out = parse_args_from(s(&["--new", "host"])).unwrap();
         match out {
-            ParseOutcome::Run(CliMode::Interactive { new_session, .. }) => {
+            ParseOutcome::Run(CliMode::Interactive { new_session, no_tmux, .. }) => {
                 assert!(new_session);
+                assert!(!no_tmux);
+            }
+            _ => panic!("expected Interactive"),
+        }
+    }
+
+    #[test]
+    fn no_tmux_flag_sets_no_tmux() {
+        let out = parse_args_from(s(&["--no-tmux", "host"])).unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::Interactive { no_tmux, .. }) => {
+                assert!(no_tmux);
             }
             _ => panic!("expected Interactive"),
         }
@@ -6649,6 +6671,7 @@ async fn try_once(
     mode: BandwidthMode,
     raw_mode: &mut Option<RawMode>,
     allow_picker: bool,
+    no_tmux: bool,
 ) -> Result<bool> {
     let first_connect = session.is_none();
     if first_connect {
@@ -6697,6 +6720,7 @@ async fn try_once(
                     term: Some(term),
                     cols: Some(cols),
                     rows: Some(rows),
+                    no_tmux,
                 },
             )
             .await?;
@@ -7080,6 +7104,7 @@ async fn main() -> Result<()> {
             port_override,
             workspace,
             new_session,
+            no_tmux,
         } => {
             let bandwidth_mode = if low_bandwidth {
                 BandwidthMode::low_bandwidth()
@@ -7097,6 +7122,7 @@ async fn main() -> Result<()> {
                 workspace,
                 None,
                 new_session,
+                no_tmux,
             )
             .await;
         }
@@ -7135,6 +7161,7 @@ async fn run_attach_workspace_mode(name: String, identity_file: Option<String>) 
         Some(name),
         initial_session,
         false,
+        false,
     )
     .await
 }
@@ -7155,7 +7182,13 @@ async fn run_interactive_session(
     workspace: Option<String>,
     initial_session: Option<(String, String)>,
     new_session: bool,
+    no_tmux: bool,
 ) -> Result<()> {
+    // --no-tmux via flag or ONYX_NO_TMUX env (set once, e.g. in your shell rc).
+    let no_tmux = no_tmux
+        || std::env::var("ONYX_NO_TMUX")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false);
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
     let target = build_target(&raw_target, identity_file, port_override)
@@ -7188,7 +7221,10 @@ async fn run_interactive_session(
         None => auth_token_from_env()?,
     };
 
-    if should_activate_basic_mode(target.ssh_mode, tmux_available) {
+    // With --no-tmux the user is deliberately running without tmux, so a
+    // missing remote tmux is not a reason to drop to plain SSH — keep QUIC and
+    // have the server run a plain login shell.
+    if !no_tmux && should_activate_basic_mode(target.ssh_mode, tmux_available) {
         emit_tmux_missing_warning();
         return exec_ssh_shell(&target.ssh_target, target.identity_file.as_deref());
     }
@@ -7294,6 +7330,7 @@ async fn run_interactive_session(
             bandwidth_mode,
             &mut raw_mode,
             allow_picker,
+            no_tmux,
         )
         .await
         {

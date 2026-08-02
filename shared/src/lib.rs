@@ -95,6 +95,11 @@ pub enum Message {
         /// Initial terminal height. Older servers ignore this.
         #[serde(default)]
         rows: Option<u16>,
+        /// Run a plain login shell instead of tmux (native terminal
+        /// scrollback/selection; no tmux persistence or status bar). Only
+        /// meaningful on a new session. Older servers ignore this.
+        #[serde(default)]
+        no_tmux: bool,
     },
     /// Server → Client: acknowledge Hello and supply the resume token.
     Welcome {
@@ -280,10 +285,11 @@ mod tests {
             term: Some("xterm-256color".into()),
             cols: Some(220),
             rows: Some(50),
+            no_tmux: true,
         };
         assert!(matches!(
             round_trip(msg),
-            Message::Hello { session_id, cols: Some(220), rows: Some(50), .. }
+            Message::Hello { session_id, cols: Some(220), rows: Some(50), no_tmux: true, .. }
             if session_id == "sess-1"
         ));
     }
@@ -298,6 +304,7 @@ mod tests {
             term: None,
             cols: None,
             rows: None,
+            no_tmux: false,
         };
         assert!(matches!(
             round_trip(msg),
