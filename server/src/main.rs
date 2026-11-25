@@ -1,4 +1,5 @@
 mod db;
+mod ports;
 mod replay;
 
 use anyhow::{Context, Result};
@@ -320,6 +321,31 @@ fn set_sane_slave_termios(fd: libc::c_int) {
     }
 }
 
+/// Give a spawned shell default signal handling. onyx-server is usually
+/// started in the background by a non-interactive shell (`nohup … &`), which
+/// makes it ignore SIGINT/SIGQUIT, and ignored signals survive exec. Without
+/// this, Ctrl-C reaches the PTY but never stops `sleep`, a dev server, etc.
+/// (tmux used to hide this by resetting signals for its panes.)
+/// Async-signal-safe: only signal(2)/sigprocmask(2); call in pre_exec.
+unsafe fn reset_signal_state() {
+    for sig in [
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGTSTP,
+        libc::SIGTTIN,
+        libc::SIGTTOU,
+        libc::SIGHUP,
+        libc::SIGTERM,
+        libc::SIGPIPE,
+        libc::SIGCHLD,
+    ] {
+        libc::signal(sig, libc::SIG_DFL);
+    }
+    let mut empty: libc::sigset_t = std::mem::zeroed();
+    libc::sigemptyset(&mut empty);
+    libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut());
+}
+
 fn login_shell() -> String {
     unsafe {
         let pw = libc::getpwuid(libc::geteuid());
@@ -369,6 +395,10 @@ struct SessionMeta {
     /// holding this lock, and attachers compute their catch-up and subscribe
     /// under it too, so no chunk is ever missed or duplicated.
     output: Arc<Mutex<replay::SessionOutput>>,
+    /// TCP ports listening inside this session (updated by a watcher task).
+    ports_rx: watch::Receiver<Vec<u16>>,
+    /// Out-of-band messages for the attached client (e.g. OpenUrl).
+    control_tx: broadcast::Sender<Message>,
     /// Sending on this kills the PTY task (used by GC).
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Set when client disconnects; None while a client is attached.
@@ -631,12 +661,14 @@ async fn run_forward(
     mut recv: quinn::RecvStream,
     remote_port: u16,
 ) -> Result<()> {
-    let tcp = match tokio::net::TcpStream::connect(std::net::SocketAddr::from((
-        [127, 0, 0, 1],
-        remote_port,
-    )))
-    .await
-    {
+    // Dev servers bind to 127.0.0.1, 0.0.0.0, or only ::1 ("localhost" on
+    // newer Node); try IPv4 loopback first, then IPv6.
+    let v4 = std::net::SocketAddr::from(([127, 0, 0, 1], remote_port));
+    let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, remote_port));
+    let tcp = match match tokio::net::TcpStream::connect(v4).await {
+        Ok(s) => Ok(s),
+        Err(_) => tokio::net::TcpStream::connect(v6).await,
+    } {
         Ok(s) => {
             send_msg(&mut send, &Message::ForwardAck).await?;
             s
@@ -1152,6 +1184,14 @@ async fn handle_exec_start(
     cmd.stderr(Stdio::piped());
     // Prevent stray PTY inheritance; this is a non-interactive job.
     cmd.kill_on_drop(true);
+    // Jobs (and agents they start) should see normal signal behavior too.
+    // SAFETY: reset_signal_state only calls async-signal-safe functions.
+    unsafe {
+        cmd.pre_exec(|| {
+            reset_signal_state();
+            Ok(())
+        });
+    }
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -1703,7 +1743,8 @@ fn message_auth_token_matches(msg: &Message, expected: &str) -> bool {
         | Message::JobsList { auth_token }
         | Message::AuditList { auth_token, .. }
         | Message::SessionsList { auth_token }
-        | Message::Kill { auth_token, .. } => auth_token.as_str(),
+        | Message::Kill { auth_token, .. }
+        | Message::OpenUrlRequest { auth_token, .. } => auth_token.as_str(),
         _ => "",
     };
     !supplied.is_empty() && constant_time_eq(supplied.as_bytes(), expected.as_bytes())
@@ -1747,13 +1788,14 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     // (session id, last seq the client rendered, client has a blank terminal)
-    let (session_id, client_seq, fresh_terminal): (String, u64, bool) = match msg {
+    let (session_id, client_seq, fresh_terminal, features): (String, u64, bool, u32) = match msg {
         // ── New session ──────────────────────────────────────────────────────
         Message::Hello {
             session_id,
             term,
             cols,
             rows,
+            features,
             ..
         } => {
             let (master_raw, slave_raw) = open_pty().context("open_pty")?;
@@ -1776,9 +1818,17 @@ where
             cmd.env("TERM", &term);
             cmd.env("COLUMNS", cols.to_string());
             cmd.env("LINES", rows.to_string());
+            // Let programs in the session open URLs on the user's machine:
+            // `xdg-open` and $BROWSER resolve to `onyx-server open`.
+            cmd.env("ONYX_SESSION", &session_id);
+            let shim_dir = onyx_data_dir().join("bin");
+            let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+            cmd.env("PATH", format!("{}:{path}", shim_dir.display()));
+            cmd.env("BROWSER", shim_dir.join("xdg-open"));
             // SAFETY: runs in the forked child (single-threaded) before exec.
             unsafe {
                 cmd.pre_exec(move || {
+                    reset_signal_state();
                     libc::setsid();
                     libc::ioctl(slave_raw, libc::TIOCSCTTY as _, 0_i32);
                     libc::dup2(slave_raw, 0);
@@ -1798,6 +1848,9 @@ where
                 .spawn()
                 .context("spawning shell")?;
             drop(slave); // parent closes slave; child has it via dup2
+            // setsid() made the shell a session leader: its pid is the
+            // session id shared by everything it starts.
+            let shell_pid = child.id();
 
             unsafe {
                 let f = libc::fcntl(master_raw, libc::F_GETFL);
@@ -1810,6 +1863,8 @@ where
             let (out_tx, _) = broadcast::channel::<(u64, Vec<u8>)>(512);
             let (shut_tx, shut_rx) = oneshot::channel::<()>();
             let output = Arc::new(Mutex::new(replay::SessionOutput::new(rows, cols)));
+            let (ports_tx, ports_rx) = watch::channel::<Vec<u16>>(Vec::new());
+            let (control_tx, _) = broadcast::channel::<Message>(16);
 
             // Clone out_tx for the PTY task before moving the original into SessionMeta.
             let out_tx_task = out_tx.clone();
@@ -1821,6 +1876,8 @@ where
                     pty_cmd_tx: cmd_tx,
                     output_tx: out_tx,
                     output: output.clone(),
+                    ports_rx,
+                    control_tx,
                     shutdown_tx: Some(shut_tx),
                     detached_at: None,
                     started_at_unix: unix_now(),
@@ -1846,8 +1903,14 @@ where
                 sid2,
             ));
 
+            tokio::spawn(watch_session_ports(
+                sessions.clone(),
+                session_id.clone(),
+                shell_pid,
+                ports_tx,
+            ));
             println!("[session {session_id}] started");
-            (session_id, 0, false)
+            (session_id, 0, false, features)
         }
 
         // ── Reconnect ────────────────────────────────────────────────────────
@@ -1855,6 +1918,7 @@ where
             session_id,
             resume_token,
             last_seq,
+            features,
             ..
         } => {
             // Validate under the lock; never hold the guard across an await.
@@ -1889,7 +1953,7 @@ where
             println!("[session {session_id}] resumed (client seq {last_seq})");
             // last_seq == 0 on a Resume means a new terminal attaching to an
             // existing session (resume picker / `onyx attach`): repaint once.
-            (session_id, last_seq, last_seq == 0)
+            (session_id, last_seq, last_seq == 0, features)
         }
 
         other => {
@@ -1912,7 +1976,7 @@ where
     // (at which point we clear it if we are still current) or are
     // evicted by a newer attach (at which point we leave state alone).
     let (takeover_tx, mut takeover_rx) = oneshot::channel::<()>();
-    let (mut output_rx, cmd_tx, resume_token, my_epoch, catch_up, mut sent_seq, output) = {
+    let (mut output_rx, cmd_tx, resume_token, my_epoch, catch_up, mut sent_seq, output, mut ports_rx, mut control_rx) = {
         let mut locked = sessions.lock().unwrap();
         let meta = locked
             .get_mut(&session_id)
@@ -1946,8 +2010,12 @@ where
             catch_up,
             sent_seq,
             meta.output.clone(),
+            meta.ports_rx.clone(),
+            meta.control_tx.subscribe(),
         )
     };
+    let wants_ports = features & shared::FEATURE_PORTS != 0;
+    let wants_open = features & shared::FEATURE_OPEN_URL != 0;
 
     send_msg(
         &mut send,
@@ -1962,6 +2030,12 @@ where
         replay::CatchUp::UpToDate => {}
         replay::CatchUp::Replay(data) | replay::CatchUp::Snapshot(data) => {
             send_msg(&mut send, &Message::Output { seq: sent_seq, data }).await?;
+        }
+    }
+    if wants_ports {
+        let ports = ports_rx.borrow_and_update().clone();
+        if !ports.is_empty() {
+            send_msg(&mut send, &Message::PortsUpdate { ports }).await?;
         }
     }
 
@@ -2021,6 +2095,24 @@ where
                 // a broken transport. Fall through to the detached path.
                 let _ = res;
                 break 'pump "client stream closed";
+            }
+
+            changed = ports_rx.changed(), if wants_ports => {
+                if changed.is_err() {
+                    continue;
+                }
+                let ports = ports_rx.borrow_and_update().clone();
+                if send_msg(&mut send, &Message::PortsUpdate { ports }).await.is_err() {
+                    break 'pump "send to client failed";
+                }
+            }
+
+            ctrl = control_rx.recv(), if wants_open => {
+                if let Ok(msg) = ctrl {
+                    if send_msg(&mut send, &msg).await.is_err() {
+                        break 'pump "send to client failed";
+                    }
+                }
             }
 
             msg = output_rx.recv() => {
@@ -2107,6 +2199,36 @@ where
     }
     send.finish_stream();
     Ok(())
+}
+
+/// Poll the session's listening ports every 2s while the session exists and
+/// publish changes. Cheap: a /proc walk filtered by session id.
+async fn watch_session_ports(
+    sessions: Sessions,
+    session_id: String,
+    shell_pid: u32,
+    ports_tx: watch::Sender<Vec<u16>>,
+) {
+    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+    loop {
+        ticker.tick().await;
+        if !sessions.lock().unwrap().contains_key(&session_id) {
+            break;
+        }
+        let ports: Vec<u16> =
+            tokio::task::spawn_blocking(move || ports::session_listening_ports(shell_pid))
+                .await
+                .map(|set| set.into_iter().collect())
+                .unwrap_or_default();
+        ports_tx.send_if_modified(|current| {
+            if *current != ports {
+                *current = ports;
+                true
+            } else {
+                false
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2258,6 +2380,21 @@ async fn handle_local_stream(
         msg @ (Message::Hello { .. } | Message::Resume { .. }) => {
             run_session(send, recv, sessions, msg).await
         }
+        Message::OpenUrlRequest { session_id, url, .. } => {
+            let delivered = {
+                let locked = sessions.lock().unwrap();
+                match locked.get(&session_id) {
+                    Some(meta) if meta.detached_at.is_none() => meta
+                        .control_tx
+                        .send(Message::OpenUrl { url: url.clone() })
+                        .is_ok(),
+                    _ => false,
+                }
+            };
+            let reason = if delivered { "ok" } else { "no client attached" };
+            send_msg(&mut send, &Message::Close { reason: reason.into() }).await.ok();
+            Ok(())
+        }
         _ => {
             send_msg(
                 &mut send,
@@ -2304,6 +2441,64 @@ fn spawn_local_listener(sessions: Sessions, auth_token: Arc<String>) {
             }
         }
     });
+}
+
+/// Install `<data_dir>/bin/xdg-open`, which session shells find first on
+/// PATH (and via $BROWSER). It forwards URLs to `onyx-server open`.
+fn install_open_shim() {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let dir = onyx_data_dir().join("bin");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let script = format!(
+        "#!/bin/sh\n# Installed by onyx-server: opens URLs on the machine you connected from.\nexec '{}' open \"$@\"\n",
+        exe.display().to_string().replace('\'', "'\\''")
+    );
+    let path = dir.join("xdg-open");
+    if std::fs::write(&path, script).is_ok() {
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// `onyx-server open <url>`: ask the client attached to this session
+/// ($ONYX_SESSION) to open the URL locally. Falls back to printing it.
+async fn run_open(args: Vec<String>) -> Result<()> {
+    let url = args.into_iter().find(|a| !a.starts_with('-')).unwrap_or_default();
+    let printable = || eprintln!("[onyx] open this URL on your machine: {url}");
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        printable();
+        return Ok(());
+    }
+    let session_id = std::env::var("ONYX_SESSION").unwrap_or_default();
+    let token = std::fs::read_to_string(onyx_data_dir().join("server.auth_token"))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let result = async {
+        let stream = tokio::net::UnixStream::connect(local_socket_path()).await?;
+        let (mut r, mut w) = stream.into_split();
+        send_msg(
+            &mut w,
+            &Message::OpenUrlRequest {
+                auth_token: token,
+                session_id,
+                url: url.clone(),
+            },
+        )
+        .await?;
+        anyhow::Ok(recv_msg(&mut r).await?)
+    }
+    .await;
+    match result {
+        // Silent on success, like xdg-open; the client shows a notice.
+        Ok(Message::Close { reason }) if reason == "ok" => {}
+        _ => printable(),
+    }
+    Ok(())
 }
 
 /// `onyx-server bridge`: pipe stdin/stdout to the running server's local
@@ -2356,8 +2551,10 @@ async fn run_bridge() -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    if std::env::args().nth(1).as_deref() == Some("bridge") {
-        return run_bridge().await;
+    match std::env::args().nth(1).as_deref() {
+        Some("bridge") => return run_bridge().await,
+        Some("open") => return run_open(std::env::args().skip(2).collect()).await,
+        _ => {}
     }
 
     rustls::crypto::ring::default_provider()
@@ -2396,6 +2593,7 @@ async fn main() -> Result<()> {
     db::recover_interrupted(unix_now());
     let auth_token = Arc::new(auth_token);
     spawn_local_listener(sessions.clone(), auth_token.clone());
+    install_open_shim();
     let endpoint = Endpoint::server(server_cfg, addr)?;
     let bound = endpoint.local_addr()?;
     println!("[server] listening on {bound}  (ALPN: onyx)");
@@ -2569,6 +2767,8 @@ mod session_takeover_tests {
             pty_cmd_tx: pty_tx,
             output_tx: out_tx,
             output: Arc::new(Mutex::new(replay::SessionOutput::new(24, 80))),
+            ports_rx: watch::channel(Vec::new()).1,
+            control_tx: broadcast::channel(1).0,
             shutdown_tx: Some(shut_tx),
             detached_at: Some(Instant::now()),
             started_at_unix: 0,
@@ -2660,6 +2860,8 @@ mod detached_summaries_tests {
             pty_cmd_tx: pty_tx,
             output_tx: out_tx,
             output: Arc::new(Mutex::new(replay::SessionOutput::new(24, 80))),
+            ports_rx: watch::channel(Vec::new()).1,
+            control_tx: broadcast::channel(1).0,
             shutdown_tx: Some(shut_tx),
             detached_at: detached_at_unix.map(|_| Instant::now()),
             started_at_unix,

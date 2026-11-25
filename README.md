@@ -103,6 +103,28 @@ Because there is no tmux layer, your terminal's native scrollback,
 click-drag selection, and copy work exactly like plain SSH. `--no-tmux` and
 `ONYX_NO_TMUX` from older versions are still accepted and do nothing.
 
+## Ports & Links Open Locally
+
+Start a dev server in your Onyx shell and it is already on your machine:
+
+```text
+$ npm run dev
+  ▲ Next.js ready on http://localhost:3000
+[onyx] dev-de:3000 → http://localhost:3000
+```
+
+- Onyx watches the TCP ports (1024+) that programs in *your session* listen
+  on and forwards each one to the same port on your localhost (or a free one
+  if it is taken). The forward closes when the program stops. Needs QUIC;
+  explicit `-L local:remote` forwards still work.
+- `xdg-open` and `$BROWSER` inside the session open http(s) links in your
+  local browser — handy for `gh auth login`, `gcloud auth login`, or an
+  agent's sign-in link. Set `ONYX_NO_OPEN=1` locally to print links instead.
+
+If UDP is blocked, the shell continues over an SSH bridge through your
+existing SSH access (no extra port), with the same replay after drops.
+Links still open locally; automatic port forwards need QUIC.
+
 ## Agents & Audit
 
 Run a coding-agent CLI headlessly on a remote host, as a resumable job:

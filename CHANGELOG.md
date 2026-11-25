@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Added
+- **Automatic port forwarding.** When a program in your shell starts
+  listening on a TCP port (1024+), e.g. `npm run dev` on 3000, Onyx forwards
+  it to `http://localhost:3000` on your machine (or a free local port if that
+  one is busy) and closes the forward when the program stops. Detected from
+  the session's own process tree, so other users' services are not exposed.
+  Requires QUIC; explicit `-L` forwards still work and take precedence.
+- **Links open in your local browser.** `xdg-open` and `$BROWSER` inside an
+  Onyx session (e.g. `gh auth login`, `gcloud auth login`, agent sign-in
+  links) open http(s) URLs on the machine you connected from. Works over QUIC
+  and the SSH bridge. `ONYX_NO_OPEN=1` prints the link instead.
 - **SSH bridge transport.** When UDP/QUIC is unreachable, the interactive
   session continues over `ssh <host> onyx-server bridge` (the server listens
   on a private local socket). No extra port or firewall rule; sessions still
@@ -10,6 +20,9 @@
   bridge while reconnecting, so it switches back when UDP returns.
 
 ### Fixed
+- **Ctrl-C did nothing in tmux-free sessions.** onyx-server is started in the
+  background, which makes it ignore SIGINT/SIGQUIT, and the shell inherited
+  that. Sessions and exec jobs now start with default signal handling.
 - Warp: the Auto-Warpify hook printed by remote rc files made Warp inject its
   SSH bootstrap and the remote shell exited immediately. The client now drops
   that hook from session output.

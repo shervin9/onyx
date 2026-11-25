@@ -7,6 +7,12 @@ pub const DEFAULT_PORT: u16 = 7272;
 /// by another client. The evicted client must exit, not reconnect.
 pub const CLOSE_TAKEN_OVER: &str = "session taken over by another client";
 
+/// Client feature bits sent in Hello/Resume `features`. The server only sends
+/// the matching server→client messages to clients that declare them, so
+/// older clients never receive a message variant they cannot decode.
+pub const FEATURE_PORTS: u32 = 1 << 0;
+pub const FEATURE_OPEN_URL: u32 = 1 << 1;
+
 /// Which standard stream an exec output chunk came from.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StdStream {
@@ -104,6 +110,10 @@ pub enum Message {
         /// meaningful on a new session. Older servers ignore this.
         #[serde(default)]
         no_tmux: bool,
+        /// FEATURE_* bits this client understands. Trailing, so older
+        /// servers simply ignore it.
+        #[serde(default)]
+        features: u32,
     },
     /// Server → Client: acknowledge Hello and supply the resume token.
     Welcome {
@@ -117,6 +127,9 @@ pub enum Message {
         session_id: String,
         resume_token: String,
         last_seq: u64,
+        /// FEATURE_* bits this client understands (see Hello).
+        #[serde(default)]
+        features: u32,
     },
     /// Client → Server: list detached interactive sessions, for the client's
     /// resume picker on a fresh connect (no pinned session/workspace yet).
@@ -249,6 +262,20 @@ pub enum Message {
         killed: bool,
         message: String,
     },
+    // New variants go at the end: bincode encodes the variant index.
+    /// Server → Client (session stream, FEATURE_PORTS): the full set of TCP
+    /// ports currently listening inside this session's process tree.
+    PortsUpdate { ports: Vec<u16> },
+    /// Server → Client (session stream, FEATURE_OPEN_URL): a program in the
+    /// session asked to open this URL (xdg-open / $BROWSER).
+    OpenUrl { url: String },
+    /// `onyx-server open` → server (local socket): open `url` on the client
+    /// attached to `session_id`.
+    OpenUrlRequest {
+        auth_token: String,
+        session_id: String,
+        url: String,
+    },
 }
 
 /// Serialize a message to bytes (length-prefix framing is caller's job).
@@ -290,10 +317,11 @@ mod tests {
             cols: Some(220),
             rows: Some(50),
             no_tmux: true,
+            features: FEATURE_PORTS | FEATURE_OPEN_URL,
         };
         assert!(matches!(
             round_trip(msg),
-            Message::Hello { session_id, cols: Some(220), rows: Some(50), no_tmux: true, .. }
+            Message::Hello { session_id, cols: Some(220), rows: Some(50), no_tmux: true, features: 3, .. }
             if session_id == "sess-1"
         ));
     }
@@ -309,6 +337,7 @@ mod tests {
             cols: None,
             rows: None,
             no_tmux: false,
+            features: 0,
         };
         assert!(matches!(
             round_trip(msg),
@@ -329,12 +358,25 @@ mod tests {
     }
 
     #[test]
+    fn port_and_url_messages_round_trip() {
+        assert!(matches!(
+            round_trip(Message::PortsUpdate { ports: vec![3000, 5173] }),
+            Message::PortsUpdate { ports } if ports == vec![3000, 5173]
+        ));
+        assert!(matches!(
+            round_trip(Message::OpenUrl { url: "https://x.test/a".into() }),
+            Message::OpenUrl { url } if url == "https://x.test/a"
+        ));
+    }
+
+    #[test]
     fn resume_round_trip() {
         let msg = Message::Resume {
             auth_token: "t".into(),
             session_id: "s".into(),
             resume_token: "r".into(),
             last_seq: 42,
+            features: FEATURE_OPEN_URL,
         };
         assert!(matches!(
             round_trip(msg),

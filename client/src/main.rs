@@ -1303,6 +1303,12 @@ SHELL
   your existing SSH access (no extra port or firewall rule), with the same
   replay after drops. Port forwards (-L) need QUIC.
 
+  Ports and links open locally: when a program in the shell starts listening
+  on a TCP port (1024+), e.g. `npm run dev` on 3000, Onyx forwards it to
+  http://localhost:3000 on your machine and closes it when the program stops.
+  `xdg-open` / $BROWSER inside the session open http(s) links in your local
+  browser (set ONYX_NO_OPEN=1 to print them instead).
+
 JOBS
   `onyx exec` runs a command owned by the server. It keeps running if you
   disconnect, buffers up to 4 MiB of output, and the client resumes the
@@ -5987,6 +5993,7 @@ async fn try_once(
     allow_picker: bool,
     last_seq: &Arc<std::sync::atomic::AtomicU64>,
     input: &mut LocalInput,
+    host_label: &str,
 ) -> Result<bool> {
     let first_connect = session.is_none();
     if first_connect {
@@ -6038,7 +6045,26 @@ async fn try_once(
         })
         .collect();
 
-    let result = run_attached(send, recv, session, auth_token, raw_mode, last_seq, input, "QUIC").await;
+    let mut forwarder = AutoForwarder::new(
+        conn.clone(),
+        auth_token.to_string(),
+        host_label.to_string(),
+        forwards.iter().map(|&(_, rp)| rp).collect(),
+    );
+    let result = run_attached(
+        send,
+        recv,
+        session,
+        auth_token,
+        raw_mode,
+        last_seq,
+        input,
+        "QUIC",
+        shared::FEATURE_PORTS | shared::FEATURE_OPEN_URL,
+        Some(&mut forwarder),
+    )
+    .await;
+    drop(forwarder);
 
     for jh in &forward_handles {
         jh.abort();
@@ -6119,7 +6145,20 @@ async fn try_once_bridge(
         }
     }
     let (w, r, _child) = open_bridge(bt).await?;
-    run_attached(w, r, session, auth_token, raw_mode, last_seq, input, "SSH bridge").await
+    // Port forwards need QUIC streams, so only URL opening is offered here.
+    run_attached(
+        w,
+        r,
+        session,
+        auth_token,
+        raw_mode,
+        last_seq,
+        input,
+        "SSH bridge",
+        shared::FEATURE_OPEN_URL,
+        None,
+    )
+    .await
 }
 
 /// Write half of a session stream: a QUIC send stream, or the stdin of the
@@ -6152,6 +6191,8 @@ async fn run_attached<W, R>(
     last_seq: &Arc<std::sync::atomic::AtomicU64>,
     input: &mut LocalInput,
     transport: &str,
+    features: u32,
+    mut forwarder: Option<&mut AutoForwarder>,
 ) -> Result<bool>
 where
     W: MsgSink,
@@ -6178,6 +6219,7 @@ where
                     rows: Some(rows),
                     // Legacy field; the server no longer launches tmux.
                     no_tmux: true,
+                    features,
                 },
             )
             .await?;
@@ -6191,6 +6233,7 @@ where
                     resume_token: tok.clone(),
                     // Lets the server resend exactly the output we missed.
                     last_seq: last_seq.load(Ordering::Relaxed),
+                    features,
                 },
             )
             .await?;
@@ -6255,6 +6298,7 @@ where
     }
 
     let seen_seq = last_seq.clone();
+    let (ctrl_tx, mut ctrl_rx) = mpsc::unbounded_channel::<Message>();
     let mut output_jh = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         let mut warp_filter = termfilter::WarpHookFilter::default();
@@ -6262,12 +6306,16 @@ where
             match recv_msg(&mut recv).await {
                 Ok(Message::Output { seq, data }) => {
                     let data = warp_filter.filter(&data);
+                    track_alt_screen(&data);
                     if stdout.write_all(&data).await.is_err() {
                         break false;
                     }
                     let _ = stdout.flush().await;
                     // Only count output as seen once it reached the terminal.
                     seen_seq.store(seq, Ordering::Relaxed);
+                }
+                Ok(msg @ (Message::PortsUpdate { .. } | Message::OpenUrl { .. })) => {
+                    let _ = ctrl_tx.send(msg);
                 }
                 Ok(Message::Close { reason }) => {
                     if reason == shared::CLOSE_TAKEN_OVER {
@@ -6320,8 +6368,209 @@ where
                     return Ok(true);
                 }
             },
+            Some(msg) = ctrl_rx.recv() => match msg {
+                Message::PortsUpdate { ports } => {
+                    if let Some(f) = forwarder.as_deref_mut() {
+                        for line in f.reconcile(&ports).await {
+                            session_notice(&line);
+                        }
+                    }
+                }
+                Message::OpenUrl { url } => open_url_locally(&url),
+                _ => {}
+            },
             r = &mut output_jh => return Ok(r.unwrap_or(false)),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Auto port forwarding + local URL opening
+// ---------------------------------------------------------------------------
+
+static ALT_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Track whether a full-screen app (alternate screen) is active, so notices
+/// are not drawn over vim/htop/agent TUIs.
+fn track_alt_screen(data: &[u8]) {
+    let mut last: Option<bool> = None;
+    for (i, w) in data.windows(3).enumerate() {
+        if w == b"\x1b[?" {
+            let rest = &data[i + 3..];
+            for (code, on) in [
+                (&b"1049h"[..], true),
+                (b"1049l", false),
+                (b"1047h", true),
+                (b"1047l", false),
+                (b"47h", true),
+                (b"47l", false),
+            ] {
+                if rest.starts_with(code) {
+                    last = Some(on);
+                }
+            }
+        }
+    }
+    if let Some(on) = last {
+        ALT_SCREEN.store(on, Ordering::Relaxed);
+    }
+}
+
+/// Print a short dim line into the local terminal, unless a full-screen app
+/// owns it.
+fn session_notice(msg: &str) {
+    if ALT_SCREEN.load(Ordering::Relaxed) {
+        debug_log(msg);
+        return;
+    }
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\r\n\x1b[2m[onyx] {msg}\x1b[0m\r\n");
+    let _ = out.flush();
+}
+
+/// Open a URL requested by a program in the session (xdg-open / $BROWSER)
+/// in the local browser. Only http(s); ONYX_NO_OPEN=1 prints it instead.
+fn open_url_locally(url: &str) {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return;
+    }
+    if std::env::var_os("ONYX_NO_OPEN").is_some() {
+        session_notice(&format!("open in your browser: {url}"));
+        return;
+    }
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let ok = std::process::Command::new(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok();
+    if ok {
+        session_notice(&format!("opened in your browser: {}", truncate_display(url, 80)));
+    } else {
+        session_notice(&format!("open in your browser: {url}"));
+    }
+}
+
+/// remote port -> local port, as last announced. Survives reconnects so a
+/// re-established forward is not announced again.
+static ANNOUNCED: std::sync::Mutex<Option<HashMap<u16, u16>>> = std::sync::Mutex::new(None);
+
+/// Mirrors the session's listening ports as localhost forwards, over the
+/// current QUIC connection. Recreated on every reconnect; the server resends
+/// the full port set on attach.
+struct AutoForwarder {
+    conn: quinn::Connection,
+    auth_token: String,
+    host_label: String,
+    /// Remote ports already covered by explicit -L forwards.
+    explicit: std::collections::HashSet<u16>,
+    active: HashMap<u16, (u16, tokio::task::JoinHandle<()>)>,
+}
+
+impl AutoForwarder {
+    fn new(
+        conn: quinn::Connection,
+        auth_token: String,
+        host_label: String,
+        explicit: std::collections::HashSet<u16>,
+    ) -> Self {
+        Self {
+            conn,
+            auth_token,
+            host_label,
+            explicit,
+            active: HashMap::new(),
+        }
+    }
+
+    /// Bring local forwards in line with `ports`; returns notices to show.
+    async fn reconcile(&mut self, ports: &[u16]) -> Vec<String> {
+        let mut notices = Vec::new();
+        let mut announced = ANNOUNCED.lock().unwrap().take().unwrap_or_default();
+
+        let gone: Vec<u16> = self
+            .active
+            .keys()
+            .copied()
+            .filter(|p| !ports.contains(p))
+            .collect();
+        for rp in gone {
+            if let Some((_, jh)) = self.active.remove(&rp) {
+                jh.abort();
+            }
+            if announced.remove(&rp).is_some() {
+                notices.push(format!("{}:{rp} stopped listening; forward closed", self.host_label));
+            }
+        }
+
+        for &rp in ports {
+            if self.active.contains_key(&rp) || self.explicit.contains(&rp) {
+                continue;
+            }
+            let preferred = announced.get(&rp).copied().unwrap_or(rp);
+            let listener = match bind_local(preferred).await {
+                Some(l) => l,
+                None => continue,
+            };
+            let Ok(local) = listener.local_addr().map(|a| a.port()) else {
+                continue;
+            };
+            let jh = tokio::spawn(accept_forwarded(
+                listener,
+                self.conn.clone(),
+                self.auth_token.clone(),
+                rp,
+            ));
+            self.active.insert(rp, (local, jh));
+            if announced.get(&rp) != Some(&local) {
+                notices.push(if local == rp {
+                    format!("{}:{rp} → http://localhost:{local}", self.host_label)
+                } else {
+                    format!(
+                        "{}:{rp} → http://localhost:{local} (local port {rp} was busy)",
+                        self.host_label
+                    )
+                });
+                announced.insert(rp, local);
+            }
+        }
+        *ANNOUNCED.lock().unwrap() = Some(announced);
+        notices
+    }
+}
+
+impl Drop for AutoForwarder {
+    fn drop(&mut self) {
+        for (_, (_, jh)) in self.active.drain() {
+            jh.abort();
+        }
+    }
+}
+
+/// Bind 127.0.0.1 on the preferred port, or any free port if it is taken.
+async fn bind_local(preferred: u16) -> Option<TcpListener> {
+    let addr = |p| std::net::SocketAddr::from(([127, 0, 0, 1], p));
+    match TcpListener::bind(addr(preferred)).await {
+        Ok(l) => Some(l),
+        Err(_) => TcpListener::bind(addr(0)).await.ok(),
+    }
+}
+
+async fn accept_forwarded(
+    listener: TcpListener,
+    conn: quinn::Connection,
+    auth_token: String,
+    remote_port: u16,
+) {
+    while let Ok((tcp, _)) = listener.accept().await {
+        let c = conn.clone();
+        let token = auth_token.clone();
+        tokio::spawn(async move {
+            let _ = handle_forward_conn(c, token, tcp, remote_port).await;
+        });
     }
 }
 
@@ -6732,6 +6981,7 @@ async fn run_interactive_session(
                     allow_picker,
                     &last_seq,
                     &mut input,
+                    &raw_target,
                 )
                 .await
             }
