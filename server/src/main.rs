@@ -1,4 +1,5 @@
 mod db;
+mod replay;
 
 use anyhow::{Context, Result};
 use quinn::{Endpoint, ServerConfig};
@@ -339,6 +340,10 @@ struct SessionMeta {
     resume_token: String,
     pty_cmd_tx: mpsc::Sender<PtyCmd>,
     output_tx: broadcast::Sender<(u64, Vec<u8>)>,
+    /// Replay ring + screen model. `pty_task` appends and broadcasts while
+    /// holding this lock, and attachers compute their catch-up and subscribe
+    /// under it too, so no chunk is ever missed or duplicated.
+    output: Arc<Mutex<replay::SessionOutput>>,
     /// Sending on this kills the PTY task (used by GC).
     shutdown_tx: Option<oneshot::Sender<()>>,
     /// Set when client disconnects; None while a client is attached.
@@ -447,29 +452,6 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Write ONYX_STATE into the tmux session environment and force an immediate
-/// status-bar refresh.  Called on every client connect and disconnect so the
-/// status bar is the single source of truth for connection state.
-///
-/// Both commands are fire-and-forget: errors are silently ignored (tmux may
-/// not be installed, or the session may not exist yet on the very first Hello).
-fn tmux_set_state(session_id: &str, state: &str) {
-    let target = format!("onyx-{session_id}");
-    println!("[session {session_id}] ONYX_STATE → {state}");
-    let _ = std::process::Command::new("tmux")
-        .args(["set-environment", "-t", &target, "ONYX_STATE", state])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    // Force an immediate status-bar redraw so the change is visible without
-    // waiting for the 5-second status-interval tick.
-    let _ = std::process::Command::new("tmux")
-        .args(["refresh-client", "-S"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-}
-
 fn new_job_id() -> Result<String> {
     let mut buf = [0u8; 8];
     SystemRandom::new()
@@ -533,12 +515,12 @@ async fn pty_task(
     mut child: std::process::Child,
     mut cmd_rx: mpsc::Receiver<PtyCmd>,
     output_tx: broadcast::Sender<(u64, Vec<u8>)>,
+    output: Arc<Mutex<replay::SessionOutput>>,
     mut shutdown_rx: oneshot::Receiver<()>,
     sessions: Sessions,
     session_id: String,
 ) {
     use std::os::unix::io::AsRawFd;
-    let mut seq: u64 = 0;
     let mut buf = [0u8; 4096];
 
     'pump: loop {
@@ -548,7 +530,8 @@ async fn pty_task(
             // GC / explicit shutdown signal
             _ = &mut shutdown_rx => break 'pump,
 
-            // PTY has output → send to broadcast (discarded when no client is subscribed)
+            // PTY has output → record it for replay, then broadcast to the
+            // attached client (if any).
             guard = async_master.readable() => {
                 let mut guard = match guard { Ok(g) => g, Err(_) => break 'pump };
                 match guard.try_io(|inner| {
@@ -563,9 +546,12 @@ async fn pty_task(
                 }) {
                     Ok(Ok(0)) => break 'pump,
                     Ok(Ok(n)) => {
-                        seq += 1;
-                        // Ignore SendError: no receivers = client disconnected, discard output.
-                        // This keeps draining the PTY so the shell never stalls.
+                        // Always drain the PTY so the shell never stalls. The
+                        // chunk is kept in the replay ring even with no client
+                        // attached; that is what lets a reconnect catch up.
+                        let mut out = output.lock().unwrap();
+                        let seq = out.push(&buf[..n]);
+                        // Ignore SendError: no receivers means no client is attached.
                         let _ = output_tx.send((seq, buf[..n].to_vec()));
                     }
                     Ok(Err(e)) if e.kind() != std::io::ErrorKind::WouldBlock => break 'pump,
@@ -594,6 +580,7 @@ async fn pty_task(
                     PtyCmd::Resize(cols, rows) => {
                         let (cols, rows) = sane_terminal_size(Some(cols), Some(rows));
                         set_pty_size(fd, cols, rows);
+                        output.lock().unwrap().resize(rows, cols);
                         println!("[server] resize → {cols}×{rows}");
                     }
                 }
@@ -1727,14 +1714,14 @@ async fn run_session(
     sessions: Sessions,
     msg: Message,
 ) -> Result<()> {
-    let session_id: String = match msg {
+    // (session id, last seq the client rendered, client has a blank terminal)
+    let (session_id, client_seq, fresh_terminal): (String, u64, bool) = match msg {
         // ── New session ──────────────────────────────────────────────────────
         Message::Hello {
             session_id,
             term,
             cols,
             rows,
-            no_tmux,
             ..
         } => {
             let (master_raw, slave_raw) = open_pty().context("open_pty")?;
@@ -1746,31 +1733,9 @@ async fn run_session(
             set_sane_slave_termios(slave_raw);
 
             let shell = login_shell();
-            // Launch tmux with onyx's config (uploaded by bootstrap client).
-            // Falls back to a bare minimal config if the file isn't there yet
-            // (e.g. direct-mode connections that skipped bootstrap).
-            // When the client asks for --no-tmux, run a plain login shell so
-            // the local terminal's own scrollback and selection work (no tmux
-            // status bar or cross-restart persistence).
-            let shell_cmd = if no_tmux {
-                "exec \"$ONYX_LOGIN_SHELL\" -l".to_string()
-            } else {
-                format!(
-                    "if command -v tmux >/dev/null 2>&1; then \
-                         conf=~/.config/onyx/tmux.conf; \
-                     if [ ! -f \"$conf\" ]; then \
-                             mkdir -p ~/.config/onyx; \
-                             printf 'set -g mouse on\\nset -g history-limit 50000\\nset -g status-style bg=colour234,fg=colour240\\nset -g pane-border-style fg=colour236\\nset -g pane-active-border-style fg=colour240\\n' > \"$conf\"; \
-                         fi; \
-                         tmux -f \"$conf\" start-server \\; source-file \"$conf\" >/dev/null 2>&1 || true; \
-                         tmux -f \"$conf\" new-session -A -s \"onyx-{session_id}\" -e ONYX_MODE=quic; \
-                     else \
-                         echo '[onyx] tmux not found — running in basic mode (no persistent sessions)'; \
-                         echo '[onyx] install tmux for full experience: sudo apt install tmux'; \
-                         exec \"$ONYX_LOGIN_SHELL\" -l; \
-                     fi"
-                )
-            };
+            // A plain login shell on our own PTY. Persistence and reconnect
+            // catch-up are handled natively (see replay.rs), so no tmux.
+            let shell_cmd = "exec \"$ONYX_LOGIN_SHELL\" -l".to_string();
             let mut cmd = std::process::Command::new("sh");
             cmd.arg("-c").arg(&shell_cmd);
             // ONYX_MODE=quic is inherited by the exec-$SHELL fallback path.
@@ -1812,6 +1777,7 @@ async fn run_session(
             let (cmd_tx, cmd_rx) = mpsc::channel::<PtyCmd>(64);
             let (out_tx, _) = broadcast::channel::<(u64, Vec<u8>)>(512);
             let (shut_tx, shut_rx) = oneshot::channel::<()>();
+            let output = Arc::new(Mutex::new(replay::SessionOutput::new(rows, cols)));
 
             // Clone out_tx for the PTY task before moving the original into SessionMeta.
             let out_tx_task = out_tx.clone();
@@ -1822,6 +1788,7 @@ async fn run_session(
                     resume_token: random_token()?,
                     pty_cmd_tx: cmd_tx,
                     output_tx: out_tx,
+                    output: output.clone(),
                     shutdown_tx: Some(shut_tx),
                     detached_at: None,
                     started_at_unix: unix_now(),
@@ -1841,19 +1808,21 @@ async fn run_session(
                 child,
                 cmd_rx,
                 out_tx_task,
+                output,
                 shut_rx,
                 sessions2,
                 sid2,
             ));
 
             println!("[session {session_id}] started");
-            session_id
+            (session_id, 0, false)
         }
 
         // ── Reconnect ────────────────────────────────────────────────────────
         Message::Resume {
             session_id,
             resume_token,
+            last_seq,
             ..
         } => {
             // Validate under the lock; never hold the guard across an await.
@@ -1885,8 +1854,10 @@ async fn run_session(
                 .ok();
                 anyhow::bail!("resume rejected: {reason}");
             }
-            println!("[session {session_id}] resumed");
-            session_id
+            println!("[session {session_id}] resumed (client seq {last_seq})");
+            // last_seq == 0 on a Resume means a new terminal attaching to an
+            // existing session (resume picker / `onyx attach`): repaint once.
+            (session_id, last_seq, last_seq == 0)
         }
 
         other => {
@@ -1909,7 +1880,7 @@ async fn run_session(
     // (at which point we clear it if we are still current) or are
     // evicted by a newer attach (at which point we leave state alone).
     let (takeover_tx, mut takeover_rx) = oneshot::channel::<()>();
-    let (mut output_rx, cmd_tx, resume_token, my_epoch) = {
+    let (mut output_rx, cmd_tx, resume_token, my_epoch, catch_up, mut sent_seq, output) = {
         let mut locked = sessions.lock().unwrap();
         let meta = locked
             .get_mut(&session_id)
@@ -1926,11 +1897,23 @@ async fn run_session(
         meta.detached_at_unix = None;
         let epoch = meta.attach_epoch;
 
+        // Compute catch-up and subscribe under the output lock: pty_task
+        // appends + broadcasts under the same lock, so every chunk lands
+        // either in the catch-up or on the subscription, never both/neither.
+        let out = meta.output.lock().unwrap();
+        let catch_up = out.catch_up(client_seq, fresh_terminal);
+        let sent_seq = out.last_seq();
+        let output_rx = meta.output_tx.subscribe();
+        drop(out);
+
         (
-            meta.output_tx.subscribe(),
+            output_rx,
             meta.pty_cmd_tx.clone(),
             meta.resume_token.clone(),
             epoch,
+            catch_up,
+            sent_seq,
+            meta.output.clone(),
         )
     };
 
@@ -1942,8 +1925,13 @@ async fn run_session(
         },
     )
     .await?;
-    // Update the tmux status bar to reflect the live connection.
-    tmux_set_state(&session_id, "connected");
+
+    match catch_up {
+        replay::CatchUp::UpToDate => {}
+        replay::CatchUp::Replay(data) | replay::CatchUp::Snapshot(data) => {
+            send_msg(&mut send, &Message::Output { seq: sent_seq, data }).await?;
+        }
+    }
 
     // Client → PTY (runs in a separate task so we can drive the output loop here)
     let mut input_task = tokio::spawn(async move {
@@ -1996,6 +1984,11 @@ async fn run_session(
             msg = output_rx.recv() => {
                 match msg {
                     Ok((seq, data)) => {
+                        // Already delivered as part of the catch-up.
+                        if seq <= sent_seq {
+                            continue;
+                        }
+                        sent_seq = seq;
                         if send_msg(&mut send, &Message::Output { seq, data })
                             .await
                             .is_err()
@@ -2019,7 +2012,28 @@ async fn run_session(
                         return Ok(());
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
-                        // Client too slow; some frames dropped, keep going.
+                        // Client fell behind the broadcast channel. Recover
+                        // the dropped chunks from the replay ring instead of
+                        // silently losing output.
+                        let (data, seq) = {
+                            let out = output.lock().unwrap();
+                            let seq = out.last_seq();
+                            match out.catch_up(sent_seq, false) {
+                                replay::CatchUp::UpToDate => (None, seq),
+                                replay::CatchUp::Replay(d) | replay::CatchUp::Snapshot(d) => {
+                                    (Some(d), seq)
+                                }
+                            }
+                        };
+                        if let Some(data) = data {
+                            sent_seq = seq;
+                            if send_msg(&mut send, &Message::Output { seq, data })
+                                .await
+                                .is_err()
+                            {
+                                break 'pump "send to client failed";
+                            }
+                        }
                     }
                 }
             }
@@ -2041,7 +2055,6 @@ async fn run_session(
                 println!(
                     "[session {session_id}] detached (retention {hrs}h, reason: {exit_reason})"
                 );
-                tmux_set_state(&session_id, "disconnected");
             } else {
                 println!(
                     "[session {session_id}] epoch {my_epoch} retired ({exit_reason}; current epoch {})",
@@ -2385,6 +2398,7 @@ mod session_takeover_tests {
             resume_token: "tok".into(),
             pty_cmd_tx: pty_tx,
             output_tx: out_tx,
+            output: Arc::new(Mutex::new(replay::SessionOutput::new(24, 80))),
             shutdown_tx: Some(shut_tx),
             detached_at: Some(Instant::now()),
             started_at_unix: 0,
@@ -2475,6 +2489,7 @@ mod detached_summaries_tests {
             resume_token: "tok".into(),
             pty_cmd_tx: pty_tx,
             output_tx: out_tx,
+            output: Arc::new(Mutex::new(replay::SessionOutput::new(24, 80))),
             shutdown_tx: Some(shut_tx),
             detached_at: detached_at_unix.map(|_| Instant::now()),
             started_at_unix,

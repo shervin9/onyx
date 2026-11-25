@@ -39,6 +39,8 @@ const SHARED_CARGO_TOML: &str = include_str!("../../shared/Cargo.toml");
 const SHARED_LIB_RS: &str = include_str!("../../shared/src/lib.rs");
 const SERVER_CARGO_TOML: &str = include_str!("../../server/Cargo.toml");
 const SERVER_MAIN_RS: &str = include_str!("../../server/src/main.rs");
+const SERVER_DB_RS: &str = include_str!("../../server/src/db.rs");
+const SERVER_REPLAY_RS: &str = include_str!("../../server/src/replay.rs");
 
 const REMOTE_DIR: &str = "~/.local/share/onyx";
 const ONYX_SERVER_BINARY_ENV: &str = "ONYX_SERVER_BINARY";
@@ -3855,6 +3857,8 @@ fn source_hash() -> u64 {
     let mut h = OFFSET;
     for b in SERVER_MAIN_RS
         .bytes()
+        .chain(SERVER_DB_RS.bytes())
+        .chain(SERVER_REPLAY_RS.bytes())
         .chain(SHARED_LIB_RS.bytes())
         .chain(SERVER_CARGO_TOML.bytes())
         .chain(SHARED_CARGO_TOML.bytes())
@@ -4467,6 +4471,15 @@ fn upload_and_build(
         &format!("{}/server/src/main.rs", paths.remote_dir),
         SERVER_MAIN_RS.as_bytes(),
     )?;
+    for (name, src) in [("db.rs", SERVER_DB_RS), ("replay.rs", SERVER_REPLAY_RS)] {
+        ssh_upload(
+            target,
+            identity,
+            session,
+            &format!("{}/server/src/{name}", paths.remote_dir),
+            src.as_bytes(),
+        )?;
+    }
 
     eprintln!("[onyx] building on remote from source (last-resort fallback)…");
     // Build into the workspace's target/ as usual, then stage the resulting
@@ -6672,6 +6685,7 @@ async fn try_once(
     raw_mode: &mut Option<RawMode>,
     allow_picker: bool,
     no_tmux: bool,
+    last_seq: &Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<bool> {
     let first_connect = session.is_none();
     if first_connect {
@@ -6697,6 +6711,9 @@ async fn try_once(
     if first_connect && allow_picker {
         if let Some(picked) = pick_session(&conn, auth_token).await {
             *session = Some(picked);
+            // New terminal for an existing session: the server repaints the
+            // screen once instead of replaying history.
+            last_seq.store(0, Ordering::Relaxed);
         }
     }
 
@@ -6710,6 +6727,7 @@ async fn try_once(
     let term = terminal_env_value();
     match session.as_ref() {
         None => {
+            last_seq.store(0, Ordering::Relaxed);
             eprintln!("[onyx] starting shell...");
             send_msg(
                 &mut send,
@@ -6732,7 +6750,8 @@ async fn try_once(
                     auth_token: auth_token.to_string(),
                     session_id: sid.clone(),
                     resume_token: tok.clone(),
-                    last_seq: 0,
+                    // Lets the server resend exactly the output we missed.
+                    last_seq: last_seq.load(Ordering::Relaxed),
                 },
             )
             .await?;
@@ -6750,6 +6769,7 @@ async fn try_once(
             // Successful reclaim — clear the throttle flag so a future
             // disconnect episode can print the message once again.
             SESSION_BUSY_LOGGED.store(false, Ordering::Relaxed);
+            clear_status_line();
             (session_id, resume_token)
         }
         // Transient: the previous attacher is still considered live by the
@@ -6867,28 +6887,34 @@ async fn try_once(
         }
     });
 
+    let seen_seq = last_seq.clone();
     let mut output_jh = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         let mut pending = Vec::new();
+        let mut pending_seq = 0u64;
         let mut last_flush = tokio::time::Instant::now();
         loop {
             match recv_msg(&mut recv).await {
-                Ok(Message::Output { data, .. }) => {
+                Ok(Message::Output { seq, data }) => {
                     if !mode.low_bandwidth {
                         if stdout.write_all(&data).await.is_err() {
                             break false;
                         }
                         let _ = stdout.flush().await;
+                        // Only count output as seen once it reached the terminal.
+                        seen_seq.store(seq, Ordering::Relaxed);
                         continue;
                     }
 
                     pending.extend_from_slice(&data);
+                    pending_seq = seq;
                     let deadline = tokio::time::Instant::now() + mode.stdout_batch_window;
                     let mut saw_close = false;
                     while pending.len() < mode.stdout_chunk_limit {
                         match tokio::time::timeout_at(deadline, recv_msg(&mut recv)).await {
-                            Ok(Ok(Message::Output { data, .. })) => {
-                                pending.extend_from_slice(&data)
+                            Ok(Ok(Message::Output { seq, data })) => {
+                                pending.extend_from_slice(&data);
+                                pending_seq = seq;
                             }
                             Ok(Ok(Message::Close { .. })) => {
                                 saw_close = true;
@@ -6904,6 +6930,7 @@ async fn try_once(
                             break false;
                         }
                         pending.clear();
+                        seen_seq.store(pending_seq, Ordering::Relaxed);
                     }
                     if last_flush.elapsed() >= mode.stdout_flush_window {
                         if stdout.flush().await.is_err() {
@@ -6948,25 +6975,33 @@ async fn try_once(
 // Connection status line — calm, native-feeling state indicator
 // ---------------------------------------------------------------------------
 
-/// Shows a single, non-animated status line on the local terminal (stderr).
-/// Matches the visual grammar of the tmux status bar: dot · label · state.
-/// Written once per disconnect episode — no elapsed timer, no animation.
-/// Call clear_status_line() before re-entering raw mode.
+static RECONNECT_TITLE_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Signal "reconnecting" through the terminal window/tab title instead of
+/// printing into the session. Writing a status line would corrupt the screen
+/// that the server is about to catch up byte-for-byte; the title bar sits
+/// outside it. The user's own title is pushed onto the terminal's title stack
+/// (XTWINOPS 22) and popped back (23) once the session is live again.
 fn show_reconnect_status() {
     use std::io::Write;
-    // amber ● · "onyx  Reconnecting…" — says Onyx is actively retrying and
-    // for how long, rather than a bare "Connection lost" that reads as final.
+    if RECONNECT_TITLE_SHOWN.swap(true, Ordering::Relaxed) {
+        return;
+    }
     eprint!(
-        "\r\x1b[2K\x1b[38;5;214m●\x1b[0m  onyx  \x1b[38;5;214mReconnecting… (retrying up to {} min)\x1b[0m",
+        "\x1b[22;0t\x1b]0;\u{25cf} onyx \u{2014} reconnecting\u{2026} (up to {} min)\x07",
         INTERACTIVE_RECONNECT_WINDOW.as_secs() / 60
     );
     std::io::stderr().flush().ok();
 }
 
-/// Erase the status line before re-entering raw terminal mode.
+/// Restore the user's terminal title after a reconnect (or on give-up).
 fn clear_status_line() {
     use std::io::Write;
-    eprint!("\r\x1b[2K");
+    if !RECONNECT_TITLE_SHOWN.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    eprint!("\x1b[23;0t");
     std::io::stderr().flush().ok();
 }
 
@@ -7277,13 +7312,11 @@ async fn run_interactive_session(
     // messages in normal cooked mode while preserving clean terminal restore.
     let mut raw_mode: Option<RawMode> = None;
 
-    loop {
-        // Erase any live status line before entering raw terminal mode so it
-        // does not appear as garbage inside the tmux session.
-        if disconnect_at.is_some() {
-            clear_status_line();
-        }
+    // Highest output seq this terminal has rendered; sent on Resume so the
+    // server replays exactly what we missed.
+    let last_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
+    loop {
         // After 20 s of failed reconnects, re-run bootstrap via SSH.
         // This refreshes remote state and restarts a crashed server without
         // blocking on the first fast-path attempt.
@@ -7331,6 +7364,7 @@ async fn run_interactive_session(
             &mut raw_mode,
             allow_picker,
             no_tmux,
+            &last_seq,
         )
         .await
         {
