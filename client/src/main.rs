@@ -5846,7 +5846,7 @@ enum SessionPick {
 /// `Fresh` rather than erroring, so the prompt never traps the user.
 fn parse_session_pick(input: &str, count: usize) -> SessionPick {
     let t = input.trim();
-    if t.is_empty() {
+    if t.is_empty() || t.eq_ignore_ascii_case("y") || t.eq_ignore_ascii_case("yes") {
         return SessionPick::MostRecent;
     }
     if t.eq_ignore_ascii_case("n") {
@@ -5876,31 +5876,37 @@ async fn pick_session(
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    if sessions.len() == 1 {
+    let describe = |s: &SessionSummary| match s.detached_at_unix {
+        Some(d) => format!("detached {}", format_relative_time(now_unix, d)),
+        None => "still attached (another terminal, or a client that dropped)".to_string(),
+    };
+
+    // One detached session: resume it without asking (the common case
+    // after a network drop that outlasted the reconnect window).
+    if sessions.len() == 1 && sessions[0].detached_at_unix.is_some() {
         let s = &sessions[0];
-        let idle = s
-            .detached_at_unix
-            .map(|d| format_relative_time(now_unix, d))
-            .unwrap_or_else(|| "recently".into());
         eprintln!(
-            "[onyx] found a detached session (idle {idle}) — resuming it. Use --new to start fresh."
+            "[onyx] resuming your session ({}). Use --new to start fresh.",
+            describe(s)
         );
         return Some((s.session_id.clone(), s.resume_token.clone()));
     }
 
-    eprintln!("[onyx] {} detached sessions on this host:", sessions.len());
-    for (i, s) in sessions.iter().enumerate() {
-        let idle = s
-            .detached_at_unix
-            .map(|d| format_relative_time(now_unix, d))
-            .unwrap_or_else(|| "recently".into());
-        eprintln!(
-            "  {}) {}  idle {idle}",
-            i + 1,
-            truncate_display(&s.session_id, 12)
-        );
+    if sessions.len() == 1 {
+        eprintln!("[onyx] found 1 session on this host, {}.", describe(&sessions[0]));
+        eprint!("Take it over? [Enter = yes, 'n' = new session] ");
+    } else {
+        eprintln!("[onyx] {} sessions on this host:", sessions.len());
+        for (i, s) in sessions.iter().enumerate() {
+            eprintln!(
+                "  {}) {}  {}",
+                i + 1,
+                truncate_display(&s.session_id, 12),
+                describe(s)
+            );
+        }
+        eprint!("Resume which? [Enter = 1, number, or 'n' for new] ");
     }
-    eprint!("Resume which? [Enter = most recent, number, or 'n' for new] ");
     use std::io::Write;
     std::io::stderr().flush().ok();
 

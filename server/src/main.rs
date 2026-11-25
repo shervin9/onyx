@@ -1558,16 +1558,19 @@ async fn handle_audit_list(mut send: quinn::SendStream, limit: Option<u32>) -> R
 fn detached_summaries(sessions: &HashMap<String, SessionMeta>) -> Vec<SessionSummary> {
     let mut v: Vec<SessionSummary> = sessions
         .iter()
-        .filter_map(|(id, meta)| {
-            meta.detached_at_unix.map(|detached_at_unix| SessionSummary {
-                session_id: id.clone(),
-                resume_token: meta.resume_token.clone(),
-                started_at_unix: meta.started_at_unix,
-                detached_at_unix: Some(detached_at_unix),
-            })
+        .map(|(id, meta)| SessionSummary {
+            session_id: id.clone(),
+            resume_token: meta.resume_token.clone(),
+            started_at_unix: meta.started_at_unix,
+            // None = still attached. That is either another live terminal or a
+            // client that died without closing (laptop crash, kill -9) and
+            // whose connection has not timed out yet. Listed so the user can
+            // take it over instead of losing it.
+            detached_at_unix: meta.detached_at_unix,
         })
         .collect();
-    v.sort_by_key(|s| std::cmp::Reverse(s.detached_at_unix));
+    // Detached sessions first (most recent first), then attached ones.
+    v.sort_by_key(|s| (s.detached_at_unix.is_none(), std::cmp::Reverse(s.detached_at_unix)));
     v
 }
 
@@ -2505,7 +2508,7 @@ mod detached_summaries_tests {
     }
 
     #[test]
-    fn skips_attached_sessions_and_sorts_newest_detached_first() {
+    fn lists_detached_newest_first_then_attached() {
         let mut sessions = HashMap::new();
         sessions.insert("attached".to_string(), mk(None, 100));
         sessions.insert("old".to_string(), mk(Some(200), 100));
@@ -2513,9 +2516,10 @@ mod detached_summaries_tests {
 
         let summaries = detached_summaries(&sessions);
         let ids: Vec<&str> = summaries.iter().map(|s| s.session_id.as_str()).collect();
-        assert_eq!(ids, ["new", "old"]);
+        assert_eq!(ids, ["new", "old", "attached"]);
         assert_eq!(summaries[0].started_at_unix, 150);
         assert_eq!(summaries[0].detached_at_unix, Some(300));
+        assert_eq!(summaries[2].detached_at_unix, None);
     }
 }
 
