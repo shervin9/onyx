@@ -30,7 +30,7 @@ jobs:
             build_server: true
 
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
             client_artifact: onyx-macos-arm64
             server_artifact: ""
             use_cross: false
