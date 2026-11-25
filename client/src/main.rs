@@ -25,8 +25,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 mod agent;
-mod mcp;
-mod workspace;
 
 // ---------------------------------------------------------------------------
 // Source files embedded at compile time for remote bootstrap.
@@ -63,37 +61,6 @@ fn cert_fingerprint(cert_der: &[u8]) -> String {
 }
 
 type FpCapture = Arc<Mutex<Option<String>>>;
-
-#[derive(Clone, Copy)]
-struct BandwidthMode {
-    low_bandwidth: bool,
-    stdin_batch_window: Duration,
-    stdout_batch_window: Duration,
-    stdout_flush_window: Duration,
-    stdout_chunk_limit: usize,
-}
-
-impl BandwidthMode {
-    fn normal() -> Self {
-        Self {
-            low_bandwidth: false,
-            stdin_batch_window: Duration::from_millis(5),
-            stdout_batch_window: Duration::from_millis(0),
-            stdout_flush_window: Duration::from_millis(0),
-            stdout_chunk_limit: 4096,
-        }
-    }
-
-    fn low_bandwidth() -> Self {
-        Self {
-            low_bandwidth: true,
-            stdin_batch_window: Duration::from_millis(20),
-            stdout_batch_window: Duration::from_millis(30),
-            stdout_flush_window: Duration::from_millis(60),
-            stdout_chunk_limit: 16384,
-        }
-    }
-}
 
 /// Accepts every cert during the TLS handshake and captures the fingerprint.
 /// The actual TOFU check happens after the handshake completes, before any
@@ -654,6 +621,8 @@ async fn tcp_proxy_fallback(target_host: &str, target_port: u16) -> Result<()> {
 /// QUIC handshake timeout for interactive mode. Longer than before to tolerate
 /// slow cellular / overseas links without giving up prematurely, short enough
 /// that a truly blocked UDP port fails within ~10 s.
+/// How long stdin waits to coalesce a burst of keystrokes into one write.
+const STDIN_BATCH_WINDOW: Duration = Duration::from_millis(5);
 const INTERACTIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Retry window after first successful session is dropped. Covers laptop
 /// sleep, VPN reconnect, multi-minute transitions, and flaky networks —
@@ -728,19 +697,10 @@ enum CliMode {
         identity_file: Option<String>,
         no_fallback: bool,
         no_bootstrap: bool,
-        low_bandwidth: bool,
         forwards: Vec<(u16, u16)>,
         port_override: Option<u16>,
-        workspace: Option<String>,
         /// Skip the resume picker and always start a fresh session.
         new_session: bool,
-    },
-    /// `onyx ls` — list known named workspaces.
-    Ls,
-    /// `onyx attach <workspace-name>` — resume a named workspace.
-    AttachWorkspace {
-        name: String,
-        identity_file: Option<String>,
     },
     Proxy {
         target_host: String,
@@ -785,7 +745,6 @@ enum CliMode {
         json: bool,
         job_id: String,
     },
-    Mcp {},
     Doctor {
         raw_target: String,
         identity_file: Option<String>,
@@ -797,17 +756,6 @@ enum CliMode {
         no_bootstrap: bool,
         json: bool,
         limit: Option<u32>,
-    },
-    /// `onyx diff <target>` — `git diff` on the remote, for reviewing what an
-    /// agent (or anyone) changed in a working tree.
-    Diff {
-        raw_target: String,
-        identity_file: Option<String>,
-        no_bootstrap: bool,
-        json: bool,
-        cwd: Option<String>,
-        staged: bool,
-        stat: bool,
     },
     /// `onyx agent run <target> --agent <kind> -- <prompt...>` — run a coding
     /// agent CLI headlessly on the remote as a resumable exec job.
@@ -862,32 +810,6 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             "--help" | "-h" => return Ok(ParseOutcome::Help),
             "--version" | "-V" => return Ok(ParseOutcome::Version),
             _ => {}
-        }
-    }
-
-    if matches!(it.peek(), Some(cmd) if cmd == "ls") {
-        it.next();
-        if let Some(extra) = it.next() {
-            return Err(format!("ls: unexpected argument: {extra}"));
-        }
-        return Ok(ParseOutcome::Run(CliMode::Ls));
-    }
-
-    if matches!(it.peek(), Some(cmd) if cmd == "mcp") {
-        it.next();
-        match it.next().as_deref() {
-            Some("serve") => {
-                if let Some(extra) = it.next() {
-                    return Err(format!("mcp serve: unexpected argument: {extra}"));
-                }
-                return Ok(ParseOutcome::Run(CliMode::Mcp {}));
-            }
-            Some(other) => {
-                return Err(format!(
-                    "mcp: unknown subcommand '{other}' (try: onyx mcp serve)"
-                ))
-            }
-            None => return Err("mcp: missing subcommand (try: onyx mcp serve)".to_string()),
         }
     }
 
@@ -981,55 +903,6 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             no_bootstrap,
             json,
             limit,
-        }));
-    }
-
-    // ── diff ────────────────────────────────────────────────────────────
-    //
-    // `onyx diff <target> [--cwd <dir>] [--staged] [--stat] [--json]` —
-    // `git diff` on the remote, for reviewing what changed.
-    if matches!(it.peek(), Some(cmd) if cmd == "diff") {
-        it.next();
-        let raw_target = it
-            .next()
-            .ok_or_else(|| "diff: missing <target>".to_string())?;
-        let mut identity: Option<String> = None;
-        let mut no_bootstrap = false;
-        let mut json = false;
-        let mut cwd: Option<String> = None;
-        let mut staged = false;
-        let mut stat = false;
-        while let Some(a) = it.next() {
-            match a.as_str() {
-                "--json" => json = true,
-                "--no-bootstrap" => no_bootstrap = true,
-                "--staged" => staged = true,
-                "--stat" => stat = true,
-                "--cwd" => {
-                    cwd = Some(
-                        it.next()
-                            .ok_or_else(|| "--cwd requires an argument".to_string())?,
-                    );
-                }
-                "-i" => {
-                    identity = Some(
-                        it.next()
-                            .ok_or_else(|| "-i requires an argument".to_string())?,
-                    );
-                }
-                other => {
-                    return Err(format!("diff: unexpected argument: {other} (try --help)"));
-                }
-            }
-        }
-        return Ok(ParseOutcome::Run(CliMode::Diff {
-            raw_target,
-            identity_file: identity,
-            no_bootstrap,
-            json,
-            cwd,
-            staged,
-            stat,
         }));
     }
 
@@ -1296,21 +1169,18 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 }
                 let job_id_opt = positional.into_iter().next();
                 if sub == "attach" {
-                    match job_id_opt {
-                        // Two-arg form: `onyx attach <target> <job-id>` — exec job attach.
-                        Some(job_id) => Ok(ParseOutcome::Run(CliMode::Attach {
-                            raw_target,
-                            identity_file: identity,
-                            no_bootstrap,
-                            json,
-                            job_id,
-                        })),
-                        // Single-arg form: `onyx attach <workspace-name>` — workspace resume.
-                        None => Ok(ParseOutcome::Run(CliMode::AttachWorkspace {
-                            name: raw_target,
-                            identity_file: identity,
-                        })),
-                    }
+                    let job_id = job_id_opt.ok_or_else(|| {
+                        "attach: missing <job-id> (interactive sessions resume \
+                         automatically: just run `onyx <host>`)"
+                            .to_string()
+                    })?;
+                    Ok(ParseOutcome::Run(CliMode::Attach {
+                        raw_target,
+                        identity_file: identity,
+                        no_bootstrap,
+                        json,
+                        job_id,
+                    }))
                 } else {
                     let job_id = job_id_opt
                         .ok_or_else(|| "logs: missing <job-id>".to_string())?;
@@ -1331,10 +1201,8 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     let mut target: Option<String> = None;
     let mut no_fallback = false;
     let mut no_bootstrap = false;
-    let mut low_bandwidth = false;
     let mut forwards: Vec<(u16, u16)> = Vec::new();
     let mut port_override: Option<u16> = None;
-    let mut workspace: Option<String> = None;
     let mut new_session = false;
 
     while let Some(a) = it.next() {
@@ -1347,7 +1215,6 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             }
             "--no-fallback" => no_fallback = true,
             "--no-bootstrap" => no_bootstrap = true,
-            "--low-bandwidth" => low_bandwidth = true,
             "--port" => {
                 let val = it
                     .next()
@@ -1363,12 +1230,6 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                     .ok_or_else(|| "--forward requires local_port:remote_port".to_string())?;
                 let (lp, rp) = parse_forward_spec(&spec)?;
                 forwards.push((lp, rp));
-            }
-            "--workspace" | "-w" => {
-                workspace = Some(
-                    it.next()
-                        .ok_or_else(|| "--workspace requires a name".to_string())?,
-                );
             }
             "--new" => new_session = true,
             // Accepted and ignored: sessions are tmux-free now, so this is
@@ -1393,10 +1254,8 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         identity_file: identity,
         no_fallback,
         no_bootstrap,
-        low_bandwidth,
         forwards,
         port_override,
-        workspace,
         new_session,
     }))
 }
@@ -1415,120 +1274,69 @@ fn parse_forward_spec(spec: &str) -> Result<(u16, u16), String> {
 }
 
 const HELP_TEXT: &str = "\
-onyx — stable remote shell for unreliable networks (QUIC + SSH fallback)
+onyx — a remote shell that survives network drops (QUIC, SSH fallback)
 
 USAGE
-  onyx [OPTIONS] [user@]<host>[:<quic-port>]       interactive shell
-  onyx [OPTIONS] [user@]<host> --workspace <name>  connect to a named workspace
-  onyx ls                                           list named workspaces
-  onyx attach <workspace-name>                      resume a named workspace
-  onyx proxy <host> <port>                          SSH ProxyCommand transport
-  onyx exec   <target> [--json] [--detach] [--cwd <dir>] [--env K=V]... [--timeout <dur>] -- <cmd...>
-  onyx jobs   <target> [--json]
-  onyx audit  <target> [--limit N] [--json]         durable job history (survives restart)
-  onyx diff   <target> [--cwd <dir>] [--staged] [--stat] [--json]   git diff on the remote
-  onyx attach <target> <job-id> [--json]            attach to a background exec job
-  onyx logs   <target> <job-id> [--json]
-  onyx kill   <target> <job-id> [--json]
-  onyx agent run <target> [--agent <kind>] [--model <m>] [--yolo] [--detach] [--cwd <dir>] [--timeout <dur>] [--json] -- <prompt...>
-  onyx doctor <target>                              run diagnostics for a target
-  onyx mcp serve                                    stdio MCP server (for AI agents)
+  onyx [OPTIONS] [user@]<host>[:<quic-port>]      interactive shell
+  onyx exec   <target> [OPTIONS] -- <cmd...>      run a resumable remote job
+  onyx jobs   <target> [--json]                   list jobs
+  onyx attach <target> <job-id> [--json]          reattach to a job
+  onyx logs   <target> <job-id> [--json]          print a job's buffered output
+  onyx kill   <target> <job-id> [--json]          stop a job
+  onyx audit  <target> [--limit N] [--json]       job history (survives restart)
+  onyx agent run <target> [--agent <kind>] [--model <m>] [--yolo] [--detach]
+                 [--cwd <dir>] [--timeout <dur>] [--json] -- <prompt...>
+  onyx proxy  <host> <port>                       transport for SSH ProxyCommand
+  onyx doctor <target>                            diagnose connectivity
   onyx --help | --version
 
-MODES
-  Interactive     tmux-backed shell over QUIC. The client retries a
-                  disrupted session for up to ~10 minutes with exponential
-                  backoff, so short Wi-Fi/VPN/NAT hiccups recover in place.
-                  Detached sessions are retained server-side for up to
-                  12 hours (in-memory; does not survive onyx-server
-                  restart).
-  Proxy           stdio-bridged TCP tunnel for use as SSH ProxyCommand.
-                  Short transport drops are recovered best-effort within
-                  ~2 minutes; longer drops end the underlying SSH session.
-                  When QUIC is unavailable, proxy mode falls back to a
-                  plain TCP bridge to <host> <port> unless --no-fallback
-                  is set. The plain-TCP path cannot revive a QUIC-started
-                  SSH session; it only replaces QUIC for new sessions.
-  Exec            Resumable remote command execution. The server owns
-                  the child process, buffers up to 4 MiB of output per
-                  job in a ring, and keeps the job alive across client
-                  disconnects. Foreground `onyx exec` and `onyx attach`
-                  auto-reconnect on transport drops (up to 10 min with
-                  exponential backoff) and seamlessly resume streaming
-                  from the last seen seq. Reattach manually with
-                  `onyx attach`, snapshot output with `onyx logs`,
-                  enumerate with `onyx jobs`. Jobs survive client
-                  disconnects but NOT onyx-server restart or host
-                  reboot (in-memory). Finished jobs are retained for
-                  1 hour.
-  Agent           Runs a coding-agent CLI (claude, codex, aider, gemini)
-                  headlessly on the remote as an exec job, so it survives
-                  disconnects and is reattachable. The agent must already
-                  be installed and authenticated on the remote host; Onyx
-                  does not inject credentials. Only the claude adapter is
-                  verified today. Use --yolo to let the agent act without
-                  approval (it can run arbitrary commands on the remote).
-  Diff            `git diff` on the remote (foreground `onyx exec` under the
-                  hood) — review what changed in a working tree, e.g. right
-                  after `onyx agent run`. --staged for index-vs-HEAD,
-                  --stat for a summary.
+SHELL
+  A plain login shell on the server's own PTY: your terminal's scrollback,
+  selection and copy work exactly like SSH. No tmux.
+  When the network drops, the shell keeps running on the server. The client
+  retries for up to 30 minutes and then sends back exactly the output you
+  missed. After a very long gap it repaints the screen once instead. Run
+  `onyx <host>` again later to resume a detached session (kept for 12 hours,
+  in memory). The terminal title shows when Onyx is reconnecting.
 
-INSTALL MODEL
-  onyx is a local CLI. On first connect to a host it provisions
-  onyx-server on the remote over SSH using a packaged companion binary
-  matching the remote arch. Supported companion names are
-  onyx-server-linux-x86_64 and onyx-server-linux-arm64. Lookup order:
-  same directory as onyx, Homebrew/package libexec, then
-  ONYX_SERVER_BINARY=/path/to/onyx-server-linux-<arch>.
-  Remote source builds are developer-only and require
-  ONYX_DEV_REMOTE_BUILD=1. Subsequent connects reuse the already-running
-  server. Bootstrap also reads the remote server auth token used to
-  authorize QUIC streams. If you skip bootstrap, set
-  ONYX_AUTH_TOKEN to the value from
-  ~/.local/share/onyx/server.auth_token on the remote host.
+JOBS
+  `onyx exec` runs a command owned by the server. It keeps running if you
+  disconnect, buffers up to 4 MiB of output, and the client resumes the
+  stream automatically. Jobs do not survive an onyx-server restart. Finished
+  jobs are kept for 1 hour.
+  `onyx agent run` runs a coding agent CLI (claude; codex/aider/gemini are
+  best-effort) as a job. The agent must already be installed and signed in
+  on the remote. --yolo lets it act without approval.
 
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
-  -w, --workspace <name>    bind this session to a named workspace
-  --new                     start a fresh session; skip the resume picker
+  --new                     start a fresh shell; skip the resume picker
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
-  --port <port>             QUIC port on the remote (default: 7272).
-                              Also: ONYX_PORT=<port> env var (all modes).
-                              Alternative: append :<port> to the target.
-  --no-bootstrap            skip remote install/start checks; requires
-                              ONYX_AUTH_TOKEN because bootstrap normally
-                              reads the remote server auth token
-  --no-fallback             exit on QUIC failure instead of falling back
-                              (plain SSH exec for interactive, plain TCP
-                               bridge for proxy mode)
-  --low-bandwidth           smoother batching on poor links
-  --json                    (exec/jobs/attach/logs/kill) structured output,
-                              one JSON object per line
-  --detach                  (exec) start the job and exit; reattach later
-  --cwd <dir>               (exec) working directory on the remote host
+  --port <port>             QUIC port on the remote (default: 7272; also
+                              ONYX_PORT or <host>:<port>)
+  --no-bootstrap            skip remote install/start; needs ONYX_AUTH_TOKEN
+                              (from ~/.local/share/onyx/server.auth_token)
+  --no-fallback             fail instead of falling back to plain SSH/TCP
+  --json                    one JSON object per line (jobs commands)
+  --detach                  (exec) start the job and return
+  --cwd <dir>               (exec) working directory on the remote
   --env KEY=VALUE           (exec) extra environment variable (repeatable)
-  --timeout <dur>           (exec) kill after duration, e.g. 30s, 5m, 2h
-                              exit code 124 on timeout
+  --timeout <dur>           (exec) kill after e.g. 30s, 5m, 2h (exit 124)
   -h, --help                show this help
   -V, --version             print version
 
+INSTALL
+  On first connect Onyx uploads the matching onyx-server binary over SSH
+  (linux x86_64/arm64) and starts it. Later connects reuse it.
+
 EXAMPLES
   onyx user@host
-  onyx dev-server                    # SSH alias from ~/.ssh/config
-  onyx --forward 8888:8888 user@host
-  onyx --port 443 user@host          # custom QUIC port
-  ONYX_PORT=443 onyx exec host -- cmd
-  onyx proxy host.example.com 22     # behind ProxyCommand in ssh_config
-  onyx proxy --no-fallback host 22   # require QUIC for ProxyCommand
-  onyx exec prod -- deploy.sh
+  onyx dev-server                          # alias from ~/.ssh/config
+  onyx -L 3000:3000 dev-server             # forward a local port
   onyx exec gpu-box --detach -- python train.py
-  onyx exec ci --json -- cargo test --workspace
-  onyx exec gpu-box --cwd /data --env BATCH=64 --timeout 2h -- python train.py
-  onyx jobs gpu-box
-  onyx attach gpu-box job_a1b2c3d4e5f60718
-  onyx logs  gpu-box job_a1b2c3d4e5f60718
-  onyx kill  gpu-box job_a1b2c3d4e5f60718
-  onyx doctor user@host              # diagnose connectivity
+  onyx logs gpu-box job_a1b2c3d4e5f60718
+  onyx exec ci --json -- cargo test
+  onyx proxy host.example.com 22           # ProxyCommand in ssh_config
 ";
 
 /// Real CLI entry point. Wraps `parse_args_from` and converts parse errors /
@@ -1646,55 +1454,6 @@ mod parse_args_tests {
     }
 
     #[test]
-    fn diff_parses_target_flags_and_json() {
-        let out = parse_args_from(s(&[
-            "diff", "gpu-box", "--staged", "--stat", "--cwd", "/srv/app", "--json",
-        ]))
-        .unwrap();
-        match out {
-            ParseOutcome::Run(CliMode::Diff {
-                raw_target,
-                json,
-                cwd,
-                staged,
-                stat,
-                ..
-            }) => {
-                assert_eq!(raw_target, "gpu-box");
-                assert!(json);
-                assert_eq!(cwd.as_deref(), Some("/srv/app"));
-                assert!(staged);
-                assert!(stat);
-            }
-            other => panic!("expected Diff, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn diff_defaults_have_no_flags_and_requires_target() {
-        let out = parse_args_from(s(&["diff", "host"])).unwrap();
-        match out {
-            ParseOutcome::Run(CliMode::Diff {
-                raw_target,
-                json,
-                cwd,
-                staged,
-                stat,
-                ..
-            }) => {
-                assert_eq!(raw_target, "host");
-                assert!(!json);
-                assert_eq!(cwd, None);
-                assert!(!staged);
-                assert!(!stat);
-            }
-            other => panic!("expected Diff, got {other:?}"),
-        }
-        assert!(parse_args_from(s(&["diff"])).is_err());
-        assert!(parse_args_from(s(&["diff", "host", "--nope"])).is_err());
-    }
-
-    #[test]
     fn help_flag_long_and_short() {
         assert!(matches!(
             parse_args_from(s(&["--help"])).unwrap(),
@@ -1736,13 +1495,11 @@ mod parse_args_tests {
             ParseOutcome::Run(CliMode::Interactive {
                 no_bootstrap,
                 no_fallback,
-                low_bandwidth,
                 new_session,
                 ..
             }) => {
                 assert!(no_bootstrap);
                 assert!(no_fallback);
-                assert!(!low_bandwidth);
                 assert!(!new_session);
             }
             _ => panic!(),
@@ -1842,18 +1599,17 @@ mod parse_args_tests {
     fn help_text_mentions_key_concepts() {
         for needle in [
             "USAGE",
-            "Interactive",
-            "Proxy",
+            "SHELL",
+            "JOBS",
+            "No tmux",
             "--forward",
             "--no-fallback",
             "--no-bootstrap",
-            "--low-bandwidth",
             "--port",
             "ONYX_PORT",
-            "proxy <host> <port>",
-            "proxy --no-fallback",
+            "proxy  <host> <port>",
             "12 hours",
-            "plain TCP bridge",
+            "30 minutes",
             "onyx exec",
             "onyx jobs",
             "onyx attach",
@@ -1861,7 +1617,6 @@ mod parse_args_tests {
             "onyx doctor",
             "--json",
             "--detach",
-            "Resumable remote command execution",
             "1 hour",
         ] {
             assert!(HELP_TEXT.contains(needle), "HELP_TEXT missing '{needle}'");
@@ -2127,15 +1882,11 @@ mod parse_args_tests {
     }
 
     #[test]
-    fn attach_one_arg_is_workspace_two_args_is_job() {
-        // Single-arg `attach <name>` resumes a named workspace (see named
-        // workspaces feature); two-arg `attach <target> <job-id>` attaches an
-        // exec job.
-        let out = parse_args_from(s(&["attach", "host"])).unwrap();
-        assert!(matches!(
-            out,
-            ParseOutcome::Run(CliMode::AttachWorkspace { name, .. }) if name == "host"
-        ));
+    fn attach_requires_target_and_job_id() {
+        // Interactive sessions resume on their own; `attach` is only for
+        // exec jobs and needs both a target and a job id.
+        let err = parse_args_from(s(&["attach", "host"])).unwrap_err();
+        assert!(err.contains("missing <job-id>"), "err was: {err}");
 
         let out = parse_args_from(s(&["attach", "host", "job_abc", "--json"])).unwrap();
         match out {
@@ -5597,40 +5348,6 @@ async fn run_agent_run_mode(
     .await
 }
 
-/// Run `git diff` on the remote, for reviewing what changed in a working
-/// tree (e.g. right after an `onyx agent run`). Thin wrapper over
-/// [`run_exec_mode`], same pattern as `run_agent_run_mode`. Foreground only —
-/// a diff is fast, no need for detach.
-async fn run_diff_mode(
-    raw_target: String,
-    identity_file: Option<String>,
-    no_bootstrap: bool,
-    json: bool,
-    cwd: Option<String>,
-    staged: bool,
-    stat: bool,
-) -> Result<()> {
-    let mut command = vec!["git".to_string(), "diff".to_string()];
-    if staged {
-        command.push("--staged".to_string());
-    }
-    if stat {
-        command.push("--stat".to_string());
-    }
-    run_exec_mode(
-        raw_target,
-        identity_file,
-        no_bootstrap,
-        json,
-        false,
-        command,
-        cwd,
-        Vec::new(),
-        None,
-    )
-    .await
-}
-
 async fn run_exec_mode(
     raw_target: String,
     identity_file: Option<String>,
@@ -6237,7 +5954,6 @@ async fn try_once(
     capture: &FpCapture,
     auth_token: &str,
     forwards: &[(u16, u16)],
-    mode: BandwidthMode,
     raw_mode: &mut Option<RawMode>,
     allow_picker: bool,
     last_seq: &Arc<std::sync::atomic::AtomicU64>,
@@ -6357,9 +6073,6 @@ async fn try_once(
         } else {
             eprintln!("[mode] QUIC  (session {session_id})");
         }
-        if mode.low_bandwidth {
-            eprintln!("[mode] low-bandwidth");
-        }
     } else {
         debug_log(&format!(
             "session {} (reconnect)",
@@ -6417,9 +6130,9 @@ async fn try_once(
                 Ev::Data(Ok(0)) | Ev::Data(Err(_)) => break,
                 Ev::Data(Ok(n)) => {
                     let mut data = buf[..n].to_vec();
-                    // Normal mode keeps typing crisp. Low-bandwidth mode waits a bit longer
-                    // so bursts coalesce into fewer QUIC writes without changing the protocol.
-                    let deadline = tokio::time::Instant::now() + mode.stdin_batch_window;
+                    // Coalesce a burst (paste, key repeat) into one QUIC write
+                    // without adding noticeable typing latency.
+                    let deadline = tokio::time::Instant::now() + STDIN_BATCH_WINDOW;
                     loop {
                         match tokio::time::timeout_at(deadline, stdin.read(&mut buf)).await {
                             Ok(Ok(m)) if m > 0 => data.extend_from_slice(&buf[..m]),
@@ -6446,63 +6159,17 @@ async fn try_once(
     let seen_seq = last_seq.clone();
     let mut output_jh = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
-        let mut pending = Vec::new();
-        let mut pending_seq = 0u64;
-        let mut last_flush = tokio::time::Instant::now();
         loop {
             match recv_msg(&mut recv).await {
                 Ok(Message::Output { seq, data }) => {
-                    if !mode.low_bandwidth {
-                        if stdout.write_all(&data).await.is_err() {
-                            break false;
-                        }
-                        let _ = stdout.flush().await;
-                        // Only count output as seen once it reached the terminal.
-                        seen_seq.store(seq, Ordering::Relaxed);
-                        continue;
+                    if stdout.write_all(&data).await.is_err() {
+                        break false;
                     }
-
-                    pending.extend_from_slice(&data);
-                    pending_seq = seq;
-                    let deadline = tokio::time::Instant::now() + mode.stdout_batch_window;
-                    let mut saw_close = false;
-                    while pending.len() < mode.stdout_chunk_limit {
-                        match tokio::time::timeout_at(deadline, recv_msg(&mut recv)).await {
-                            Ok(Ok(Message::Output { seq, data })) => {
-                                pending.extend_from_slice(&data);
-                                pending_seq = seq;
-                            }
-                            Ok(Ok(Message::Close { .. })) => {
-                                saw_close = true;
-                                break;
-                            }
-                            Ok(Ok(_)) => break,
-                            Ok(Err(_)) | Err(_) => break,
-                        }
-                    }
-
-                    if !pending.is_empty() {
-                        if stdout.write_all(&pending).await.is_err() {
-                            break false;
-                        }
-                        pending.clear();
-                        seen_seq.store(pending_seq, Ordering::Relaxed);
-                    }
-                    if last_flush.elapsed() >= mode.stdout_flush_window {
-                        if stdout.flush().await.is_err() {
-                            break false;
-                        }
-                        last_flush = tokio::time::Instant::now();
-                    }
-                    if saw_close {
-                        let _ = stdout.flush().await;
-                        break true;
-                    }
+                    let _ = stdout.flush().await;
+                    // Only count output as seen once it reached the terminal.
+                    seen_seq.store(seq, Ordering::Relaxed);
                 }
                 Ok(Message::Close { .. }) => {
-                    if !pending.is_empty() {
-                        let _ = stdout.write_all(&pending).await;
-                    }
                     let _ = stdout.flush().await;
                     break true;
                 }
@@ -6629,7 +6296,6 @@ async fn main() -> Result<()> {
             json,
             job_id,
         } => return run_logs_mode(raw_target, identity_file, no_bootstrap, json, job_id).await,
-        CliMode::Mcp {} => return mcp::run_mcp_serve().await,
         CliMode::Doctor {
             raw_target,
             identity_file,
@@ -6641,18 +6307,6 @@ async fn main() -> Result<()> {
             json,
             limit,
         } => return run_audit_mode(raw_target, identity_file, no_bootstrap, json, limit).await,
-        CliMode::Diff {
-            raw_target,
-            identity_file,
-            no_bootstrap,
-            json,
-            cwd,
-            staged,
-            stat,
-        } => {
-            return run_diff_mode(raw_target, identity_file, no_bootstrap, json, cwd, staged, stat)
-                .await
-        }
         CliMode::AgentRun {
             raw_target,
             identity_file,
@@ -6681,36 +6335,22 @@ async fn main() -> Result<()> {
             )
             .await
         }
-        CliMode::Ls => return run_ls_mode(),
-        CliMode::AttachWorkspace { name, identity_file } => {
-            return run_attach_workspace_mode(name, identity_file).await;
-        }
         CliMode::Interactive {
             raw_target,
             identity_file,
             no_fallback,
             no_bootstrap,
-            low_bandwidth,
             forwards,
             port_override,
-            workspace,
             new_session,
         } => {
-            let bandwidth_mode = if low_bandwidth {
-                BandwidthMode::low_bandwidth()
-            } else {
-                BandwidthMode::normal()
-            };
             return run_interactive_session(
                 raw_target,
                 identity_file,
                 no_fallback,
                 no_bootstrap,
-                bandwidth_mode,
                 forwards,
                 port_override,
-                workspace,
-                None,
                 new_session,
             )
             .await;
@@ -6719,43 +6359,7 @@ async fn main() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Named workspace commands
-// ---------------------------------------------------------------------------
-
-fn run_ls_mode() -> Result<()> {
-    let store = workspace::WorkspaceStore::load();
-    workspace::print_workspaces(store.all());
-    Ok(())
-}
-
-async fn run_attach_workspace_mode(name: String, identity_file: Option<String>) -> Result<()> {
-    let store = workspace::WorkspaceStore::load();
-    let ws = store.find_by_name(&name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "workspace '{}' not found.\nRun 'onyx ls' to see workspaces, or create one with:\n  onyx <host> --workspace {}",
-            name, name
-        )
-    })?;
-    eprintln!("[onyx] resuming workspace '{}' on {}", ws.name, ws.host);
-    let initial_session = Some((ws.session_id.clone(), ws.resume_token.clone()));
-    let host = ws.host.clone();
-    run_interactive_session(
-        host,
-        identity_file,
-        false,
-        false,
-        BandwidthMode::normal(),
-        vec![],
-        None,
-        Some(name),
-        initial_session,
-        false,
-    )
-    .await
-}
-
-// ---------------------------------------------------------------------------
-// Interactive session (extracted so workspace attach can call it too)
+// Interactive session
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -6764,11 +6368,8 @@ async fn run_interactive_session(
     identity_file: Option<String>,
     no_fallback: bool,
     no_bootstrap: bool,
-    bandwidth_mode: BandwidthMode,
     forwards: Vec<(u16, u16)>,
     port_override: Option<u16>,
-    workspace: Option<String>,
-    initial_session: Option<(String, String)>,
     new_session: bool,
 ) -> Result<()> {
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
@@ -6817,8 +6418,7 @@ async fn run_interactive_session(
     let mut endpoint = Endpoint::client("0.0.0.0:0".parse()?)?;
     endpoint.set_default_client_config(make_client_config(capture.clone())?);
 
-    // Pre-seed session from workspace store (cross-process resume).
-    let mut session: Option<(String, String)> = initial_session;
+    let mut session: Option<(String, String)> = None;
     // Offer the resume picker only on a genuinely fresh, interactive connect:
     // not when a workspace already pinned a session, not with --new, and not
     // when stdin isn't a tty (scripts / pipes must never block on a prompt).
@@ -6841,8 +6441,6 @@ async fn run_interactive_session(
     // Whether the "Connection lost" status line is currently visible.
     // Shown once per disconnect episode; cleared before re-entering raw mode.
     let mut status_shown = false;
-    // Whether workspace credentials have been persisted for this run.
-    let mut workspace_saved = session.is_some(); // pre-seeded sessions are already saved
 
     // Enter raw mode only after the first shell stream is established, then
     // keep it for post-ready reconnects. This leaves first-connect progress
@@ -6897,32 +6495,19 @@ async fn run_interactive_session(
             &capture,
             &auth_token,
             &forwards,
-            bandwidth_mode,
             &mut raw_mode,
             allow_picker,
             &last_seq,
         )
         .await
         {
-            // Shell exited cleanly — update workspace state and exit.
-            Ok(true) => {
-                if let Some(ws_name) = &workspace {
-                    save_workspace_state(ws_name, &raw_target, &session, "detached");
-                }
-                break;
-            }
+            // Shell exited cleanly.
+            Ok(true) => break,
 
             // Network dropped mid-session. `Ok(false)` means try_once
             // previously handshook successfully, so this is a *fresh* drop
             // — reset the disconnect timer, window, and backoff.
             Ok(false) => {
-                // Persist workspace credentials on first confirmed session.
-                if !workspace_saved {
-                    if let Some(ws_name) = &workspace {
-                        save_workspace_state(ws_name, &raw_target, &session, "connected");
-                        workspace_saved = true;
-                    }
-                }
                 let now = Instant::now();
                 disconnect_at = Some(now);
                 reconnect_deadline = Some(now + INTERACTIVE_RECONNECT_WINDOW);
@@ -6957,9 +6542,6 @@ async fn run_interactive_session(
                 // ── Retry window exhausted ────────────────────────────────
                 if disconnect_at.take().is_some() {
                     clear_status_line();
-                }
-                if let Some(ws_name) = &workspace {
-                    save_workspace_state(ws_name, &raw_target, &session, "detached");
                 }
 
                 if target.ssh_mode && session.is_none() {
@@ -7014,17 +6596,11 @@ async fn run_interactive_session(
                     eprintln!(
                         "          the remote session is retained on the server for up to 12h."
                     );
-                    if let Some(ws_name) = &workspace {
-                        eprintln!(
-                            "          resume with: onyx attach {ws_name}"
-                        );
-                    } else {
-                        eprintln!(
-                            "          re-run `onyx {}` — it will offer to resume this \
-                             session automatically. Use --new to start fresh instead.",
-                            raw_target
-                        );
-                    }
+                    eprintln!(
+                        "          re-run `onyx {}` — it will offer to resume this \
+                         session automatically. Use --new to start fresh instead.",
+                        raw_target
+                    );
                 }
                 if !hint.is_empty() {
                     eprintln!("onyx:{hint}");
@@ -7032,32 +6608,8 @@ async fn run_interactive_session(
                 return Err(e);
             }
         }
-
-        // Persist workspace credentials after the first confirmed session
-        // (raw_mode enters on first successful shell, so check after Ok(true/false)).
-        if !workspace_saved && raw_mode.is_some() {
-            if let Some(ws_name) = &workspace {
-                save_workspace_state(ws_name, &raw_target, &session, "connected");
-                workspace_saved = true;
-            }
-        }
     }
 
     endpoint.wait_idle().await;
     Ok(())
-}
-
-/// Persist workspace credentials and state to the local store (best-effort).
-fn save_workspace_state(
-    ws_name: &str,
-    host: &str,
-    session: &Option<(String, String)>,
-    state: &str,
-) {
-    let mut store = workspace::WorkspaceStore::load();
-    if let Some((sid, tok)) = session {
-        store.upsert(ws_name, host, sid, tok);
-    }
-    store.set_state(ws_name, state);
-    store.save().ok();
 }
