@@ -35,7 +35,6 @@
         <a href="./install.html" class="docs-tab">Install</a>
         <a href="./shell.html" class="docs-tab">Shell</a>
         <a href="./exec.html" class="docs-tab is-active">Exec</a>
-        <a href="./mcp.html" class="docs-tab">MCP</a>
       </div>
     </section>
 
@@ -77,6 +76,25 @@
         <article class="code-panel">
           <div class="panel-head">timeout</div>
           <pre><code>onyx exec prod --timeout 60s -- cargo test</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="doc-section">
+      <h2>JSON for agents</h2>
+      <p>Scripts and agents call the CLI directly. <span class="inline-code">--json</span> prints one JSON object per line on <span class="inline-code">exec</span>, <span class="inline-code">jobs</span>, <span class="inline-code">attach</span>, <span class="inline-code">logs</span>, <span class="inline-code">kill</span>, and <span class="inline-code">audit</span>.</p>
+      <div class="mini-grid">
+        <article class="code-panel">
+          <div class="panel-head">exec</div>
+          <pre><code>onyx exec hetzner-dev --json -- git status</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">jobs</div>
+          <pre><code>onyx jobs hetzner-dev --json</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">logs</div>
+          <pre><code>onyx logs hetzner-dev job_xxx --json</code></pre>
         </article>
       </div>
     </section>

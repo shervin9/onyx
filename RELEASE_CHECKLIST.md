@@ -30,10 +30,14 @@ Pre-release smoke checklist. Run these before tagging.
 - [ ] ssh-agent-loaded key: connects without prompts
 - [ ] Unencrypted key: connects without prompts
 
-## tmux and no-tmux paths
+## Session reconnect and replay
 
-- [ ] tmux installed: session opens with status bar; reconnect after drop returns to same window
-- [ ] tmux missing: shell opens in basic mode with a clear warning; attach subcommand surfaces a helpful error
+- [ ] Host without tmux: shell opens normally; `onyx attach <target> <job_id>` works
+- [ ] Output produced during a short drop is replayed exactly once on reconnect (no gaps, no duplicates)
+- [ ] Gap larger than the replay buffer, or resume from a fresh terminal: screen is repainted once
+- [ ] Reconnect status appears in the terminal title, not in the session output
+- [ ] Native terminal scrollback, selection, and copy work
+- [ ] `--no-tmux` / `ONYX_NO_TMUX=1` are accepted and ignored
 
 ## Exec lifecycle
 
@@ -45,13 +49,11 @@ Pre-release smoke checklist. Run these before tagging.
 - [ ] `onyx jobs <target>` lists running and finished jobs clearly
 - [ ] `--cwd`, `--env` flags pass through to the remote process
 
-## MCP streaming
+## JSON output
 
-- [ ] `onyx mcp serve` starts over stdio without errors
-- [ ] `tools/list` returns all five expected tools
-- [ ] Exec with `stream: true` forwards `stdout`, `stderr`, `reconnecting`, `resumed`, `timeout`, and `finished` progress events
-- [ ] Kill returns structured `kill_result` and surfaces missing-job errors
-- [ ] No stderr contamination into the JSON-RPC stdout stream
+- [ ] `onyx exec <target> --json -- echo hello` prints one JSON object per line
+- [ ] `onyx jobs`, `logs`, `attach`, `kill`, `audit` with `--json` emit valid JSON lines
+- [ ] Kill with `--json` reports killed / already finished / not found
 
 ## Homebrew and packaging
 

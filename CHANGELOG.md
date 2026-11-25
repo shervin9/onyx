@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Interactive sessions are tmux-free.** The server runs a plain login shell
+  on its own PTY and keeps a 2 MiB replay buffer plus a screen model per
+  session. On reconnect the client sends the last output it rendered and the
+  server replays exactly the bytes you missed — or repaints the screen once if
+  the gap was evicted or a fresh terminal attaches (resume picker). Your
+  terminal's native scrollback, selection, and copy work like plain SSH.
+- Reconnect status is shown in the terminal title instead of being printed
+  into the session. The client retries for up to 30 minutes; detached
+  sessions are kept for 12 hours in memory (still lost on `onyx-server`
+  restart).
+- `onyx attach` now only means `onyx attach <target> <job-id>`.
+
+### Removed
+- tmux integration: no uploaded `tmux.conf`/`status.sh`/`url.sh`, no tmux
+  status bar or GPU metrics in it, no `prefix + u` URL picker, no tmux
+  copy-mode/OSC 52 relay, and no basic-mode fallback. tmux is no longer
+  required on the remote. `--no-tmux` and `ONYX_NO_TMUX` are accepted as
+  no-ops.
+- MCP bridge (`onyx mcp serve` and all `onyx_*` tools). Agents call the CLI
+  directly with `--json`, e.g. `onyx exec host --json -- cmd`.
+- `onyx diff` — use `onyx exec <host> -- git diff`.
+- Named workspaces (`--workspace`/`-w`, `onyx ls`, `onyx attach <name>`,
+  `~/.onyx/workspaces.json`) — the resume picker on `onyx <host>` covers it.
+- `--low-bandwidth`.
+
 ## v0.3.2
 
 ### Added

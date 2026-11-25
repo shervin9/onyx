@@ -35,7 +35,6 @@
         <a href="./install.html" class="docs-tab">Install</a>
         <a href="./shell.html" class="docs-tab is-active">Shell</a>
         <a href="./exec.html" class="docs-tab">Exec</a>
-        <a href="./mcp.html" class="docs-tab">MCP</a>
       </div>
     </section>
 
@@ -52,15 +51,23 @@
 
     <section class="doc-section">
       <h2>Session behavior</h2>
-      <p>Short drops reconnect automatically. tmux keeps the remote shell state on the server.</p>
+      <p>Short drops reconnect automatically. The shell keeps running on the server, and on reconnect Onyx replays exactly the output you missed. No tmux is needed on the remote.</p>
       <div class="mini-grid">
         <article class="note">
           <h3>Reconnect</h3>
-          <p>Brief transport loss triggers reconnect instead of a fresh login.</p>
+          <p>Transport loss triggers reconnect instead of a fresh login. The client retries for up to 30 minutes; status shows in the terminal title.</p>
         </article>
         <article class="note">
-          <h3>tmux-backed</h3>
-          <p>Shell state and scrollback stay on the remote side.</p>
+          <h3>Catch-up</h3>
+          <p>Missed output is replayed from a 2 MiB buffer per session. After a longer gap, the screen is repainted once.</p>
+        </article>
+        <article class="note">
+          <h3>Native scrollback</h3>
+          <p>A plain login shell: your terminal's scrollback, selection, and copy work like SSH.</p>
+        </article>
+        <article class="note">
+          <h3>Resume</h3>
+          <p>Run <span class="inline-code">onyx user@host</span> again to resume a detached session (kept 12 hours, in memory). <span class="inline-code">--new</span> starts fresh.</p>
         </article>
         <article class="note">
           <h3>Fallback</h3>

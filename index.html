@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Onyx — Resilient remote shell, resumable exec, and local MCP</title>
-  <meta name="description" content="Remote shells and jobs for unreliable networks. Stable sessions, resumable remote exec, and a local MCP backend for AI agents.">
+  <title>Onyx — Resilient remote shell and resumable exec</title>
+  <meta name="description" content="Remote shells and jobs for unreliable networks. Stable sessions that replay missed output, resumable remote exec, and JSON output for AI agents.">
   <meta name="theme-color" content="#090909">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -49,7 +49,7 @@
       <div class="mini-points" aria-label="Product highlights">
         <span>Auto-reconnect</span>
         <span>Resumable exec</span>
-        <span>Local MCP</span>
+        <span>No tmux</span>
         <span>SSH fallback</span>
       </div>
 
@@ -100,7 +100,7 @@
       <div class="shell-compact-grid">
         <article class="shell-compact-card">
           <span class="shell-compact-line">Reconnect fast</span>
-          <span class="shell-compact-line">Resume instantly</span>
+          <span class="shell-compact-line">Missed output replayed</span>
         </article>
         <article class="shell-compact-card">
           <span class="shell-compact-line">Remote session stays live</span>
@@ -180,42 +180,42 @@
           <p>Check progress later.</p>
         </article>
       </div>
-      <p class="exec-support-copy"><a href="./docs/exec.html" class="inline-link">Full CLI and MCP reference → Docs</a></p>
+      <p class="exec-support-copy"><a href="./docs/exec.html" class="inline-link">Full CLI reference → Docs</a></p>
     </section>
 
-    <section class="mcp-section" id="mcp">
-      <div class="section-head section-head-centered mcp-head">
-        <h2>Local MCP for remote execution</h2>
-        <p>Agents talk local. Live progress, reconnect, and resume.</p>
+    <section class="agent-section" id="agents">
+      <div class="section-head section-head-centered agent-head">
+        <h2>JSON for agents and scripts</h2>
+        <p>Agents call the CLI. Live progress, reconnect, and resume.</p>
       </div>
 
-      <div class="mcp-stage" aria-label="Agent to Onyx MCP to remote host">
-        <div class="mcp-track" id="mcp-track">
-          <div class="mcp-line" aria-hidden="true"></div>
-          <article class="mcp-card is-active">
-            <strong class="mcp-card-title">Agent</strong>
-            <span class="mcp-card-subtitle">local client</span>
+      <div class="agent-stage" aria-label="Agent to Onyx CLI to remote host">
+        <div class="agent-track" id="agent-track">
+          <div class="agent-line" aria-hidden="true"></div>
+          <article class="agent-card is-active">
+            <strong class="agent-card-title">Agent</strong>
+            <span class="agent-card-subtitle">local client</span>
           </article>
-          <article class="mcp-card">
-            <strong class="mcp-card-title">Onyx MCP</strong>
-            <span class="mcp-card-subtitle">stdio server</span>
+          <article class="agent-card">
+            <strong class="agent-card-title">Onyx CLI</strong>
+            <span class="agent-card-subtitle">--json</span>
           </article>
-          <article class="mcp-card">
-            <strong class="mcp-card-title">Remote Host</strong>
-            <span class="mcp-card-subtitle">hetzner-dev</span>
+          <article class="agent-card">
+            <strong class="agent-card-title">Remote Host</strong>
+            <span class="agent-card-subtitle">hetzner-dev</span>
           </article>
-          <div class="mcp-pulse" aria-hidden="true"></div>
+          <div class="agent-pulse" aria-hidden="true"></div>
         </div>
       </div>
 
-      <div class="mcp-tool-grid" aria-label="Onyx MCP tools">
-        <article class="mcp-tool"><code>onyx_exec</code></article>
-        <article class="mcp-tool"><code>onyx_jobs</code></article>
-        <article class="mcp-tool"><code>onyx_logs</code></article>
-        <article class="mcp-tool"><code>onyx_kill</code></article>
+      <div class="agent-tool-grid" aria-label="Onyx jobs commands">
+        <article class="agent-tool"><code>onyx exec</code></article>
+        <article class="agent-tool"><code>onyx jobs</code></article>
+        <article class="agent-tool"><code>onyx logs</code></article>
+        <article class="agent-tool"><code>onyx kill</code></article>
       </div>
 
-      <pre class="mcp-sample"><code>target=hetzner-dev · stream=true</code></pre>
+      <pre class="agent-sample"><code>onyx exec hetzner-dev --json -- git status</code></pre>
     </section>
 
     <section class="install" id="install">

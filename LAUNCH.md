@@ -11,8 +11,8 @@ real-world network drops.
 ## Short Description
 
 Onyx gives remote work a small control plane: reconnecting interactive shells,
-detached remote jobs, attachable logs, job kill/list commands, and a local MCP
-server for agent clients.
+detached remote jobs, attachable logs, job kill/list commands, and `--json`
+output for scripts and agents.
 
 ## Product Hunt
 
@@ -33,8 +33,8 @@ Description:
 ```text
 Onyx is a Rust CLI for resilient remote work. Start an interactive shell,
 run detached remote jobs, reattach to output, inspect logs, kill jobs, and
-expose a local MCP server for AI agents. It bootstraps over SSH, uses QUIC
-when available, and stays self-hosted by default.
+drive it all from AI agents with --json. It bootstraps over SSH, uses QUIC
+when available, needs no tmux, and stays self-hosted by default.
 ```
 
 First comment:
@@ -44,16 +44,17 @@ I built Onyx because I kept losing SSH sessions and long-running remote jobs
 over flaky Wi-Fi, VPNs, and laptop sleep.
 
 Onyx gives you:
-- `onyx user@host` for a reconnecting remote shell
+- `onyx user@host` for a reconnecting remote shell that replays the output
+  you missed, with your terminal's native scrollback (no tmux)
 - `onyx exec host --detach -- long-job` for jobs that keep running remotely
 - `onyx attach`, `onyx logs`, `onyx jobs`, and `onyx kill`
-- `onyx mcp serve` for local agent integration
+- `--json` on every jobs command for scripts and agents
 
 It bootstraps over SSH, pins the server cert with TOFU, and authorizes QUIC
 streams with a per-server token. No hosted service is required.
 
 I would especially like feedback on the CLI shape, install flow, and where
-Onyx should fit beside SSH, tmux, and mosh.
+Onyx should fit beside SSH and mosh.
 ```
 
 ## Hacker News
@@ -71,10 +72,10 @@ I built Onyx because I kept losing SSH sessions and long-running remote jobs
 over flaky Wi-Fi/VPN links.
 
 It gives you:
-- `onyx user@host` for a reconnecting remote shell
+- `onyx user@host` for a reconnecting remote shell that replays missed output
 - `onyx exec host --detach -- long-job` for jobs that keep running remotely
 - `onyx attach/logs/jobs/kill` for job lifecycle
-- `onyx mcp serve` for local agent integration
+- `--json` output for scripts and agents
 
 It bootstraps over SSH, pins the server certificate with TOFU, and uses a
 per-server auth token for QUIC streams. No hosted service is required.
@@ -94,7 +95,7 @@ Docs: https://useonyx.dev/docs/
 - [ ] `onyx user@host` bootstraps and reaches a shell on a clean Linux host.
 - [ ] `onyx exec host --detach -- sleep 30` returns a job id.
 - [ ] `onyx jobs`, `onyx logs`, `onyx attach`, and `onyx kill` work.
-- [ ] `onyx mcp serve` starts locally and does not bind a network port.
+- [ ] `onyx exec host --json -- true` prints JSON lines.
 - [ ] Landing page video loads and the Product Hunt badge is visible.
 - [ ] README, docs, `--help`, and `SECURITY.md` agree on install and security.
 - [ ] Known limitations are visible and not hidden.

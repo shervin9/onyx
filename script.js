@@ -1,10 +1,10 @@
 (function () {
   var typed = document.getElementById("typed");
   var meta = document.getElementById("terminal-meta");
-  var mcpTrack = document.getElementById("mcp-track");
-  var mcpLine = document.querySelector(".mcp-line");
-  var mcpPulse = document.querySelector(".mcp-pulse");
-  var mcpCards = Array.prototype.slice.call(document.querySelectorAll(".mcp-card"));
+  var agentTrack = document.getElementById("agent-track");
+  var agentLine = document.querySelector(".agent-line");
+  var agentPulse = document.querySelector(".agent-pulse");
+  var agentCards = Array.prototype.slice.call(document.querySelectorAll(".agent-card"));
   var repoMetaStrip = document.getElementById("repo-meta-strip");
   var repoMetaText = document.getElementById("repo-meta-text");
 
@@ -89,85 +89,85 @@
     });
   }
 
-  function setMcpStep(stepIndex) {
-    mcpCards.forEach(function (card, index) {
+  function setAgentStep(stepIndex) {
+    agentCards.forEach(function (card, index) {
       card.classList.toggle("is-active", index === stepIndex);
     });
   }
 
-  function measureMcpTrack() {
-    if (!mcpTrack || !mcpLine || !mcpCards.length) return;
+  function measureAgentTrack() {
+    if (!agentTrack || !agentLine || !agentCards.length) return;
 
-    var trackRect = mcpTrack.getBoundingClientRect();
-    var first = centerOfElement(mcpCards[0], trackRect);
-    var last = centerOfElement(mcpCards[mcpCards.length - 1], trackRect);
+    var trackRect = agentTrack.getBoundingClientRect();
+    var first = centerOfElement(agentCards[0], trackRect);
+    var last = centerOfElement(agentCards[agentCards.length - 1], trackRect);
     var isVertical = window.matchMedia("(max-width: 900px)").matches;
 
     if (isVertical) {
-      mcpTrack.style.setProperty("--mcp-line-left", first.x + "px");
-      mcpTrack.style.setProperty("--mcp-line-top", first.y + "px");
-      mcpTrack.style.setProperty("--mcp-line-height", Math.max(last.y - first.y, 0) + "px");
-      mcpTrack.style.setProperty("--mcp-line-width", "1px");
+      agentTrack.style.setProperty("--agent-line-left", first.x + "px");
+      agentTrack.style.setProperty("--agent-line-top", first.y + "px");
+      agentTrack.style.setProperty("--agent-line-height", Math.max(last.y - first.y, 0) + "px");
+      agentTrack.style.setProperty("--agent-line-width", "1px");
     } else {
-      mcpTrack.style.setProperty("--mcp-line-left", first.x + "px");
-      mcpTrack.style.setProperty("--mcp-line-top", first.y + "px");
-      mcpTrack.style.setProperty("--mcp-line-width", Math.max(last.x - first.x, 0) + "px");
-      mcpTrack.style.setProperty("--mcp-line-height", "1px");
+      agentTrack.style.setProperty("--agent-line-left", first.x + "px");
+      agentTrack.style.setProperty("--agent-line-top", first.y + "px");
+      agentTrack.style.setProperty("--agent-line-width", Math.max(last.x - first.x, 0) + "px");
+      agentTrack.style.setProperty("--agent-line-height", "1px");
     }
   }
 
-  function placeMcpPulse(stepIndex, instant) {
-    if (!mcpTrack || !mcpPulse || !mcpCards.length) return;
-    var card = mcpCards[stepIndex];
+  function placeAgentPulse(stepIndex, instant) {
+    if (!agentTrack || !agentPulse || !agentCards.length) return;
+    var card = agentCards[stepIndex];
     if (!card) return;
 
-    var trackRect = mcpTrack.getBoundingClientRect();
+    var trackRect = agentTrack.getBoundingClientRect();
     var center = centerOfElement(card, trackRect);
 
     if (instant) {
-      mcpPulse.style.transition = "none";
+      agentPulse.style.transition = "none";
     } else {
-      mcpPulse.style.transition =
+      agentPulse.style.transition =
         "left 1.08s cubic-bezier(0.22, 1, 0.36, 1), top 1.08s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
     }
 
-    mcpTrack.style.setProperty("--mcp-pulse-left", center.x + "px");
-    mcpTrack.style.setProperty("--mcp-pulse-top", center.y + "px");
+    agentTrack.style.setProperty("--agent-pulse-left", center.x + "px");
+    agentTrack.style.setProperty("--agent-pulse-top", center.y + "px");
 
     if (instant) {
-      mcpPulse.getBoundingClientRect();
-      mcpPulse.style.transition =
+      agentPulse.getBoundingClientRect();
+      agentPulse.style.transition =
         "left 1.08s cubic-bezier(0.22, 1, 0.36, 1), top 1.08s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
     }
   }
 
-  function refreshMcpLayout() {
-    if (!mcpCards.length) return;
-    measureMcpTrack();
+  function refreshAgentLayout() {
+    if (!agentCards.length) return;
+    measureAgentTrack();
     var activeIndex = 0;
-    mcpCards.forEach(function (card, index) {
+    agentCards.forEach(function (card, index) {
       if (card.classList.contains("is-active")) activeIndex = index;
     });
-    placeMcpPulse(activeIndex, true);
+    placeAgentPulse(activeIndex, true);
   }
 
-  function loopMcp(index) {
-    if (!mcpCards.length) return;
-    measureMcpTrack();
-    setMcpStep(index);
-    placeMcpPulse(index, false);
+  function loopAgent(index) {
+    if (!agentCards.length) return;
+    measureAgentTrack();
+    setAgentStep(index);
+    placeAgentPulse(index, false);
 
     window.setTimeout(function () {
       var next = index + 1;
-      if (next >= mcpCards.length) {
-        setMcpStep(0);
-        placeMcpPulse(0, true);
+      if (next >= agentCards.length) {
+        setAgentStep(0);
+        placeAgentPulse(0, true);
         window.setTimeout(function () {
-          loopMcp(0);
+          loopAgent(0);
         }, 500);
         return;
       }
-      loopMcp(next);
+      loopAgent(next);
     }, 1650);
   }
 
@@ -300,14 +300,14 @@
   loadRepoMeta();
 
   window.setTimeout(function () {
-    refreshMcpLayout();
+    refreshAgentLayout();
     loopTerminal(0);
-    loopMcp(0);
+    loopAgent(0);
     startExecDemo();
   }, 700);
 
-  window.addEventListener("resize", refreshMcpLayout);
-  window.addEventListener("orientationchange", refreshMcpLayout);
+  window.addEventListener("resize", refreshAgentLayout);
+  window.addEventListener("orientationchange", refreshAgentLayout);
 })();
 
 function copyText(targetId, button) {

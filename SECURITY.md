@@ -62,11 +62,12 @@ Onyx's verification guarantees are intentionally narrow. The following are
   within a short grace window. Longer disconnects, or disconnects during
   sensitive SSH state transitions, will terminate the underlying SSH
   session. Onyx does **not** guarantee SSH-session survival across real
-  network loss — use `mosh` or native tmux/screen on the remote if you need
+  network loss — use `mosh` or tmux/screen on the remote if you need
   that.
-- **Interactive persistence is tmux-backed.** Only the interactive Onyx
-  shell gets tmux-style resume; arbitrary SSH-based tools ridden over Onyx
-  proxy mode do not.
+- **Interactive persistence is Onyx-shell only and in-memory.** Only the
+  interactive Onyx shell gets resume with missed-output replay; arbitrary
+  SSH-based tools ridden over Onyx proxy mode do not. Detached sessions do
+  not survive an `onyx-server` restart or host reboot.
 - **No supply-chain attestation.** The remote `onyx-server` is uploaded from
   a packaged prebuilt binary matched to the remote architecture. Developer
   source builds are available only with `ONYX_DEV_REMOTE_BUILD=1`. The source

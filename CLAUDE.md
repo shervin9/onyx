@@ -14,7 +14,13 @@ A remote shell CLI with:
   UDP is blocked (`--no-fallback` to disable).
 - **Self-bootstrapping remote**: `onyx user@host` provisions the
   `onyx-server` binary on the remote over SSH if it is missing or outdated.
-- **Interactive session persistence** via tmux.
+- **Interactive session persistence** on the server's own PTY (no tmux):
+  a per-session 2 MiB replay ring + vt100 screen model
+  (`server/src/replay.rs`). Reconnect replays exactly the missed output, or
+  repaints the screen once if the gap was evicted or a fresh terminal
+  attaches. Native terminal scrollback/selection/copy work like SSH.
+- **Server-owned jobs** (`exec`, `jobs`, `attach`, `logs`, `kill`, `audit`,
+  `agent run`) with `--json` output for scripts and agents.
 - **Local port forwarding** via `--forward LPORT:RPORT`.
 - **SSH ProxyCommand transport** via `onyx proxy <host> <port>`.
 - **TOFU fingerprint pinning** in `~/.local/share/onyx/known_hosts`.
@@ -30,8 +36,9 @@ A remote shell CLI with:
 
 ## Bootstrap model (important — docs must match this)
 
-1. Client SSH-calls `remote_status()` to check source hash, running server,
-   config. If everything matches → skip to QUIC.
+1. Client SSH-calls `remote_status()` to check source hash and running
+   server. If both match → skip to QUIC. No remote config files (tmux.conf
+   etc.) are uploaded any more.
 2. Otherwise, upload a packaged `onyx-server` matching the remote arch.
    Default lookup order: same directory as `onyx`, Homebrew/package
    `libexec`, then `ONYX_SERVER_BINARY=/path/to/onyx-server-linux-<arch>`.
@@ -57,23 +64,27 @@ A remote shell CLI with:
 
 **Say:**
 - "QUIC when available, SSH when it's not."
-- "tmux-backed persistence for the interactive shell."
+- "Interactive sessions survive network drops and replay the output you
+  missed on reconnect."
+- "No tmux required; native scrollback and copy work like SSH."
 - "Best-effort short-drop reconnect for proxy mode."
 - "Drop-in SSH transport for existing workflows."
 
 **Do not say:**
 - "Full Mosh-level persistence for all SSH-based tools."
 - "SSH sessions always survive disconnects."
+- "Sessions survive onyx-server restart or host reboot" (they are in-memory).
 - "Zero-trust verified PKI" (it is TOFU, not PKI).
 - "Automatic firewall configuration" (Onyx never touches firewalls).
 
 ## Known limitations (keep surfacing)
 
 - Proxy-mode reconnect window is short (~120s); longer drops end the SSH
-  session underneath. Interactive-session retention is longer (12h) but
-  still in-memory — does not survive onyx-server restart.
-- `--low-bandwidth` is a batching tweak, not a compression algorithm.
-- GPU metrics in tmux status bar are best-effort (`nvidia-smi` optional).
+  session underneath. Interactive-session retention is longer (client retries
+  for 30 min; detached sessions kept 12h) but still in-memory — does not
+  survive onyx-server restart.
+- Replay ring is 2 MiB per session; a longer gap gets a one-shot screen
+  repaint, not the full missed output.
 - Homebrew tap is not live yet — landing page marks it clearly as
   coming soon.
 

@@ -457,7 +457,7 @@ h1 {
 }
 
 .trust-section,
-.mcp-section,
+.agent-section,
 .install,
 .flow,
 .exec-feature,
@@ -469,7 +469,7 @@ h1 {
 }
 
 .trust-section,
-.mcp-section,
+.agent-section,
 .install,
 .flow,
 .exec-feature,
@@ -734,8 +734,8 @@ button[id^="copy-"]:hover {
 
 .workflow-copy code,
 .exec-support-copy code,
-.mcp-capability p code,
-.mcp-support-copy code,
+.agent-capability p code,
+.agent-support-copy code,
 .install-support-copy code,
 .feature-card code {
   font-family: var(--mono);
@@ -764,7 +764,7 @@ button[id^="copy-"]:hover {
 
 .shell-compact-card,
 .exec-command-card,
-.mcp-card,
+.agent-card,
 .oss-item {
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -1008,16 +1008,16 @@ button[id^="copy-"]:hover {
   text-align: center;
 }
 
-.mcp-head {
+.agent-head {
   max-width: 36rem;
 }
 
-.mcp-stage {
+.agent-stage {
   max-width: 48rem;
   margin: 0 auto;
 }
 
-.mcp-track {
+.agent-track {
   position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1026,21 +1026,21 @@ button[id^="copy-"]:hover {
   padding: 0.25rem 0;
 }
 
-.mcp-line {
+.agent-line {
   position: absolute;
-  left: var(--mcp-line-left, 16%);
-  width: var(--mcp-line-width, 68%);
-  top: var(--mcp-line-top, 50%);
+  left: var(--agent-line-left, 16%);
+  width: var(--agent-line-width, 68%);
+  top: var(--agent-line-top, 50%);
   height: 1px;
   background: linear-gradient(90deg, rgba(255, 255, 255, 0.08), rgba(110, 140, 255, 0.18), rgba(255, 255, 255, 0.08));
   transform: translateY(-50%);
   z-index: 0;
 }
 
-.mcp-pulse {
+.agent-pulse {
   position: absolute;
-  top: var(--mcp-pulse-top, 50%);
-  left: var(--mcp-pulse-left, 16%);
+  top: var(--agent-pulse-top, 50%);
+  left: var(--agent-pulse-left, 16%);
   width: 0.42rem;
   height: 0.42rem;
   border-radius: 999px;
@@ -1054,7 +1054,7 @@ button[id^="copy-"]:hover {
     opacity 0.2s ease;
 }
 
-.mcp-card {
+.agent-card {
   position: relative;
   z-index: 2;
   display: flex;
@@ -1071,7 +1071,7 @@ button[id^="copy-"]:hover {
     box-shadow 0.22s ease;
 }
 
-.mcp-card.is-active {
+.agent-card.is-active {
   color: var(--text);
   border-color: rgba(110, 140, 255, 0.24);
   background:
@@ -1080,7 +1080,7 @@ button[id^="copy-"]:hover {
   box-shadow: 0 0 0 0.24rem rgba(110, 140, 255, 0.035);
 }
 
-.mcp-card-title {
+.agent-card-title {
   display: block;
   font-size: 0.96rem;
   font-weight: 500;
@@ -1088,18 +1088,18 @@ button[id^="copy-"]:hover {
   color: currentColor;
 }
 
-.mcp-card-subtitle {
+.agent-card-subtitle {
   margin-top: 0.22rem;
   font-size: 0.74rem;
   color: var(--muted);
   letter-spacing: -0.01em;
 }
 
-.mcp-card.is-active .mcp-card-subtitle {
+.agent-card.is-active .agent-card-subtitle {
   color: var(--dim);
 }
 
-.mcp-tool-grid {
+.agent-tool-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.9rem;
@@ -1108,7 +1108,7 @@ button[id^="copy-"]:hover {
   margin: 1.8rem auto 0;
 }
 
-.mcp-tool {
+.agent-tool {
   padding: 0.9rem 0.95rem;
   border: 1px solid var(--border);
   border-radius: 14px;
@@ -1118,7 +1118,7 @@ button[id^="copy-"]:hover {
   text-align: center;
 }
 
-.mcp-tool code {
+.agent-tool code {
   display: inline-block;
   font-family: var(--mono);
   font-size: 0.83rem;
@@ -1126,7 +1126,7 @@ button[id^="copy-"]:hover {
   color: var(--text);
 }
 
-.mcp-sample {
+.agent-sample {
   max-width: 26rem;
   margin: 0.9rem auto 0;
   padding: 0.85rem 0.95rem;
@@ -1137,7 +1137,7 @@ button[id^="copy-"]:hover {
   text-align: center;
 }
 
-.mcp-sample code {
+.agent-sample code {
   display: block;
   font-family: var(--mono);
   font-size: 0.79rem;
@@ -1147,7 +1147,7 @@ button[id^="copy-"]:hover {
   overflow-wrap: anywhere;
 }
 
-.mcp-support-copy,
+.agent-support-copy,
 .install-support-copy {
   max-width: 40rem;
   margin: 1rem auto 0;
@@ -1297,7 +1297,7 @@ footer a:hover { color: var(--dim); }
 
 @media (max-width: 900px) {
   .install-grid,
-  .mcp-tool-grid,
+  .agent-tool-grid,
   .flow-panels,
   .shell-compact-grid,
   .feature-grid,
@@ -1307,18 +1307,18 @@ footer a:hover { color: var(--dim); }
     grid-template-columns: 1fr;
   }
 
-  .mcp-track {
+  .agent-track {
     grid-template-columns: 1fr;
     max-width: 24rem;
     margin: 0 auto;
     gap: 0.85rem;
   }
 
-  .mcp-line {
-    top: var(--mcp-line-top, 0.5rem);
-    left: var(--mcp-line-left, 50%);
+  .agent-line {
+    top: var(--agent-line-top, 0.5rem);
+    left: var(--agent-line-left, 50%);
     width: 1px;
-    height: var(--mcp-line-height, calc(100% - 1rem));
+    height: var(--agent-line-height, calc(100% - 1rem));
     transform: none;
   }
 
@@ -1435,7 +1435,7 @@ footer a:hover { color: var(--dim); }
     font-size: 0.75rem;
   }
 
-  .mcp-card {
+  .agent-card {
     min-height: 5rem;
     padding: 0.92rem 0.95rem;
   }
@@ -1525,7 +1525,7 @@ footer a:hover { color: var(--dim); }
   }
 
   .trust-section,
-  .mcp-section,
+  .agent-section,
   .install,
   .flow,
   .exec-feature,

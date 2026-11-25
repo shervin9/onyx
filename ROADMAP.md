@@ -50,19 +50,20 @@ without installing a platform.
 
 ## Architecture: three surfaces over one governed core
 
-Same engine underneath — the server-owned, reattachable job. Onyx now speaks to
-people, agents, and editors through three front doors that share one governed
-core.
+Same engine underneath — the server-owned, reattachable job. Onyx speaks to
+people, agents, and editors through front doors that share one governed core.
+(The separate MCP surface has been removed; agents use the CLI with `--json`.)
 
-- **Surface 1 — CLI** (DevOps / power users): `onyx agent run`, detach/attach/
-  logs/kill, fleets, JSON output, CI-friendly.
-- **Surface 2 — MCP** (local agents): a local Claude Code dispatches *remote*
-  sub-agents; shipped as a one-command Claude Code **plugin** (slash commands +
-  safety hooks + MCP server def).
+- **Surface 1 — CLI** (DevOps / power users and local agents): `onyx agent run`,
+  detach/attach/logs/kill, fleets, `--json` output, CI-friendly. A local Claude
+  Code dispatches *remote* sub-agents by calling the CLI directly
+  (`onyx exec host --json -- cmd`).
+- **Surface 2 — MCP — REMOVED.** The `onyx mcp serve` bridge and its `onyx_*`
+  tools were removed: they duplicated the CLI. Replaced by CLI `--json`.
 - **Surface 3 — ACP** (editors): Onyx as an ACP agent in Zed / JetBrains —
   "remote Claude Code, via Onyx" as a first-class editor agent.
 - **Governed core:** server-enforced policy + an immutable audit log shared by
-  all three surfaces. The open-core seam.
+  all surfaces. The open-core seam.
 
 ## The "agent job"
 
@@ -75,7 +76,7 @@ specialized for an LLM CLI.
 | Buffered output + reattach/logs/kill  | Same plumbing, unchanged                            |
 | QUIC/SSH resilience                    | "agent survives disconnects" for free               |
 | `remote_status()` probe                | also detects which agent CLIs are installed         |
-| MCP bridge (`client/src/mcp.rs`)       | local Claude Code dispatches sub-agents to remotes  |
+| CLI `--json` output                    | local Claude Code dispatches sub-agents to remotes  |
 
 ## Phases
 
@@ -106,10 +107,10 @@ audit log) to SQLite on the server. Without this we cannot honestly say
 ### Phase 04 — Editor integration (ACP + plugin) — NEXT
 
 - **ACP adapter:** Onyx as an Agent Client Protocol agent so Zed / JetBrains can
-  run "remote agent via Onyx" natively (JSON-RPC over stdio, like the existing
-  MCP bridge). Highest-leverage distribution bet.
-- **Claude Code plugin:** one-command install bundling the MCP server def, slash
-  commands, and safety hooks. Cheapest path to real users.
+  run "remote agent via Onyx" natively (JSON-RPC over stdio). Highest-leverage
+  distribution bet.
+- **Claude Code plugin:** one-command install bundling slash commands and safety
+  hooks that call the `onyx` CLI with `--json`. Cheapest path to real users.
 
 ### Phase 05 — Fleet & triggers — NEXT
 
@@ -137,7 +138,6 @@ RBAC, SSO/SAML, org-wide audit, cross-agent cost analytics.
 
 - Do not claim "auditable" until Phase 02 + 03 ship.
 - Adapters depend on third-party CLI flags — version them, degrade gracefully.
-- Keep MCP local-only by default.
 
 ## Recommended next move
 

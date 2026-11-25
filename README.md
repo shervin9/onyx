@@ -4,8 +4,8 @@ Remote shells and jobs that keep going through real-world network drops.
 
 Onyx is a Rust CLI for resilient remote work. Use it like SSH for an
 interactive shell, or use `onyx exec` for long-running remote jobs you can
-detach, reattach, inspect, and stop later. It also exposes a local MCP server
-so agent clients can run remote work through the same job model.
+detach, reattach, inspect, and stop later. Every jobs command speaks `--json`,
+so scripts and agents can drive remote work through the same job model.
 
 ```bash
 onyx user@host
@@ -19,12 +19,13 @@ SSH is excellent, but a flaky Wi-Fi, VPN, NAT, or laptop sleep can still leave
 you with a broken terminal and uncertain job state. Onyx gives remote work a
 small control plane:
 
-- Interactive shells reconnect and resume the same remote session.
+- Interactive shells reconnect and resume the same remote session, then
+  replay exactly the output you missed.
 - Remote exec jobs keep running after the client disconnects.
 - Job output is buffered server-side and can be streamed, attached, or read
   later.
-- The MCP bridge is local-only by default, so agents can use Onyx without
-  exposing a network MCP service.
+- No tmux, no remote config: your terminal's own scrollback, selection, and
+  copy work like plain SSH.
 
 ## Install
 
@@ -84,52 +85,23 @@ Use a working directory, extra environment, and timeout:
 onyx exec prod --cwd /srv/app --env RUST_LOG=info --timeout 60s -- cargo test
 ```
 
-## Named Workspaces
+## Reconnect & Catch-Up
 
-Bind a name to a remote session so you can resume it across terminal sessions:
+The interactive shell is a plain login shell on `onyx-server`'s own PTY — no
+tmux. When the network drops, the shell keeps running on the server and keeps
+a 2 MiB replay buffer of its output. When the client reconnects, it tells the
+server the last output it rendered and the server sends back exactly the bytes
+you missed. If the gap is larger than the buffer, or you resume from a fresh
+terminal, the server repaints the current screen once instead.
 
-```bash
-# Start a named workspace
-onyx user@host --workspace myserver
+While Onyx is reconnecting, the status is shown in your terminal's title, so
+nothing is printed into the session you are catching up on. Detached sessions
+are kept on the server for 12 hours (in memory) and can be resumed with
+`onyx <host>`.
 
-# List all workspaces
-onyx ls
-
-# Resume by name (picks up the session from any terminal)
-onyx attach myserver
-```
-
-The session ID and resume token are stored in `~/.onyx/workspaces.json`. If the
-remote tmux session is still alive, `onyx attach` drops you straight back in.
-The workspace `STATE` column in `onyx ls` shows `connected`, `detached`, or
-`unknown`.
-
-## Copying Output & URLs
-
-In the interactive shell, mouse mode is off by default so your terminal's
-native click-drag selection and copy work as usual. To copy from tmux's
-scroll history instead: press `s` to enter copy-mode, select text, then
-`Enter`/`y` — the selection is copied straight to your local system
-clipboard via OSC 52, whether you're on the QUIC or SSH-fallback transport.
-
-**Grabbing a URL (e.g. an auth link):** press `prefix + u` (`Ctrl-b` then
-`u`). Onyx pulls URLs off the current screen — re-joining wrapped lines so a
-long link stays intact — and copies it to your local clipboard. One URL is
-copied instantly; if several are on screen, a small menu lets you pick. This
-works even inside full-screen tools like Claude Code, needs no mouse, and
-installs nothing extra on the remote.
-
-Both require an OSC-52-capable terminal with clipboard-write allowed —
-iTerm2 (enable *Preferences → General → Selection → "Applications in terminal
-may access the clipboard"*), Warp, kitty, Alacritty, WezTerm, Windows
-Terminal, or VSCode's integrated terminal.
-
-**On a terminal without OSC 52** (notably macOS's built-in Terminal.app),
-remote-to-local clipboard isn't possible through tmux. Run with `--no-tmux`
-(or `export ONYX_NO_TMUX=1`) to get a plain login shell instead — then your
-terminal's own scrollback and mouse-selection copy work natively, exactly like
-plain SSH. You keep onyx's QUIC reconnect, but lose tmux's persistence across
-server restarts and the status bar.
+Because there is no tmux layer, your terminal's native scrollback,
+click-drag selection, and copy work exactly like plain SSH. `--no-tmux` and
+`ONYX_NO_TMUX` from older versions are still accepted and do nothing.
 
 ## Agents & Audit
 
@@ -144,13 +116,6 @@ best-effort. The agent must already be installed and authenticated on the
 remote — Onyx does not inject credentials. Add `--yolo` to skip permission
 prompts (dangerous: the agent can then run arbitrary commands unattended).
 
-Review what an agent (or anyone) changed:
-
-```bash
-onyx diff gpu-box
-onyx diff gpu-box --stat
-```
-
 Durable job history, independent of the in-memory job registry, survives
 `onyx-server` restarts:
 
@@ -158,32 +123,16 @@ Durable job history, independent of the in-memory job registry, survives
 onyx audit gpu-box --limit 25
 ```
 
-## MCP For Agents
+## JSON For Scripts And Agents
 
-Start the local stdio MCP server:
+Agents and scripts call the CLI directly. Pass `--json` to get one JSON object
+per line from the jobs commands:
 
 ```bash
-onyx mcp serve
+onyx exec hetzner-dev --json -- git status
+onyx jobs hetzner-dev --json
+onyx logs hetzner-dev job_xxx --json
 ```
-
-Available tools:
-
-- `onyx_exec`
-- `onyx_jobs`
-- `onyx_attach`
-- `onyx_logs`
-- `onyx_kill`
-- `onyx_agent_run`
-- `onyx_audit`
-- `onyx_diff`
-
-Example tool call:
-
-```json
-{"name":"onyx_exec","arguments":{"target":"hetzner-dev","command":["git","status"],"stream":true}}
-```
-
-Use `stream: true` to receive live progress events.
 
 ## How It Works
 
@@ -193,18 +142,24 @@ Use `stream: true` to receive live progress events.
    with Trust-On-First-Use.
 3. Every QUIC stream is authorized with a per-server random token read through
    the SSH bootstrap flow.
-4. Shell sessions are tmux-backed. Exec jobs are owned by the remote server and
-   keep running when the client disconnects.
+4. Shell sessions run on the server's own PTY with a per-session replay
+   buffer. Exec jobs are owned by the remote server and keep running when the
+   client disconnects.
 
 ## Why Not Just SSH, tmux, Or mosh?
 
-- **SSH** is the universal transport, but it does not own remote job lifecycle
-  after the client disappears.
-- **tmux** is great for shells. Onyx uses tmux for interactive persistence and
-  adds a CLI job API around detached exec, logs, attach, kill, JSON, and MCP.
-- **mosh** is excellent for interactive roaming terminals. Onyx focuses on
-  remote command execution, buffered output, reconnectable jobs, and agent
-  integration.
+- **SSH** is the universal transport, and Onyx keeps what makes it pleasant:
+  a plain shell with your terminal's native scrollback, selection, and copy.
+  What SSH does not do is survive a dropped connection or own remote job
+  lifecycle after the client disappears.
+- **tmux** keeps shells alive, but puts its own screen between you and your
+  terminal — its own scrollback, copy mode, and key bindings. Onyx needs no
+  tmux on the remote: the server keeps the shell alive and replays exactly the
+  output you missed on reconnect.
+- **mosh** is excellent for roaming terminals, but syncs screen state rather
+  than the output stream, so native scrollback does not work. Onyx replays the
+  missed bytes themselves and adds server-owned jobs: detached exec, logs,
+  attach, kill, audit, and `--json` output.
 
 ## Security Model
 
@@ -213,8 +168,6 @@ Use `stream: true` to receive live progress events.
   `~/.local/share/onyx/known_hosts`.
 - QUIC client authorization uses a random server token stored on the remote at
   `~/.local/share/onyx/server.auth_token` with `0600` permissions.
-- `onyx mcp serve` is a local stdio server. Do not expose it as a public
-  network service.
 - Onyx runs commands on your remote machines. Use least-privilege accounts and
   review commands before execution.
 
@@ -222,8 +175,9 @@ See [SECURITY.md](SECURITY.md) for the full trust model and reporting policy.
 
 ## Current Limits
 
-- Shell persistence is tmux-backed. Without tmux, Onyx falls back to a basic
-  shell mode.
+- Interactive sessions and their replay buffers are in-memory on
+  `onyx-server`; a detached session survives network drops for up to 12 hours
+  but not a server process restart or host reboot.
 - Live job state and output buffers are in-memory on `onyx-server`; they do
   not survive a server process restart or host reboot. Job lifecycle history
   (`onyx audit`) is persisted separately and does survive restarts, but a
@@ -235,7 +189,7 @@ See [SECURITY.md](SECURITY.md) for the full trust model and reporting policy.
 
 ## Project Layout
 
-- `client/` - `onyx` CLI and MCP bridge
+- `client/` - `onyx` CLI
 - `server/` - remote `onyx-server`
 - `shared/` - protocol types shared by client and server
 - `docs/` - static documentation
