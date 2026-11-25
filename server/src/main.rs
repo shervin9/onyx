@@ -198,18 +198,43 @@ fn make_server_config() -> Result<(ServerConfig, String, String)> {
     tls.alpn_protocols = vec![b"onyx".to_vec()];
     let quic =
         quinn::crypto::rustls::QuicServerConfig::try_from(tls).context("wrapping for QUIC")?;
-    Ok((
-        ServerConfig::with_crypto(Arc::new(quic)),
-        fingerprint,
-        auth_token,
-    ))
+    let mut server_cfg = ServerConfig::with_crypto(Arc::new(quic));
+    // Clients send a keep-alive every 5s. Declaring a client dead after 15s
+    // of silence (instead of quinn's 30s default) means a session whose
+    // laptop crashed shows up as detached quickly, so `onyx <host>` resumes
+    // it with a plain Enter.
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_idle_timeout(Some(
+        Duration::from_secs(15).try_into().expect("15s is a valid idle timeout"),
+    ));
+    server_cfg.transport_config(Arc::new(transport));
+    Ok((server_cfg, fingerprint, auth_token))
 }
 
 // ---------------------------------------------------------------------------
 // Message framing
 // ---------------------------------------------------------------------------
 
-async fn send_msg(stream: &mut quinn::SendStream, msg: &Message) -> Result<()> {
+/// A message stream's write half: a QUIC send stream, or the write half of a
+/// local socket used by the SSH bridge transport.
+trait MsgSink: tokio::io::AsyncWrite + Unpin + Send {
+    /// Signal end-of-stream (best effort).
+    fn finish_stream(&mut self);
+}
+
+impl MsgSink for quinn::SendStream {
+    fn finish_stream(&mut self) {
+        self.finish().ok();
+    }
+}
+
+impl MsgSink for tokio::net::unix::OwnedWriteHalf {
+    fn finish_stream(&mut self) {
+        // The socket closes when the half is dropped.
+    }
+}
+
+async fn send_msg<W: tokio::io::AsyncWrite + Unpin>(stream: &mut W, msg: &Message) -> Result<()> {
     let payload = shared::encode(msg)?;
     stream
         .write_all(&(payload.len() as u32).to_le_bytes())
@@ -218,7 +243,7 @@ async fn send_msg(stream: &mut quinn::SendStream, msg: &Message) -> Result<()> {
     Ok(())
 }
 
-async fn recv_msg(stream: &mut quinn::RecvStream) -> Result<Message> {
+async fn recv_msg<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> Result<Message> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let mut buf = vec![0u8; u32::from_le_bytes(len_buf) as usize];
@@ -1576,13 +1601,13 @@ fn detached_summaries(sessions: &HashMap<String, SessionMeta>) -> Vec<SessionSum
 
 /// Serve `Message::SessionsList` — lets a fresh client discover a detached
 /// interactive session to resume instead of always starting a new one.
-async fn handle_sessions_list(mut send: quinn::SendStream, sessions: Sessions) -> Result<()> {
+async fn handle_sessions_list<W: MsgSink>(mut send: W, sessions: Sessions) -> Result<()> {
     let summaries = {
         let locked = sessions.lock().unwrap();
         detached_summaries(&locked)
     };
     send_msg(&mut send, &Message::SessionsListResponse { sessions: summaries }).await?;
-    send.finish().ok();
+    send.finish_stream();
     Ok(())
 }
 
@@ -1694,7 +1719,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-async fn reject_unauthorized(mut send: quinn::SendStream) -> Result<()> {
+async fn reject_unauthorized<W: MsgSink>(mut send: W) -> Result<()> {
     send_msg(
         &mut send,
         &Message::Close {
@@ -1703,7 +1728,7 @@ async fn reject_unauthorized(mut send: quinn::SendStream) -> Result<()> {
     )
     .await
     .ok();
-    send.finish().ok();
+    send.finish_stream();
     Ok(())
 }
 
@@ -1711,12 +1736,16 @@ async fn reject_unauthorized(mut send: quinn::SendStream) -> Result<()> {
 // Connection stream handler — one per QUIC stream (Hello or Resume)
 // ---------------------------------------------------------------------------
 
-async fn run_session(
-    mut send: quinn::SendStream,
-    mut recv: quinn::RecvStream,
+async fn run_session<W, R>(
+    mut send: W,
+    mut recv: R,
     sessions: Sessions,
     msg: Message,
-) -> Result<()> {
+) -> Result<()>
+where
+    W: MsgSink + 'static,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
     // (session id, last seq the client rendered, client has a blank terminal)
     let (session_id, client_seq, fresh_terminal): (String, u64, bool) = match msg {
         // ── New session ──────────────────────────────────────────────────────
@@ -1980,7 +2009,7 @@ async fn run_session(
                 )
                 .await
                 .ok();
-                send.finish().ok();
+                send.finish_stream();
                 println!(
                     "[session {session_id}] attach epoch {my_epoch} evicted by newer attach"
                 );
@@ -2020,7 +2049,7 @@ async fn run_session(
                         )
                         .await
                         .ok();
-                        send.finish().ok();
+                        send.finish_stream();
                         input_task.abort();
                         return Ok(());
                     }
@@ -2076,7 +2105,7 @@ async fn run_session(
             }
         }
     }
-    send.finish().ok();
+    send.finish_stream();
     Ok(())
 }
 
@@ -2199,11 +2228,138 @@ async fn handle_connection(
 }
 
 // ---------------------------------------------------------------------------
+// Local socket + SSH bridge transport
+// ---------------------------------------------------------------------------
+//
+// When UDP is blocked (corporate networks, some countries), QUIC can't reach
+// the server. The client then runs `onyx-server bridge` over its existing SSH
+// access; the bridge pipes stdin/stdout to this local socket, which speaks
+// the same message protocol as a QUIC stream. Sessions live in this server,
+// not in the SSH connection, so they survive SSH drops exactly like QUIC
+// drops: the client reconnects and resumes with replay.
+
+fn local_socket_path() -> std::path::PathBuf {
+    onyx_data_dir().join("onyx.sock")
+}
+
+async fn handle_local_stream(
+    stream: tokio::net::UnixStream,
+    sessions: Sessions,
+    auth_token: Arc<String>,
+) -> Result<()> {
+    let (mut recv, mut send) = stream.into_split();
+    let first = recv_msg(&mut recv).await.context("reading first message")?;
+    if !message_auth_token_matches(&first, auth_token.as_str()) {
+        reject_unauthorized(send).await?;
+        anyhow::bail!("unauthorized local stream");
+    }
+    match first {
+        Message::SessionsList { .. } => handle_sessions_list(send, sessions).await,
+        msg @ (Message::Hello { .. } | Message::Resume { .. }) => {
+            run_session(send, recv, sessions, msg).await
+        }
+        _ => {
+            send_msg(
+                &mut send,
+                &Message::Close {
+                    reason: "not supported over the SSH bridge".into(),
+                },
+            )
+            .await
+            .ok();
+            Ok(())
+        }
+    }
+}
+
+fn spawn_local_listener(sessions: Sessions, auth_token: Arc<String>) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = local_socket_path();
+    let _ = std::fs::remove_file(&path);
+    let listener = match tokio::net::UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[server] local socket disabled ({}): {e}", path.display());
+            return;
+        }
+    };
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    println!("[server] local socket   {}", path.display());
+    tokio::spawn(async move {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _)) => {
+                    let s = sessions.clone();
+                    let t = auth_token.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_local_stream(stream, s, t).await {
+                            eprintln!("[server] bridge stream error: {e:#}");
+                        }
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[server] local accept error: {e}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    });
+}
+
+/// `onyx-server bridge`: pipe stdin/stdout to the running server's local
+/// socket. Run by the client over SSH when QUIC is unreachable.
+async fn run_bridge() -> Result<()> {
+    let sock = tokio::net::UnixStream::connect(local_socket_path())
+        .await
+        .context("connecting to the local onyx-server socket (is onyx-server running?)")?;
+    let (mut sock_r, mut sock_w) = sock.into_split();
+    // Client → server. On EOF, half-close so the server still gets to send
+    // its reply (e.g. a sessions list) before the socket closes.
+    tokio::spawn(async move {
+        let mut stdin = tokio::io::stdin();
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match stdin.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if sock_w.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = sock_w.shutdown().await;
+    });
+    let down = async move {
+        let mut stdout = tokio::io::stdout();
+        let mut buf = vec![0u8; 16 * 1024];
+        loop {
+            match sock_r.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdout.write_all(&buf[..n]).await.is_err() || stdout.flush().await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    // Server → client decides the bridge's lifetime.
+    down.await;
+    // stdin's blocking reader would otherwise hold runtime shutdown.
+    std::process::exit(0);
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("bridge") {
+        return run_bridge().await;
+    }
+
     rustls::crypto::ring::default_provider()
         .install_default()
         .ok();
@@ -2239,6 +2395,7 @@ async fn main() -> Result<()> {
     db::init(&onyx_data_dir().join("jobs.db"));
     db::recover_interrupted(unix_now());
     let auth_token = Arc::new(auth_token);
+    spawn_local_listener(sessions.clone(), auth_token.clone());
     let endpoint = Endpoint::server(server_cfg, addr)?;
     let bound = endpoint.local_addr()?;
     println!("[server] listening on {bound}  (ALPN: onyx)");

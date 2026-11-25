@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+- **SSH bridge transport.** When UDP/QUIC is unreachable, the interactive
+  session continues over `ssh <host> onyx-server bridge` (the server listens
+  on a private local socket). No extra port or firewall rule; sessions still
+  resume with exact replay after drops. The client alternates QUIC and the
+  bridge while reconnecting, so it switches back when UDP returns.
+
+### Fixed
+- Warp: the Auto-Warpify hook printed by remote rc files made Warp inject its
+  SSH bootstrap and the remote shell exited immediately. The client now drops
+  that hook from session output.
+- Two terminals on the same host no longer fight over one session; a
+  taken-over client exits instead of reconnecting.
+- Keystrokes typed right after a reconnect were sometimes swallowed; input now
+  flows through one long-lived reader, and input typed while disconnected is
+  sent after reconnecting. A failed keystroke send no longer exits the client.
+- A crashed client's session shows up as detached after ~15s (server QUIC idle
+  timeout), so re-running `onyx <host>` resumes it with Enter.
+
 ### Changed
 - **Interactive sessions are tmux-free.** The server runs a plain login shell
   on its own PTY and keeps a 2 MiB replay buffer plus a screen model per

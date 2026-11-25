@@ -373,7 +373,7 @@ async fn check_known_hosts(host_port: &str, remote_fp: &str) -> Result<()> {
 // Message framing
 // ---------------------------------------------------------------------------
 
-async fn send_msg(stream: &mut quinn::SendStream, msg: &Message) -> Result<()> {
+async fn send_msg<W: tokio::io::AsyncWrite + Unpin>(stream: &mut W, msg: &Message) -> Result<()> {
     let payload = shared::encode(msg)?;
     stream
         .write_all(&(payload.len() as u32).to_le_bytes())
@@ -382,7 +382,7 @@ async fn send_msg(stream: &mut quinn::SendStream, msg: &Message) -> Result<()> {
     Ok(())
 }
 
-async fn recv_msg(stream: &mut quinn::RecvStream) -> Result<Message> {
+async fn recv_msg<R: tokio::io::AsyncRead + Unpin>(stream: &mut R) -> Result<Message> {
     let mut len_buf = [0u8; 4];
     stream.read_exact(&mut len_buf).await?;
     let mut buf = vec![0u8; u32::from_le_bytes(len_buf) as usize];
@@ -619,12 +619,12 @@ async fn tcp_proxy_fallback(target_host: &str, target_port: u16) -> Result<()> {
 // real-world remote development where short Wi-Fi blips and NAT rebinds are
 // common and users value staying in the same shell over clean failure.
 
-/// QUIC handshake timeout for interactive mode. Longer than before to tolerate
-/// slow cellular / overseas links without giving up prematurely, short enough
-/// that a truly blocked UDP port fails within ~10 s.
 /// How long stdin waits to coalesce a burst of keystrokes into one write.
 const STDIN_BATCH_WINDOW: Duration = Duration::from_millis(5);
-const INTERACTIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+/// QUIC handshake timeout for interactive mode. A QUIC handshake takes about
+/// one round trip, so 4s tolerates slow overseas/cellular links while a
+/// blocked UDP port hands over to the SSH bridge quickly.
+const INTERACTIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(4);
 /// Retry window after first successful session is dropped. Covers laptop
 /// sleep, VPN reconnect, multi-minute transitions, and flaky networks —
 /// the server-side session outlives this by far (12h, see
@@ -1299,6 +1299,9 @@ SHELL
   missed. After a very long gap it repaints the screen once instead. Run
   `onyx <host>` again later to resume a detached session (kept for 12 hours,
   in memory). The terminal title shows when Onyx is reconnecting.
+  If UDP is blocked, the same session continues over an SSH bridge through
+  your existing SSH access (no extra port or firewall rule), with the same
+  replay after drops. Port forwards (-L) need QUIC.
 
 JOBS
   `onyx exec` runs a command owned by the server. It keeps running if you
@@ -1317,7 +1320,7 @@ OPTIONS
                               ONYX_PORT or <host>:<port>)
   --no-bootstrap            skip remote install/start; needs ONYX_AUTH_TOKEN
                               (from ~/.local/share/onyx/server.auth_token)
-  --no-fallback             fail instead of falling back to plain SSH/TCP
+  --no-fallback             QUIC only: no SSH bridge or plain SSH/TCP fallback
   --json                    one JSON object per line (jobs commands)
   --detach                  (exec) start the job and return
   --cwd <dir>               (exec) working directory on the remote
@@ -2023,7 +2026,9 @@ mod reliability_tests {
         // Handshake timeout must fit inside one reconnect attempt so a
         // single failed attempt doesn't blow the whole window.
         assert!(INTERACTIVE_HANDSHAKE_TIMEOUT * 4 < INTERACTIVE_RECONNECT_WINDOW);
-        assert_eq!(INTERACTIVE_HANDSHAKE_TIMEOUT, PROXY_HANDSHAKE_TIMEOUT);
+        // Interactive mode hands over to the SSH bridge, so it gives up on
+        // QUIC sooner than proxy mode (which has no equivalent fallback).
+        assert!(INTERACTIVE_HANDSHAKE_TIMEOUT <= PROXY_HANDSHAKE_TIMEOUT);
     }
 
     #[test]
@@ -3039,6 +3044,9 @@ fn run_ssh_master(
     cmd.arg("-f");
     cmd.arg("-o");
     cmd.arg(format!("ConnectTimeout={}", SSH_CONNECT_TIMEOUT.as_secs()));
+    // Notice a dead TCP path within ~15s so the SSH bridge (which rides
+    // this master) fails fast and the session reconnects.
+    cmd.args(["-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=3"]);
     cmd.args([
         "-o",
         if interactive_prompt {
@@ -3358,6 +3366,8 @@ struct RemoteStatus {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BootstrapInfo {
     auth_token: String,
+    /// Remote install dir (holds onyx-server), used by the SSH bridge.
+    remote_dir: String,
 }
 
 fn parse_remote_status_output(text: &str, expected_hash: &str) -> RemoteStatus {
@@ -4340,7 +4350,10 @@ fn bootstrap(
     if status.hash_ok && status.healthy {
         let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
             .map_err(bootstrap_error_with_help)?;
-        return Ok(BootstrapInfo { auth_token });
+        return Ok(BootstrapInfo {
+            auth_token,
+            remote_dir: paths.remote_dir.clone(),
+        });
     }
 
     // ── Slow path ────────────────────────────────────────────────────────────
@@ -4389,7 +4402,10 @@ fn bootstrap(
         .map_err(bootstrap_error_with_help)?;
 
     eprintln!("[onyx] ready");
-    Ok(BootstrapInfo { auth_token })
+    Ok(BootstrapInfo {
+        auth_token,
+        remote_dir: paths.remote_dir.clone(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -5863,11 +5879,7 @@ fn parse_session_pick(input: &str, count: usize) -> SessionPick {
 /// one to resume. Returns Some((session_id, resume_token)) to resume, or None
 /// to start fresh. Best-effort: any transport/parse error → None (fresh
 /// session), so the picker never blocks a connection from proceeding.
-async fn pick_session(
-    conn: &quinn::Connection,
-    auth_token: &str,
-) -> Option<(String, String)> {
-    let sessions = query_sessions(conn, auth_token).await.ok()?;
+fn pick_session(sessions: Vec<SessionSummary>) -> Option<(String, String)> {
     if sessions.is_empty() {
         return None;
     }
@@ -5935,7 +5947,15 @@ async fn query_sessions(
     conn: &quinn::Connection,
     auth_token: &str,
 ) -> Result<Vec<SessionSummary>> {
-    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    let (send, recv) = conn.open_bi().await.context("open_bi")?;
+    query_sessions_on(send, recv, auth_token).await
+}
+
+async fn query_sessions_on<W: MsgSink, R: tokio::io::AsyncRead + Unpin>(
+    mut send: W,
+    mut recv: R,
+    auth_token: &str,
+) -> Result<Vec<SessionSummary>> {
     send_msg(
         &mut send,
         &Message::SessionsList {
@@ -5943,7 +5963,7 @@ async fn query_sessions(
         },
     )
     .await?;
-    send.finish().ok();
+    send.finish_stream().await;
     match recv_msg(&mut recv).await? {
         Message::SessionsListResponse { sessions } => Ok(sessions),
         other => anyhow::bail!("unexpected sessions response: {other:?}"),
@@ -5966,6 +5986,7 @@ async fn try_once(
     raw_mode: &mut Option<RawMode>,
     allow_picker: bool,
     last_seq: &Arc<std::sync::atomic::AtomicU64>,
+    input: &mut LocalInput,
 ) -> Result<bool> {
     let first_connect = session.is_none();
     if first_connect {
@@ -5989,7 +6010,8 @@ async fn try_once(
     // reconnect `first_connect` is false so this is skipped. Uses its own
     // short-lived stream on the already-open connection — no extra handshake.
     if first_connect && allow_picker {
-        if let Some(picked) = pick_session(&conn, auth_token).await {
+        let listed = query_sessions(&conn, auth_token).await.unwrap_or_default();
+        if let Some(picked) = pick_session(listed) {
             *session = Some(picked);
             // New terminal for an existing session: the server repaints the
             // screen once instead of replaying history.
@@ -5998,10 +6020,146 @@ async fn try_once(
     }
 
     let t_stream = Instant::now();
-    let (mut send, mut recv) = conn.open_bi().await.context("open_bi")?;
+    let (send, recv) = conn.open_bi().await.context("open_bi")?;
     debug_log(&format!("stream open: {}ms", t_stream.elapsed().as_millis()));
 
+    // Spawn one TCP listener per --forward spec.  Each listener opens new QUIC
+    // streams on this connection for individual TCP connections.  All handles
+    // are aborted when this function returns (connection dropped or shell exit).
+    let forward_handles: Vec<tokio::task::JoinHandle<()>> = forwards
+        .iter()
+        .map(|&(lp, rp)| {
+            tokio::spawn(run_forward_listener(
+                conn.clone(),
+                auth_token.to_string(),
+                lp,
+                rp,
+            ))
+        })
+        .collect();
+
+    let result = run_attached(send, recv, session, auth_token, raw_mode, last_seq, input, "QUIC").await;
+
+    for jh in &forward_handles {
+        jh.abort();
+    }
+    conn.close(0u32.into(), b"bye");
+    result
+}
+
+/// How to reach `onyx-server bridge` over SSH when QUIC is unreachable.
+#[derive(Clone)]
+struct BridgeTarget {
+    ssh_target: String,
+    identity: Option<String>,
+    identity_hint: Option<String>,
+    pool: SshSessionPool,
+    remote_dir: String,
+}
+
+/// Start `ssh <host> <remote_dir>/onyx-server bridge` and return its pipes.
+/// Reuses the pooled SSH ControlMaster, so this is one fast round trip.
+async fn open_bridge(
+    bt: &BridgeTarget,
+) -> Result<(tokio::process::ChildStdin, tokio::process::ChildStdout, tokio::process::Child)> {
+    let b = bt.clone();
+    let ssh = tokio::task::spawn_blocking(move || {
+        b.pool.get_or_connect(
+            &b.ssh_target,
+            b.identity.as_deref(),
+            b.identity_hint.as_deref(),
+            SshAuthFlow::NonInteractive,
+            SshConnectMessages::default(),
+        )
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("ssh task: {e}"))??;
+    let mut cmd = ssh_cmd(&bt.ssh_target, bt.identity.as_deref(), Some(&ssh));
+    let server_path = match bt.remote_dir.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/{}", shell_quote(&format!("{rest}/onyx-server"))),
+        None => shell_quote(&format!("{}/onyx-server", bt.remote_dir)),
+    };
+    cmd.arg(format!("{server_path} bridge"));
+    let mut cmd = tokio::process::Command::from(cmd);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().context("starting ssh bridge")?;
+    let stdin = child.stdin.take().context("bridge stdin")?;
+    let stdout = child.stdout.take().context("bridge stdout")?;
+    Ok((stdin, stdout, child))
+}
+
+/// One attach over the SSH bridge (UDP blocked). Same session protocol and
+/// replay as QUIC; only the pipe differs. Port forwards need QUIC.
+async fn try_once_bridge(
+    bt: &BridgeTarget,
+    session: &mut Option<(String, String)>,
+    auth_token: &str,
+    raw_mode: &mut Option<RawMode>,
+    allow_picker: bool,
+    last_seq: &Arc<std::sync::atomic::AtomicU64>,
+    input: &mut LocalInput,
+) -> Result<bool> {
+    if session.is_none() && raw_mode.is_none() && allow_picker {
+        if let Ok((w, r, _child)) = open_bridge(bt).await {
+            let listed = tokio::time::timeout(
+                INTERACTIVE_HANDSHAKE_TIMEOUT,
+                query_sessions_on(w, r, auth_token),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default();
+            if let Some(picked) = pick_session(listed) {
+                *session = Some(picked);
+                last_seq.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+    let (w, r, _child) = open_bridge(bt).await?;
+    run_attached(w, r, session, auth_token, raw_mode, last_seq, input, "SSH bridge").await
+}
+
+/// Write half of a session stream: a QUIC send stream, or the stdin of the
+/// `ssh … onyx-server bridge` process.
+trait MsgSink: tokio::io::AsyncWrite + Unpin + Send + 'static {
+    async fn finish_stream(&mut self);
+}
+
+impl MsgSink for quinn::SendStream {
+    async fn finish_stream(&mut self) {
+        self.finish().ok();
+    }
+}
+
+impl MsgSink for tokio::process::ChildStdin {
+    async fn finish_stream(&mut self) {
+        let _ = self.shutdown().await;
+    }
+}
+
+/// Run one attach of the interactive session over an already-open stream,
+/// whatever the transport. Returns Ok(true) when the session ended (shell
+/// exit or taken over), Ok(false) on a transport drop worth reconnecting.
+async fn run_attached<W, R>(
+    mut send: W,
+    mut recv: R,
+    session: &mut Option<(String, String)>,
+    auth_token: &str,
+    raw_mode: &mut Option<RawMode>,
+    last_seq: &Arc<std::sync::atomic::AtomicU64>,
+    input: &mut LocalInput,
+    transport: &str,
+) -> Result<bool>
+where
+    W: MsgSink,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let t_connect = Instant::now();
     let is_resume = session.is_some();
+    let first_connect = raw_mode.is_none();
     let (local_cols, local_rows) = get_terminal_size();
     let (cols, rows) = sane_terminal_size(local_cols, local_rows);
     let term = terminal_env_value();
@@ -6078,9 +6236,9 @@ async fn try_once(
     // display.  State is conveyed through the terminal title instead.
     if raw_mode.is_none() {
         if is_resume {
-            eprintln!("[mode] QUIC  (resumed session {session_id})");
+            eprintln!("[mode] {transport}  (resumed session {session_id})");
         } else {
-            eprintln!("[mode] QUIC  (session {session_id})");
+            eprintln!("[mode] {transport}  (session {session_id})");
         }
     } else {
         debug_log(&format!(
@@ -6089,81 +6247,12 @@ async fn try_once(
         ));
     }
 
-    // Spawn one TCP listener per --forward spec.  Each listener opens new QUIC
-    // streams on this connection for individual TCP connections.  All handles
-    // are aborted when this function returns (connection dropped or shell exit).
-    let forward_handles: Vec<tokio::task::JoinHandle<()>> = forwards
-        .iter()
-        .map(|&(lp, rp)| {
-            tokio::spawn(run_forward_listener(
-                conn.clone(),
-                auth_token.to_string(),
-                lp,
-                rp,
-            ))
-        })
-        .collect();
-
     let (cols, rows) = sane_terminal_size(cols, rows);
     send_msg(&mut send, &Message::Resize { cols, rows }).await?;
 
     if raw_mode.is_none() {
         *raw_mode = Some(RawMode::enter()?);
     }
-
-    let mut stdin_jh = tokio::spawn(async move {
-        use tokio::signal::unix::SignalKind;
-        let mut stdin = tokio::io::stdin();
-        let mut buf = [0u8; 4096];
-        // SIGWINCH fires whenever the local terminal window is resized.
-        let mut sigwinch = tokio::signal::unix::signal(SignalKind::window_change()).ok();
-
-        loop {
-            enum Ev {
-                Data(std::io::Result<usize>),
-                Winch,
-            }
-
-            // Drive stdin and SIGWINCH concurrently; fall back to stdin-only if
-            // signal setup failed (non-Unix environments, permission issues, etc.).
-            let ev = if let Some(ref mut sw) = sigwinch {
-                tokio::select! {
-                    r = stdin.read(&mut buf) => Ev::Data(r),
-                    _ = sw.recv()           => Ev::Winch,
-                }
-            } else {
-                Ev::Data(stdin.read(&mut buf).await)
-            };
-
-            match ev {
-                Ev::Data(Ok(0)) | Ev::Data(Err(_)) => break,
-                Ev::Data(Ok(n)) => {
-                    let mut data = buf[..n].to_vec();
-                    // Coalesce a burst (paste, key repeat) into one QUIC write
-                    // without adding noticeable typing latency.
-                    let deadline = tokio::time::Instant::now() + STDIN_BATCH_WINDOW;
-                    loop {
-                        match tokio::time::timeout_at(deadline, stdin.read(&mut buf)).await {
-                            Ok(Ok(m)) if m > 0 => data.extend_from_slice(&buf[..m]),
-                            _ => break,
-                        }
-                    }
-                    if send_msg(&mut send, &Message::Input { data }).await.is_err() {
-                        break;
-                    }
-                }
-                Ev::Winch => {
-                    let (cols, rows) = get_terminal_size();
-                    if send_msg(&mut send, &Message::Resize { cols, rows })
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            }
-        }
-    });
 
     let seen_seq = last_seq.clone();
     let mut output_jh = tokio::spawn(async move {
@@ -6196,16 +6285,112 @@ async fn try_once(
         eprintln!("[onyx] ready");
     }
 
-    let shell_exited = tokio::select! {
-        _ = &mut stdin_jh   => { output_jh.abort(); true }  // local stdin closed — exit cleanly
-        r = &mut output_jh  => { stdin_jh.abort();  r.unwrap_or(false) }
-    };
-
-    for jh in &forward_handles {
-        jh.abort();
+    // Keystrokes typed while disconnected are queued and sent now.
+    if !input.carry.is_empty() {
+        let data = std::mem::take(&mut input.carry);
+        if send_msg(&mut send, &Message::Input { data: data.clone() }).await.is_err() {
+            input.carry = data;
+            output_jh.abort();
+            return Ok(false);
+        }
     }
-    conn.close(0u32.into(), b"bye");
-    Ok(shell_exited)
+    let rx = input.rx.get_or_insert_with(spawn_stdin_pump);
+    loop {
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Some(StdinEv::Data(data)) => {
+                    if send_msg(&mut send, &Message::Input { data: data.clone() }).await.is_err() {
+                        // Transport dropped: keep the keystrokes for the
+                        // next attach instead of losing them.
+                        input.carry = data;
+                        output_jh.abort();
+                        return Ok(false);
+                    }
+                }
+                Some(StdinEv::Winch) => {
+                    let (cols, rows) = get_terminal_size();
+                    if send_msg(&mut send, &Message::Resize { cols, rows }).await.is_err() {
+                        output_jh.abort();
+                        return Ok(false);
+                    }
+                }
+                // Local stdin closed: exit cleanly.
+                None => {
+                    output_jh.abort();
+                    return Ok(true);
+                }
+            },
+            r = &mut output_jh => return Ok(r.unwrap_or(false)),
+        }
+    }
+}
+
+enum StdinEv {
+    Data(Vec<u8>),
+    Winch,
+}
+
+/// Local keyboard input for the interactive session. One stdin reader lives
+/// for the whole process and feeds a channel; each attach (QUIC or bridge,
+/// first connect or reconnect) drains the same channel. A per-attach reader
+/// would leave a blocking read behind on every reconnect that swallowed the
+/// next keystrokes.
+#[derive(Default)]
+struct LocalInput {
+    /// Started on first attach, after the resume picker has read its answer.
+    rx: Option<mpsc::Receiver<StdinEv>>,
+    /// Input that could not be sent because the transport dropped.
+    carry: Vec<u8>,
+}
+
+fn spawn_stdin_pump() -> mpsc::Receiver<StdinEv> {
+    let (tx, rx) = mpsc::channel::<StdinEv>(256);
+    tokio::spawn(async move {
+        use tokio::signal::unix::SignalKind;
+        let mut stdin = tokio::io::stdin();
+        let mut buf = [0u8; 4096];
+        // SIGWINCH fires whenever the local terminal window is resized.
+        let mut sigwinch = tokio::signal::unix::signal(SignalKind::window_change()).ok();
+        loop {
+            enum Ev {
+                Data(std::io::Result<usize>),
+                Winch,
+            }
+            let ev = if let Some(ref mut sw) = sigwinch {
+                tokio::select! {
+                    r = stdin.read(&mut buf) => Ev::Data(r),
+                    _ = sw.recv()           => Ev::Winch,
+                }
+            } else {
+                Ev::Data(stdin.read(&mut buf).await)
+            };
+            match ev {
+                Ev::Data(Ok(0)) | Ev::Data(Err(_)) => break,
+                Ev::Data(Ok(n)) => {
+                    let mut data = buf[..n].to_vec();
+                    // Coalesce a burst (paste, key repeat) into one write
+                    // without adding noticeable typing latency.
+                    let deadline = tokio::time::Instant::now() + STDIN_BATCH_WINDOW;
+                    loop {
+                        match tokio::time::timeout_at(deadline, stdin.read(&mut buf)).await {
+                            Ok(Ok(m)) if m > 0 => data.extend_from_slice(&buf[..m]),
+                            _ => break,
+                        }
+                    }
+                    if tx.send(StdinEv::Data(data)).await.is_err() {
+                        break;
+                    }
+                }
+                Ev::Winch => {
+                    if tx.send(StdinEv::Winch).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        // Dropping tx closes the channel: the session sees local EOF.
+    });
+    rx
 }
 
 // ---------------------------------------------------------------------------
@@ -6396,6 +6581,7 @@ async fn run_interactive_session(
         .with_context(|| format!("resolving target '{raw_target}'"))?;
     let ssh_pool = target.ssh_mode.then(SshSessionPool::default);
     let mut auth_token = None;
+    let mut remote_dir = REMOTE_DIR.to_string();
 
     // SSH bootstrap (blocking, single SSH call on fast path).
     if target.ssh_mode && !no_bootstrap {
@@ -6414,6 +6600,7 @@ async fn run_interactive_session(
         )
         .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
         auth_token = Some(info.auth_token);
+        remote_dir = info.remote_dir;
     }
     let mut auth_token = match auth_token {
         Some(token) => token,
@@ -6469,6 +6656,22 @@ async fn run_interactive_session(
     // server replays exactly what we missed.
     let last_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
+    // SSH bridge: the same session over the existing SSH access, used when
+    // QUIC (UDP) is unreachable. Needs SSH mode; --no-fallback disables it.
+    let bridge = match (&ssh_pool, no_fallback) {
+        (Some(pool), false) => Some(BridgeTarget {
+            ssh_target: target.ssh_target.clone(),
+            identity: target.identity_file.clone(),
+            identity_hint: target.identity_hint.clone(),
+            pool: pool.clone(),
+            remote_dir: remote_dir.clone(),
+        }),
+        _ => None,
+    };
+    let mut use_bridge = false;
+    let mut bridge_notice_shown = false;
+    let mut input = LocalInput::default();
+
     loop {
         // After 20 s of failed reconnects, re-run bootstrap via SSH.
         // This refreshes remote state and restarts a crashed server without
@@ -6505,19 +6708,35 @@ async fn run_interactive_session(
             }
         }
 
-        match try_once(
-            server_addr,
-            &endpoint,
-            &mut session,
-            &host_port,
-            &capture,
-            &auth_token,
-            &forwards,
-            &mut raw_mode,
-            allow_picker,
-            &last_seq,
-        )
-        .await
+        let attempt = match (&bridge, use_bridge) {
+            (Some(bt), true) => {
+                if !bridge_notice_shown && raw_mode.is_none() {
+                    eprintln!("[onyx] QUIC (UDP) unreachable; continuing over an SSH bridge. Sessions still resume after drops.");
+                    if !forwards.is_empty() {
+                        eprintln!("[onyx] note: --forward needs QUIC and is inactive over the SSH bridge.");
+                    }
+                    bridge_notice_shown = true;
+                }
+                try_once_bridge(bt, &mut session, &auth_token, &mut raw_mode, allow_picker, &last_seq, &mut input).await
+            }
+            _ => {
+                try_once(
+                    server_addr,
+                    &endpoint,
+                    &mut session,
+                    &host_port,
+                    &capture,
+                    &auth_token,
+                    &forwards,
+                    &mut raw_mode,
+                    allow_picker,
+                    &last_seq,
+                    &mut input,
+                )
+                .await
+            }
+        };
+        match attempt
         {
             // Shell exited cleanly.
             Ok(true) => break,
@@ -6549,6 +6768,19 @@ async fn run_interactive_session(
                             disconnect_at.get_or_insert_with(Instant::now);
                             show_reconnect_status();
                             status_shown = true;
+                        }
+                        // Alternate transports on failure: UDP may be blocked
+                        // (use the SSH bridge) or may have come back (QUIC).
+                        if bridge.is_some() {
+                            use_bridge = !use_bridge;
+                            debug_log(&format!(
+                                "attempt failed ({e:#}); next transport: {}",
+                                if use_bridge { "ssh bridge" } else { "quic" }
+                            ));
+                            if use_bridge {
+                                // Try the bridge right away.
+                                continue;
+                            }
                         }
                         debug_log(&format!("retry in {}ms (backoff)", backoff.as_millis()));
                         tokio::time::sleep(backoff).await;
