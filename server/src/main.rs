@@ -1968,8 +1968,18 @@ async fn run_session(
 
             _ = &mut takeover_rx => {
                 // Newer attach took over. Leave meta state alone — it is
-                // now owned by the new handler.
+                // now owned by the new handler. Tell the old client so it
+                // exits instead of auto-reconnecting and stealing the
+                // session back (two terminals would otherwise ping-pong).
                 input_task.abort();
+                send_msg(
+                    &mut send,
+                    &Message::Close {
+                        reason: shared::CLOSE_TAKEN_OVER.into(),
+                    },
+                )
+                .await
+                .ok();
                 send.finish().ok();
                 println!(
                     "[session {session_id}] attach epoch {my_epoch} evicted by newer attach"

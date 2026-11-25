@@ -5878,12 +5878,16 @@ async fn pick_session(
 
     let describe = |s: &SessionSummary| match s.detached_at_unix {
         Some(d) => format!("detached {}", format_relative_time(now_unix, d)),
-        None => "still attached (another terminal, or a client that dropped)".to_string(),
+        None => "open in another terminal (or a client that dropped)".to_string(),
     };
+    // Enter resumes the newest *detached* session. A session that is still
+    // attached is only taken over when picked explicitly by number:
+    // otherwise two terminals would keep stealing one session back and forth.
+    let default_idx = sessions.iter().position(|s| s.detached_at_unix.is_some());
 
     // One detached session: resume it without asking (the common case
     // after a network drop that outlasted the reconnect window).
-    if sessions.len() == 1 && sessions[0].detached_at_unix.is_some() {
+    if sessions.len() == 1 && default_idx == Some(0) {
         let s = &sessions[0];
         eprintln!(
             "[onyx] resuming your session ({}). Use --new to start fresh.",
@@ -5892,20 +5896,18 @@ async fn pick_session(
         return Some((s.session_id.clone(), s.resume_token.clone()));
     }
 
-    if sessions.len() == 1 {
-        eprintln!("[onyx] found 1 session on this host, {}.", describe(&sessions[0]));
-        eprint!("Take it over? [Enter = yes, 'n' = new session] ");
-    } else {
-        eprintln!("[onyx] {} sessions on this host:", sessions.len());
-        for (i, s) in sessions.iter().enumerate() {
-            eprintln!(
-                "  {}) {}  {}",
-                i + 1,
-                truncate_display(&s.session_id, 12),
-                describe(s)
-            );
-        }
-        eprint!("Resume which? [Enter = 1, number, or 'n' for new] ");
+    eprintln!("[onyx] sessions on this host:");
+    for (i, s) in sessions.iter().enumerate() {
+        eprintln!(
+            "  {}) {}  {}",
+            i + 1,
+            truncate_display(&s.session_id, 12),
+            describe(s)
+        );
+    }
+    match default_idx {
+        Some(i) => eprint!("Resume which? [Enter = {}, number, or 'n' for new] ", i + 1),
+        None => eprint!("[Enter = new session, or a number to take that one over] "),
     }
     use std::io::Write;
     std::io::stderr().flush().ok();
@@ -5916,7 +5918,7 @@ async fn pick_session(
     }
     match parse_session_pick(&line, sessions.len()) {
         SessionPick::MostRecent => {
-            let s = &sessions[0];
+            let s = &sessions[default_idx?];
             Some((s.session_id.clone(), s.resume_token.clone()))
         }
         SessionPick::Index(i) => {
@@ -6175,7 +6177,10 @@ async fn try_once(
                     // Only count output as seen once it reached the terminal.
                     seen_seq.store(seq, Ordering::Relaxed);
                 }
-                Ok(Message::Close { .. }) => {
+                Ok(Message::Close { reason }) => {
+                    if reason == shared::CLOSE_TAKEN_OVER {
+                        TAKEN_OVER.store(true, Ordering::Relaxed);
+                    }
                     let _ = stdout.flush().await;
                     break true;
                 }
@@ -6203,6 +6208,10 @@ async fn try_once(
 // ---------------------------------------------------------------------------
 // Connection status line — calm, native-feeling state indicator
 // ---------------------------------------------------------------------------
+
+/// Set when the server says another client took this session over. The
+/// client then exits instead of reconnecting (which would steal it back).
+static TAKEN_OVER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 static RECONNECT_TITLE_SHOWN: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -6616,6 +6625,16 @@ async fn run_interactive_session(
         }
     }
 
-    endpoint.wait_idle().await;
-    Ok(())
+    if TAKEN_OVER.load(Ordering::Relaxed) {
+        drop(raw_mode.take());
+        eprintln!(
+            "\n[onyx] this session was opened in another terminal; disconnected here.\n       \
+             Run `onyx {raw_target}` to take it back, or `onyx {raw_target} --new` for a separate shell."
+        );
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(1), endpoint.wait_idle()).await;
+    drop(raw_mode.take());
+    // Exit directly: tokio's stdin reader sits in a blocking read that would
+    // otherwise hold runtime shutdown until the next keypress.
+    std::process::exit(0);
 }

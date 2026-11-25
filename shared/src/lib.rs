@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 /// Default QUIC port for onyx.
 pub const DEFAULT_PORT: u16 = 7272;
 
+/// `Close.reason` sent to a client whose interactive session was taken over
+/// by another client. The evicted client must exit, not reconnect.
+pub const CLOSE_TAKEN_OVER: &str = "session taken over by another client";
+
 /// Which standard stream an exec output chunk came from.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StdStream {
