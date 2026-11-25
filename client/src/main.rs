@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 
 mod agent;
+mod termfilter;
 
 // ---------------------------------------------------------------------------
 // Source files embedded at compile time for remote bootstrap.
@@ -6167,9 +6168,11 @@ async fn try_once(
     let seen_seq = last_seq.clone();
     let mut output_jh = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
+        let mut warp_filter = termfilter::WarpHookFilter::default();
         loop {
             match recv_msg(&mut recv).await {
                 Ok(Message::Output { seq, data }) => {
+                    let data = warp_filter.filter(&data);
                     if stdout.write_all(&data).await.is_err() {
                         break false;
                     }
