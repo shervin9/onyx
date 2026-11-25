@@ -1,356 +1,389 @@
 (function () {
-  var typed = document.getElementById("typed");
-  var meta = document.getElementById("terminal-meta");
-  var agentTrack = document.getElementById("agent-track");
-  var agentLine = document.querySelector(".agent-line");
-  var agentPulse = document.querySelector(".agent-pulse");
-  var agentCards = Array.prototype.slice.call(document.querySelectorAll(".agent-card"));
-  var repoMetaStrip = document.getElementById("repo-meta-strip");
-  var repoMetaText = document.getElementById("repo-meta-text");
+  "use strict";
 
-  var execStatusBadge = document.getElementById("exec-status-badge");
-  var execStatusMeta = document.getElementById("exec-status-meta");
-  var execCommandLine = document.getElementById("exec-command-line");
-  var execLine1 = document.getElementById("exec-line-1");
-  var execLine2 = document.getElementById("exec-line-2");
-  var execLine3 = document.getElementById("exec-line-3");
-  var execLine4 = document.getElementById("exec-line-4");
-  var execJobLine = document.getElementById("exec-job-line");
-  var execDropLine = document.getElementById("exec-drop-line");
-  var execResumedLine = document.getElementById("exec-resumed-line");
-  var execScene = document.getElementById("exec-scene");
+  var root = document.documentElement;
+  root.classList.add("js");
 
-  var repoApiUrl = "https://api.github.com/repos/shervin9/onyx";
-  var latestReleaseApiUrl = "https://api.github.com/repos/shervin9/onyx/releases/latest";
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var hasIO = "IntersectionObserver" in window;
 
-  var terminalScenes = [
-    { command: "onyx user@host", meta: "[shell] auto-reconnect" },
-    { command: "onyx dev-onyx", meta: "[session] resume instantly" },
-    { command: "onyx user@host:7373", meta: "[host] custom port" },
-    { command: "onyx user@host", meta: "[fallback] SSH when needed" }
-  ];
+  // ── Nav background after scrolling ────────────────────────────────
+  var nav = document.getElementById("nav");
+  function onScroll() {
+    if (nav) nav.classList.toggle("is-scrolled", window.scrollY > 8);
+  }
+  window.addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
 
-  var execRevealLines = [
-    execCommandLine,
-    execJobLine,
-    execLine1,
-    execLine2,
-    execDropLine,
-    execResumedLine,
-    execLine3,
-    execLine4
-  ];
+  // ── Scroll reveal ─────────────────────────────────────────────────
+  var revealEls = Array.prototype.slice.call(document.querySelectorAll(".reveal"));
+  if (!hasIO || reduceMotion) {
+    revealEls.forEach(function (el) { el.classList.add("is-in"); });
+  } else {
+    var revealObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add("is-in");
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+    revealEls.forEach(function (el) { revealObserver.observe(el); });
+  }
 
-  var execTimeline = [
-    { label: "starting", tone: "neutral", meta: "gpu-box • preparing job", show: [execCommandLine], delay: 960 },
-    { label: "running", tone: "running", meta: "gpu-box • job_84f31", show: [execJobLine], delay: 1080 },
-    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine1], delay: 1180 },
-    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine2], delay: 1480 },
-    { label: "connection lost", tone: "lost", meta: "gpu-box • reconnecting", show: [execDropLine], delay: 1900 },
-    { label: "resumed", tone: "resumed", meta: "gpu-box • job_84f31", hide: [execDropLine], show: [execResumedLine], delay: 1380 },
-    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine3], delay: 1120 },
-    { label: "streaming", tone: "running", meta: "gpu-box • job_84f31", show: [execLine4], delay: 2600 }
-  ];
+  // ── Pause decorative CSS loops while off-screen ───────────────────
+  if (hasIO) {
+    var loopObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        entry.target.classList.toggle("is-paused", !entry.isIntersecting);
+      });
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(".card-viz"), function (el) {
+      loopObserver.observe(el);
+    });
+  }
 
-  function centerOfElement(element, containerRect) {
-    var rect = element.getBoundingClientRect();
-    return {
-      x: rect.left + rect.width / 2 - containerRect.left,
-      y: rect.top + rect.height / 2 - containerRect.top
+  // ── Card spotlight follows the pointer ────────────────────────────
+  Array.prototype.forEach.call(document.querySelectorAll(".card"), function (card) {
+    card.addEventListener("pointermove", function (e) {
+      var r = card.getBoundingClientRect();
+      card.style.setProperty("--mx", (e.clientX - r.left) + "px");
+      card.style.setProperty("--my", (e.clientY - r.top) + "px");
+    });
+  });
+
+  // ── Terminal scene engine ─────────────────────────────────────────
+  // A scene is a list of steps run in order, then looped. Scenes only
+  // advance while their terminal is on screen and the tab is visible, and a
+  // restart cancels any pending timer, so there are never overlapping runs.
+  function Scene(container, body, steps, options) {
+    this.container = container;
+    this.body = body;
+    this.steps = steps;
+    this.options = options || {};
+    this.visible = false;
+    this.running = false;
+    this.timer = null;
+    this.waiter = null;
+    this.generation = 0;
+  }
+
+  Scene.prototype.clear = function () {
+    while (this.body.firstChild) this.body.removeChild(this.body.firstChild);
+  };
+
+  Scene.prototype.line = function (text, cls) {
+    var el = document.createElement("span");
+    el.className = "ln" + (cls ? " " + cls : "");
+    el.textContent = text;
+    this.body.appendChild(el);
+    return el;
+  };
+
+  Scene.prototype.sleep = function (ms, gen) {
+    var self = this;
+    return new Promise(function (resolve, reject) {
+      function arm() {
+        self.timer = window.setTimeout(function () {
+          self.timer = null;
+          if (gen !== self.generation) return reject("cancelled");
+          if (!self.canRun()) {
+            // Hold here until the scene is visible again.
+            self.waiter = function () { self.waiter = null; arm(); };
+            return;
+          }
+          resolve();
+        }, ms);
+      }
+      arm();
+    });
+  };
+
+  Scene.prototype.canRun = function () {
+    return this.visible && !document.hidden;
+  };
+
+  Scene.prototype.type = function (text, cls, gen) {
+    var self = this;
+    var el = this.line("", (cls || "") + " ln-typing");
+    var caret = document.createElement("span");
+    caret.className = "caret";
+    el.appendChild(caret);
+    var i = 0;
+    function next() {
+      if (i >= text.length) {
+        return self.sleep(260, gen).then(function () {
+          if (caret.parentNode) caret.parentNode.removeChild(caret);
+        });
+      }
+      caret.insertAdjacentText("beforebegin", text.charAt(i++));
+      return self.sleep(28 + Math.random() * 38, gen).then(next);
+    }
+    return next();
+  };
+
+  Scene.prototype.run = function () {
+    var self = this;
+    if (this.running) return;
+    this.running = true;
+    var gen = ++this.generation;
+    if (this.options.reset) this.options.reset();
+    this.clear();
+    var chain = Promise.resolve();
+    this.steps.forEach(function (step) {
+      chain = chain.then(function () { return step(self, gen); });
+    });
+    chain.then(function () {
+      return self.sleep(self.options.loopDelay || 3500, gen);
+    }).then(function () {
+      self.running = false;
+      self.run();
+    }, function () {
+      self.running = false;
+    });
+  };
+
+  Scene.prototype.renderStatic = function () {
+    if (this.options.reset) this.options.reset();
+    this.clear();
+    if (this.options.staticRender) this.options.staticRender(this);
+  };
+
+  Scene.prototype.setVisible = function (visible) {
+    this.visible = visible;
+    if (visible) {
+      if (!this.running) this.run();
+      else if (this.waiter) this.waiter();
+    }
+  };
+
+  function mountScene(scene) {
+    if (!scene.container || !scene.body) return;
+    if (reduceMotion) {
+      scene.renderStatic();
+      return;
+    }
+    if (!hasIO) {
+      scene.setVisible(true);
+      return;
+    }
+    new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) { scene.setVisible(entry.isIntersecting); });
+    }, { threshold: 0.2 }).observe(scene.container);
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    scenes.forEach(function (s) {
+      if (!document.hidden && s.visible && s.waiter) s.waiter();
+    });
+  });
+
+  // Small helpers for step lists.
+  function wait(ms) { return function (s, g) { return s.sleep(ms, g); }; }
+  function out(text, cls, after) {
+    return function (s, g) { s.line(text, cls); return s.sleep(after || 380, g); };
+  }
+  function typed(text, after) {
+    return function (s, g) {
+      return s.type(text, "ln-prompt", g).then(function () { return s.sleep(after || 300, g); });
     };
   }
+  function act(fn) { return function () { fn(); }; }
 
-  function typeText(text, done) {
-    if (!typed || !meta) return;
-    typed.textContent = "";
-    meta.textContent = "";
-    var i = 0;
-
-    function step() {
-      if (i < text.length) {
-        typed.textContent += text.charAt(i++);
-        window.setTimeout(step, 34 + Math.random() * 20);
-      } else {
-        window.setTimeout(done, 180);
-      }
-    }
-
-    step();
+  // ── Hero: connect, dev server, drop, replay ───────────────────────
+  var heroTerm = document.getElementById("hero-term");
+  var heroConn = document.getElementById("hero-conn");
+  var heroTitle = document.getElementById("hero-title");
+  function setConn(state, label) {
+    if (!heroConn) return;
+    heroConn.setAttribute("data-state", state);
+    var l = heroConn.querySelector(".conn-label");
+    if (l) l.textContent = label;
+    if (heroTerm) heroTerm.classList.toggle("is-down", state === "down");
+    if (heroTitle) heroTitle.textContent = state === "down" ? "● onyx — reconnecting…" : "onyx dev-box";
   }
 
-  function loopTerminal(index) {
-    if (!typed || !meta || !terminalScenes.length) return;
-    var scene = terminalScenes[index];
-    typeText(scene.command, function () {
-      meta.textContent = scene.meta;
-      window.setTimeout(function () {
-        loopTerminal((index + 1) % terminalScenes.length);
-      }, 2200);
+  var heroScene = new Scene(heroTerm, document.getElementById("hero-body"), [
+    typed("onyx dev-box", 200),
+    out("[onyx] connecting…", "ln-dim", 650),
+    act(function () { setConn("up", "QUIC"); }),
+    out("[mode] QUIC  (session 6b07a1c3)", "ln-dim", 700),
+    typed("npm run dev", 250),
+    out("  ▲ Next.js ready on http://localhost:3000", "", 900),
+    out("[onyx] dev-box:3000 → http://localhost:3000", "ln-onyx", 1300),
+    typed("./deploy.sh --env staging", 250),
+    out("building image… done", "", 700),
+    act(function () { setConn("down", "reconnecting"); }),
+    wait(2600),
+    act(function () { setConn("up", "QUIC"); }),
+    out("pushing layers… done", "ln-replay", 260),
+    out("running migrations… done", "ln-replay", 260),
+    out("rollout complete ✓", "ln-replay ln-ok", 900)
+  ], {
+    loopDelay: 4200,
+    reset: function () { setConn("idle", "connecting"); },
+    staticRender: function (s) {
+      setConn("up", "QUIC");
+      s.line("onyx dev-box", "ln-prompt");
+      s.line("[mode] QUIC  (session 6b07a1c3)", "ln-dim");
+      s.line("npm run dev", "ln-prompt");
+      s.line("[onyx] dev-box:3000 → http://localhost:3000", "ln-onyx");
+      s.line("./deploy.sh --env staging", "ln-prompt");
+      s.line("building image… done");
+      s.line("pushing layers… done", "ln-replay");
+      s.line("rollout complete ✓", "ln-replay ln-ok");
+    }
+  });
+
+  // ── Ports: dev server, browser, sign-in link, stop ────────────────
+  var browser = document.getElementById("ports-browser");
+  function setBrowser(open) { if (browser) browser.classList.toggle("is-open", open); }
+
+  var portsScene = new Scene(document.getElementById("ports-demo"), document.getElementById("ports-body"), [
+    typed("npm run dev", 250),
+    out("  ▲ Next.js ready on http://localhost:3000", "", 900),
+    out("[onyx] dev-box:3000 → http://localhost:3000", "ln-onyx", 500),
+    act(function () { setBrowser(true); }),
+    wait(2200),
+    out("^C", "ln-dim", 600),
+    act(function () { setBrowser(false); }),
+    out("[onyx] dev-box:3000 stopped listening; forward closed", "ln-onyx", 1300),
+    typed("gh auth login --web", 300),
+    out("! One-time code: 4F2A-91C3", "", 700),
+    out("[onyx] opened in your browser: github.com/login/device", "ln-onyx", 2000)
+  ], {
+    loopDelay: 3200,
+    reset: function () { setBrowser(false); },
+    staticRender: function (s) {
+      s.line("npm run dev", "ln-prompt");
+      s.line("  ▲ Next.js ready on http://localhost:3000");
+      s.line("[onyx] dev-box:3000 → http://localhost:3000", "ln-onyx");
+      setBrowser(true);
+    }
+  });
+
+  // ── Exec: detach, reattach, drop, resume ──────────────────────────
+  var badge = document.getElementById("exec-badge");
+  function setBadge(label, tone) {
+    if (!badge) return;
+    badge.textContent = label;
+    badge.setAttribute("data-tone", tone);
+  }
+
+  var execScene = new Scene(document.getElementById("exec-term"), document.getElementById("exec-body"), [
+    typed("onyx exec gpu --detach -- python train.py", 250),
+    act(function () { setBadge("running", "running"); }),
+    out("job_84f31", "", 350),
+    out("[onyx] detached; reattach with: onyx attach <target> job_84f31", "ln-dim", 1100),
+    typed("onyx attach gpu job_84f31", 300),
+    out("epoch=01  loss=0.912  samples=4096", "", 650),
+    out("epoch=02  loss=0.734  samples=8192", "", 700),
+    act(function () { setBadge("connection lost", "lost"); }),
+    out("[net] connection lost, reconnecting…", "ln-warn", 1800),
+    act(function () { setBadge("resumed", "resumed"); }),
+    out("[job] resumed  seq=27", "ln-dim", 500),
+    out("epoch=03  loss=0.581  samples=12288", "", 650),
+    out("epoch=04  checkpoint=best.pt", "", 650),
+    act(function () { setBadge("done", "done"); }),
+    out("[job] finished  exit=0", "ln-ok", 600)
+  ], {
+    loopDelay: 3600,
+    reset: function () { setBadge("starting", "neutral"); },
+    staticRender: function (s) {
+      setBadge("done", "done");
+      s.line("onyx exec gpu --detach -- python train.py", "ln-prompt");
+      s.line("onyx attach gpu job_84f31", "ln-prompt");
+      s.line("epoch=02  loss=0.734  samples=8192");
+      s.line("[job] resumed  seq=27", "ln-dim");
+      s.line("[job] finished  exit=0", "ln-ok");
+    }
+  });
+
+  var scenes = [heroScene, portsScene, execScene];
+  scenes.forEach(mountScene);
+
+  // ── Install tabs (click + arrow keys) ─────────────────────────────
+  var tabs = Array.prototype.slice.call(document.querySelectorAll(".tab"));
+  function selectTab(tab) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.classList.toggle("is-active", on);
+      t.setAttribute("aria-selected", on ? "true" : "false");
+      t.setAttribute("tabindex", on ? "0" : "-1");
+      var panel = document.getElementById(t.getAttribute("aria-controls"));
+      if (panel) panel.hidden = !on;
     });
   }
-
-  function setAgentStep(stepIndex) {
-    agentCards.forEach(function (card, index) {
-      card.classList.toggle("is-active", index === stepIndex);
+  tabs.forEach(function (tab, i) {
+    tab.addEventListener("click", function () { selectTab(tab); });
+    tab.addEventListener("keydown", function (e) {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+      e.preventDefault();
+      var next = tabs[(i + (e.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
+      selectTab(next);
+      next.focus();
     });
-  }
+  });
 
-  function measureAgentTrack() {
-    if (!agentTrack || !agentLine || !agentCards.length) return;
-
-    var trackRect = agentTrack.getBoundingClientRect();
-    var first = centerOfElement(agentCards[0], trackRect);
-    var last = centerOfElement(agentCards[agentCards.length - 1], trackRect);
-    var isVertical = window.matchMedia("(max-width: 900px)").matches;
-
-    if (isVertical) {
-      agentTrack.style.setProperty("--agent-line-left", first.x + "px");
-      agentTrack.style.setProperty("--agent-line-top", first.y + "px");
-      agentTrack.style.setProperty("--agent-line-height", Math.max(last.y - first.y, 0) + "px");
-      agentTrack.style.setProperty("--agent-line-width", "1px");
-    } else {
-      agentTrack.style.setProperty("--agent-line-left", first.x + "px");
-      agentTrack.style.setProperty("--agent-line-top", first.y + "px");
-      agentTrack.style.setProperty("--agent-line-width", Math.max(last.x - first.x, 0) + "px");
-      agentTrack.style.setProperty("--agent-line-height", "1px");
-    }
-  }
-
-  function placeAgentPulse(stepIndex, instant) {
-    if (!agentTrack || !agentPulse || !agentCards.length) return;
-    var card = agentCards[stepIndex];
-    if (!card) return;
-
-    var trackRect = agentTrack.getBoundingClientRect();
-    var center = centerOfElement(card, trackRect);
-
-    if (instant) {
-      agentPulse.style.transition = "none";
-    } else {
-      agentPulse.style.transition =
-        "left 1.08s cubic-bezier(0.22, 1, 0.36, 1), top 1.08s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
-    }
-
-    agentTrack.style.setProperty("--agent-pulse-left", center.x + "px");
-    agentTrack.style.setProperty("--agent-pulse-top", center.y + "px");
-
-    if (instant) {
-      agentPulse.getBoundingClientRect();
-      agentPulse.style.transition =
-        "left 1.08s cubic-bezier(0.22, 1, 0.36, 1), top 1.08s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.2s ease";
-    }
-  }
-
-  function refreshAgentLayout() {
-    if (!agentCards.length) return;
-    measureAgentTrack();
-    var activeIndex = 0;
-    agentCards.forEach(function (card, index) {
-      if (card.classList.contains("is-active")) activeIndex = index;
-    });
-    placeAgentPulse(activeIndex, true);
-  }
-
-  function loopAgent(index) {
-    if (!agentCards.length) return;
-    measureAgentTrack();
-    setAgentStep(index);
-    placeAgentPulse(index, false);
-
-    window.setTimeout(function () {
-      var next = index + 1;
-      if (next >= agentCards.length) {
-        setAgentStep(0);
-        placeAgentPulse(0, true);
-        window.setTimeout(function () {
-          loopAgent(0);
-        }, 500);
-        return;
-      }
-      loopAgent(next);
-    }, 1650);
-  }
-
-  function fetchJson(url) {
-    return fetch(url, {
-      headers: {
-        Accept: "application/vnd.github+json"
-      }
-    }).then(function (response) {
-      if (!response.ok) {
-        throw new Error("HTTP " + response.status);
-      }
-      return response.json();
-    });
-  }
-
-  function formatCount(value) {
-    if (typeof value !== "number" || !isFinite(value)) return "";
-    return new Intl.NumberFormat("en-US").format(value);
-  }
-
-  function renderRepoMeta(releaseTag, stars, forks) {
-    if (!repoMetaText || !repoMetaStrip) return;
-    var parts = [];
-
-    if (typeof releaseTag === "string" && releaseTag.trim()) {
-      parts.push("Latest " + releaseTag.trim());
-    }
-
-    if (typeof stars === "number") {
-      parts.push(formatCount(stars) + " stars");
-    }
-
-    if (typeof forks === "number") {
-      parts.push(formatCount(forks) + " forks");
-    }
-
-    if (!parts.length) {
-      repoMetaText.textContent = "";
-      repoMetaStrip.hidden = true;
-      return;
-    }
-
-    repoMetaText.textContent = parts.join(" · ");
-    repoMetaStrip.hidden = false;
-  }
-
-  function loadRepoMeta() {
-    if (!repoMetaText || !repoMetaStrip || !window.fetch) return;
-
-    Promise.all([
-      fetchJson(repoApiUrl).catch(function () { return null; }),
-      fetchJson(latestReleaseApiUrl).catch(function () { return null; })
-    ]).then(function (results) {
-      var repo = results[0];
-      var release = results[1];
-      var releaseTag;
-
-      if (release && typeof release.tag_name === "string" && release.tag_name.trim()) {
-        releaseTag = release.tag_name.trim();
-      }
-
-      renderRepoMeta(
-        releaseTag,
-        repo && typeof repo.stargazers_count === "number" ? repo.stargazers_count : undefined,
-        repo && typeof repo.forks_count === "number" ? repo.forks_count : undefined
-      );
-    }).catch(function () {
-      repoMetaStrip.hidden = true;
-    });
-  }
-
-  function setExecStatus(label, tone, metaText) {
-    if (execStatusBadge) {
-      execStatusBadge.textContent = label || "starting";
-      execStatusBadge.setAttribute("data-tone", tone || "neutral");
-    }
-    if (execStatusMeta && metaText) {
-      execStatusMeta.textContent = metaText;
-    }
-  }
-
-  function toggleExecLine(element, visible) {
-    if (!element) return;
-    element.classList.toggle("is-visible", !!visible);
-  }
-
-  function resetExecScene() {
-    execRevealLines.forEach(function (line) {
-      toggleExecLine(line, false);
-    });
-    setExecStatus("starting", "neutral", "gpu-box • preparing job");
-  }
-
-  function runExecStep(index) {
-    if (!execScene) return;
-    if (index >= execTimeline.length) {
-      window.setTimeout(startExecDemo, 1700);
-      return;
-    }
-
-    var step = execTimeline[index];
-    setExecStatus(step.label, step.tone, step.meta);
-
-    if (step.hide) {
-      step.hide.forEach(function (line) {
-        toggleExecLine(line, false);
-      });
-    }
-
-    if (step.show) {
-      step.show.forEach(function (line) {
-        toggleExecLine(line, true);
-      });
-    }
-
-    window.setTimeout(function () {
-      runExecStep(index + 1);
-    }, step.delay || 750);
-  }
-
-  function startExecDemo() {
-    if (!execScene || !execStatusBadge) return;
-    resetExecScene();
-    window.setTimeout(function () {
-      runExecStep(0);
-    }, 720);
-  }
-
-  loadRepoMeta();
-
-  window.setTimeout(function () {
-    refreshAgentLayout();
-    loopTerminal(0);
-    loopAgent(0);
-    startExecDemo();
-  }, 700);
-
-  window.addEventListener("resize", refreshAgentLayout);
-  window.addEventListener("orientationchange", refreshAgentLayout);
-})();
-
-function copyText(targetId, button) {
-  var target = document.getElementById(targetId);
-  if (!target || !button) return;
-  var text = target.textContent || "";
-
-  function done(label) {
-    var reset = button.getAttribute("data-reset-label") || "Copy";
+  // ── Copy buttons ──────────────────────────────────────────────────
+  function flash(button, label, ok) {
     button.textContent = label;
+    button.classList.toggle("is-done", !!ok);
     window.setTimeout(function () {
-      button.textContent = reset;
-    }, 1800);
+      button.textContent = "Copy";
+      button.classList.remove("is-done");
+    }, 1600);
   }
-
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(function () {
-      done("Copied");
-    }).catch(function () {
-      fallbackCopy(text, done);
-    });
-  } else {
-    fallbackCopy(text, done);
-  }
-}
-
-function fallbackCopy(text, done) {
-  try {
+  function fallbackCopy(text) {
     var ta = document.createElement("textarea");
     ta.value = text;
-    ta.style.cssText = "position:fixed;top:-9999px;opacity:0;pointer-events:none";
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:-9999px;opacity:0";
     document.body.appendChild(ta);
     ta.select();
-    document.execCommand("copy");
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
     document.body.removeChild(ta);
-    done("Copied");
-  } catch (err) {
-    done("Failed");
+    return ok;
   }
-}
+  document.addEventListener("click", function (event) {
+    var button = event.target.closest && event.target.closest("[data-copy-target]");
+    if (!button) return;
+    var target = document.getElementById(button.getAttribute("data-copy-target"));
+    if (!target) return;
+    var text = (target.textContent || "").trim();
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(function () { flash(button, "Copied", true); }, function () {
+        flash(button, fallbackCopy(text) ? "Copied" : "Press ⌘C", true);
+      });
+    } else {
+      flash(button, fallbackCopy(text) ? "Copied" : "Press ⌘C", true);
+    }
+  });
 
-document.addEventListener("click", function (event) {
-  var button = event.target.closest("[data-copy-target]");
-  if (!button) return;
-  copyText(button.getAttribute("data-copy-target"), button);
-});
+  // ── GitHub stars + latest release (best effort) ───────────────────
+  function getJson(url) {
+    return fetch(url, { headers: { Accept: "application/vnd.github+json" } }).then(function (r) {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    });
+  }
+  if (window.fetch) {
+    getJson("https://api.github.com/repos/shervin9/onyx").then(function (repo) {
+      var el = document.getElementById("nav-stars");
+      if (el && typeof repo.stargazers_count === "number" && repo.stargazers_count > 0) {
+        el.textContent = "★ " + new Intl.NumberFormat("en-US").format(repo.stargazers_count);
+        el.hidden = false;
+      }
+    }).catch(function () {});
+    getJson("https://api.github.com/repos/shervin9/onyx/releases/latest").then(function (rel) {
+      var tag = rel && typeof rel.tag_name === "string" ? rel.tag_name.trim() : "";
+      if (!tag) return;
+      var fv = document.getElementById("footer-version");
+      if (fv) { fv.textContent = tag; fv.hidden = false; }
+    }).catch(function () {});
+  }
+
+  var year = document.getElementById("year");
+  if (year) year.textContent = String(new Date().getFullYear());
+})();

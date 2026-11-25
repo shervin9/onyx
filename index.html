@@ -3,265 +3,351 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Onyx — Resilient remote shell and resumable exec</title>
-  <meta name="description" content="Remote shells and jobs for unreliable networks. Stable sessions that replay missed output, resumable remote exec, and JSON output for AI agents.">
-  <meta name="theme-color" content="#090909">
+  <title>Onyx — The remote shell that survives your network</title>
+  <meta name="description" content="A remote shell that keeps going through Wi-Fi, VPN and laptop disconnects. Replays exactly the output you missed, forwards dev-server ports automatically, opens links in your local browser, and works even when UDP is blocked. No tmux.">
+  <meta name="theme-color" content="#08080a">
+  <meta property="og:title" content="Onyx — The remote shell that survives your network">
+  <meta property="og:description" content="Exact output replay after drops, automatic port forwarding, links that open locally, and an SSH bridge when UDP is blocked. No tmux.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://useonyx.dev/">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
-  <div class="ambient ambient-a" aria-hidden="true"></div>
-  <div class="ambient ambient-b" aria-hidden="true"></div>
+<body id="top">
+  <div class="backdrop" aria-hidden="true">
+    <div class="glow glow-a"></div>
+    <div class="glow glow-b"></div>
+    <div class="grid-fade"></div>
+  </div>
 
-  <nav>
-    <a href="./" class="logo">onyx</a>
-    <div class="nav-actions">
-      <a href="#shell" class="nav-link">Shell</a>
-      <a href="#exec" class="nav-link">Exec</a>
+  <nav class="nav" id="nav">
+    <a href="./" class="brand" aria-label="Onyx home"><span class="brand-mark" aria-hidden="true">◆</span>onyx</a>
+    <div class="nav-links">
+      <a href="#features" class="nav-link">Features</a>
+      <a href="#ports" class="nav-link">Ports</a>
+      <a href="#exec" class="nav-link">Jobs</a>
+      <a href="#compare" class="nav-link">Compare</a>
       <a href="./docs/" class="nav-link">Docs</a>
-      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-link">GitHub</a>
+    </div>
+    <div class="nav-cta">
+      <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="nav-gh" aria-label="Onyx on GitHub">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span id="nav-stars" class="nav-stars" hidden></span>
+      </a>
+      <a href="#install" class="btn btn-primary btn-sm">Install</a>
     </div>
   </nav>
 
   <main>
+    <!-- ───────────────────────── Hero ───────────────────────── -->
     <section class="hero">
-      <div class="repo-meta-strip" id="repo-meta-strip" hidden>
-        <a
-          href="https://github.com/shervin9/onyx"
-          target="_blank"
-          rel="noopener noreferrer"
-          class="repo-meta-link"
-          aria-label="Onyx GitHub metadata"
-        >
-          <span id="repo-meta-text"></span>
-        </a>
+      <a class="release-pill" id="release-pill" href="https://github.com/shervin9/onyx/releases" target="_blank" rel="noopener noreferrer">
+        <span class="release-dot" aria-hidden="true"></span>
+        <span id="release-pill-text">New: ports &amp; links open on your machine</span>
+        <span aria-hidden="true">→</span>
+      </a>
+      <h1 class="reveal">The remote shell that<br class="br-wide"> <span class="h1-accent">survives your network.</span></h1>
+      <p class="sub reveal">Close the laptop, switch Wi-Fi, lose the VPN. Your shell keeps running on the server, and when you're back Onyx replays exactly the output you missed. Plain terminal, native scrollback, no tmux.</p>
+      <div class="actions reveal">
+        <a href="#install" class="btn btn-primary">Install Onyx</a>
+        <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-ghost">View on GitHub</a>
       </div>
-      <h1>Remote shells and jobs that keep going.</h1>
-      <p class="sub">Run remote work through Wi-Fi, VPN, and laptop disconnects.</p>
-      <div class="actions">
-        <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on GitHub</a>
-        <a href="#install" class="btn btn-ghost">Install</a>
-      </div>
+      <ul class="chips reveal" aria-label="Highlights">
+        <li>Exact output replay</li>
+        <li>Ports auto-forwarded</li>
+        <li>Links open locally</li>
+        <li>Works when UDP is blocked</li>
+        <li>No tmux</li>
+      </ul>
 
-      <div class="mini-points" aria-label="Product highlights">
-        <span>Auto-reconnect</span>
-        <span>Resumable exec</span>
-        <span>No tmux</span>
-        <span>SSH fallback</span>
-      </div>
-
-      <div class="terminal-shell hero-terminal" aria-label="Onyx terminal preview">
-        <div class="terminal-top">
-          <div class="terminal-dots">
-            <span></span><span></span><span></span>
-          </div>
-          <span class="terminal-label">onyx</span>
+      <div class="term hero-term reveal" id="hero-term" aria-label="Animated demo of an Onyx session">
+        <div class="term-top">
+          <div class="term-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span class="term-title" id="hero-title">onyx dev-box</span>
+          <span class="conn" id="hero-conn" data-state="idle"><span class="conn-dot"></span><span class="conn-label">connecting</span></span>
         </div>
-        <div class="terminal-body">
-          <div class="terminal-line terminal-line-static">
-            <span class="prompt">$</span>
-            <span class="terminal-text">interactive shell over unreliable networks</span>
-          </div>
-          <div class="terminal-scene" id="terminal-scene">
-            <div class="terminal-line">
-              <span class="prompt">$</span>
-              <span class="terminal-text" id="typed"></span><span class="caret"></span>
-            </div>
-            <div class="terminal-line terminal-line-muted" id="terminal-meta"></div>
-          </div>
-        </div>
+        <div class="term-body" id="hero-body" aria-live="off"></div>
       </div>
     </section>
 
-    <section class="video-section" aria-labelledby="video-heading">
-      <div class="video-copy">
+    <!-- ───────────────────────── Video ───────────────────────── -->
+    <section class="video" aria-labelledby="video-heading">
+      <div class="section-head reveal">
+        <span class="eyebrow">Demo</span>
         <h2 id="video-heading">Watch it run</h2>
-        <p>See Onyx reconnect shells and resume remote job output.</p>
+        <p>Onyx reconnecting a shell and resuming remote job output.</p>
       </div>
-      <div class="video-frame">
+      <div class="video-frame reveal">
         <iframe
-          src="https://www.youtube.com/embed/vULBoUR4hZ8?modestbranding=1&amp;rel=0&amp;controls=1"
-          title="Onyx teaser video"
+          src="https://www.youtube-nocookie.com/embed/vULBoUR4hZ8?modestbranding=1&amp;rel=0"
+          title="Onyx demo video"
           loading="lazy"
           allow="accelerometer; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+          referrerpolicy="strict-origin-when-cross-origin"
           allowfullscreen
         ></iframe>
       </div>
     </section>
 
-    <section class="flow shell-feature" id="shell">
-      <div class="section-head">
-        <h2>Stable interactive sessions.</h2>
-        <p>Reconnect fast. Pick up where you left off.</p>
+    <!-- ───────────────────────── Features ───────────────────────── -->
+    <section id="features">
+      <div class="section-head reveal">
+        <span class="eyebrow">Why Onyx</span>
+        <h2>Everything SSH does. Minus the broken sessions.</h2>
+        <p>A single binary on each side. Your existing SSH keys and <code>~/.ssh/config</code> just work.</p>
       </div>
-      <div class="shell-compact-grid">
-        <article class="shell-compact-card">
-          <span class="shell-compact-line">Reconnect fast</span>
-          <span class="shell-compact-line">Missed output replayed</span>
+
+      <div class="bento">
+        <article class="card card-wide reveal">
+          <div class="card-viz viz-replay" aria-hidden="true">
+            <div class="vr-line">$ ./deploy.sh</div>
+            <div class="vr-line">building image… done</div>
+            <div class="vr-gap"><span>wi-fi drop · 41s</span></div>
+            <div class="vr-line vr-missed">pushing layers… done</div>
+            <div class="vr-line vr-missed">rollout complete ✓</div>
+          </div>
+          <h3>Exact output replay</h3>
+          <p>The server keeps a replay buffer per session. Reconnect and you get precisely the bytes you missed, once, in order. After a very long gap, the screen repaints cleanly instead.</p>
         </article>
-        <article class="shell-compact-card">
-          <span class="shell-compact-line">Remote session stays live</span>
-          <span class="shell-compact-line">SSH fallback when needed</span>
+
+        <article class="card reveal">
+          <div class="card-viz viz-scroll" aria-hidden="true">
+            <div class="vs-track"><div class="vs-thumb"></div></div>
+            <div class="vs-lines"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+          </div>
+          <h3>Native scrollback</h3>
+          <p>No tmux, no status bar, no copy-mode. Scroll, select and copy exactly like a local terminal, in the terminal you already use.</p>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-viz viz-ports" aria-hidden="true">
+            <span class="vp-chip">:3000</span>
+            <span class="vp-beam"></span>
+            <span class="vp-chip vp-local">localhost:3000</span>
+          </div>
+          <h3>Ports forward themselves</h3>
+          <p>Start a dev server and it's on your localhost within seconds. Stop it and the forward closes. No <code>-L</code> flags to remember.</p>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-viz viz-link" aria-hidden="true">
+            <span class="vl-url">gh auth login</span>
+            <span class="vl-arrow">↗</span>
+            <span class="vl-browser"><i></i><i></i><i></i></span>
+          </div>
+          <h3>Links open locally</h3>
+          <p><code>xdg-open</code> and <code>$BROWSER</code> on the server open in your browser. Sign-in flows for <code>gh</code>, <code>gcloud</code> and agents just work.</p>
+        </article>
+
+        <article class="card reveal">
+          <div class="card-viz viz-bridge" aria-hidden="true">
+            <span class="vb-path vb-quic">QUIC</span>
+            <span class="vb-path vb-ssh">SSH bridge</span>
+          </div>
+          <h3>Works when UDP is blocked</h3>
+          <p>QUIC when it can, an SSH bridge when it can't. Same session, same replay. No extra port, no firewall rule.</p>
+        </article>
+
+        <article class="card card-wide reveal">
+          <div class="card-viz viz-jobs" aria-hidden="true">
+            <div class="vj-row"><span>job_84f31</span><span class="vj-bar"><i style="--p:.82"></i></span><span class="vj-state">running</span></div>
+            <div class="vj-row"><span>job_1c09a</span><span class="vj-bar"><i style="--p:1"></i></span><span class="vj-state vj-done">done</span></div>
+            <div class="vj-row"><span>job_7e2d4</span><span class="vj-bar"><i style="--p:.38"></i></span><span class="vj-state">running</span></div>
+          </div>
+          <h3>Jobs that outlive your laptop</h3>
+          <p><code>onyx exec</code> runs commands owned by the server. Detach, close the lid, then reattach, read logs, or stop them later, with <code>--json</code> output for scripts and agents.</p>
         </article>
       </div>
     </section>
 
-    <section class="exec-feature" id="exec">
-      <div class="section-head exec-head">
+    <!-- ───────────────────────── Ports spotlight ───────────────────────── -->
+    <section id="ports" class="split">
+      <div class="split-copy">
+        <span class="eyebrow reveal">New in this release</span>
+        <h2 class="reveal">Your server, as if it were local.</h2>
+        <p class="reveal">Onyx watches the ports that programs in <em>your</em> session listen on, and mirrors each one to your machine. Nothing else on the server is exposed.</p>
+        <ul class="checks reveal">
+          <li>Same port on your Mac, or a free one if it's taken</li>
+          <li>Closes when the program stops</li>
+          <li>Sign-in links open in your local browser</li>
+          <li>Explicit <code>-L local:remote</code> still works</li>
+        </ul>
+      </div>
+      <div class="split-visual reveal" id="ports-demo">
+        <div class="term ports-term">
+          <div class="term-top">
+            <div class="term-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="term-title">dev-box · ~/app</span>
+          </div>
+          <div class="term-body" id="ports-body"></div>
+        </div>
+        <div class="browser" id="ports-browser" aria-hidden="true">
+          <div class="browser-top">
+            <span class="term-dots"><span></span><span></span><span></span></span>
+            <span class="browser-url"><span class="lock">●</span> localhost:3000</span>
+          </div>
+          <div class="browser-body">
+            <div class="bb-hero"></div>
+            <div class="bb-row"><i></i><i></i><i></i></div>
+            <div class="bb-ok">Live from dev-box ✓</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── Exec ───────────────────────── -->
+    <section id="exec" class="exec">
+      <div class="section-head reveal">
+        <span class="eyebrow">Resumable jobs</span>
         <h2>Run commands you can come back to.</h2>
-        <p>Start once. Detach. Reattach, inspect logs, or stop the job later.</p>
+        <p>Start once. Detach. Reattach, read the logs, or stop the job later.</p>
       </div>
 
-      <div class="terminal-shell exec-terminal" aria-label="onyx exec resumable job animation">
-        <div class="terminal-top">
-          <div class="terminal-dots">
-            <span></span><span></span><span></span>
-          </div>
-          <span class="terminal-label">onyx exec</span>
+      <div class="term exec-term reveal" id="exec-term">
+        <div class="term-top">
+          <div class="term-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+          <span class="term-title">onyx exec</span>
+          <span class="badge" id="exec-badge" data-tone="neutral">starting</span>
         </div>
-        <div class="exec-status-bar" aria-live="polite">
-          <span class="exec-status-label">status</span>
-          <span class="exec-status-badge" id="exec-status-badge" data-tone="neutral">starting</span>
-          <span class="exec-status-meta" id="exec-status-meta">gpu-box • job_84f31</span>
-        </div>
-        <div class="terminal-body exec-scene" id="exec-scene">
-          <div class="terminal-line exec-reveal" id="exec-command-line">
-            <span class="prompt">$</span>
-            <span class="terminal-text">onyx exec gpu-box --detach -- python train.py</span>
-          </div>
-          <div class="terminal-line terminal-line-muted exec-reveal" id="exec-job-line">
-            <span class="exec-prefix">[job]</span>
-            <span class="terminal-text">job_84f31  running  detached</span>
-          </div>
-          <div class="terminal-line exec-reveal" id="exec-line-1">
-            <span class="exec-prefix">train</span>
-            <span class="terminal-text">epoch=01  loss=0.912  samples=4096</span>
-          </div>
-          <div class="terminal-line exec-reveal" id="exec-line-2">
-            <span class="exec-prefix">train</span>
-            <span class="terminal-text">epoch=02  loss=0.734  samples=8192</span>
-          </div>
-          <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-drop-line">
-            <span class="exec-prefix">[net]</span>
-            <span class="terminal-text">connection lost...</span>
-          </div>
-          <div class="terminal-line terminal-line-muted exec-event-line exec-reveal" id="exec-resumed-line">
-            <span class="exec-prefix">[job]</span>
-            <span class="terminal-text">resumed  seq=27</span>
-          </div>
-          <div class="terminal-line exec-reveal" id="exec-line-3">
-            <span class="exec-prefix">train</span>
-            <span class="terminal-text">epoch=03  loss=0.581  samples=12288</span>
-          </div>
-          <div class="terminal-line exec-reveal" id="exec-line-4">
-            <span class="exec-prefix">train</span>
-            <span class="terminal-text">epoch=04  checkpoint=best.pt</span>
-          </div>
-        </div>
+        <div class="term-body" id="exec-body"></div>
       </div>
 
-      <div class="exec-command-grid" aria-label="Onyx exec command examples">
-        <article class="exec-command-card">
-          <span class="exec-command-label">Run</span>
+      <div class="cmd-grid">
+        <article class="cmd reveal">
+          <span class="cmd-label">Run</span>
           <code>onyx exec prod -- ./deploy.sh</code>
-          <p>Run it live.</p>
+          <p>Stream it live, resume on drops.</p>
         </article>
-        <article class="exec-command-card">
-          <span class="exec-command-label">Detach</span>
-          <code>onyx exec gpu-box --detach -- python train.py</code>
-          <p>Leave it running.</p>
+        <article class="cmd reveal">
+          <span class="cmd-label">Detach</span>
+          <code>onyx exec gpu --detach -- python train.py</code>
+          <p>Leave it running on the server.</p>
         </article>
-        <article class="exec-command-card">
-          <span class="exec-command-label">Logs</span>
-          <code>onyx logs gpu-box job_xxx</code>
-          <p>Check progress later.</p>
+        <article class="cmd reveal">
+          <span class="cmd-label">Check in</span>
+          <code>onyx logs gpu job_84f31</code>
+          <p>Read buffered output any time.</p>
+        </article>
+        <article class="cmd reveal">
+          <span class="cmd-label">Scripts &amp; agents</span>
+          <code>onyx exec ci --json -- cargo test</code>
+          <p>One JSON event per line.</p>
         </article>
       </div>
-      <p class="exec-support-copy"><a href="./docs/exec.html" class="inline-link">Full CLI reference → Docs</a></p>
     </section>
 
-    <section class="agent-section" id="agents">
-      <div class="section-head section-head-centered agent-head">
-        <h2>JSON for agents and scripts</h2>
-        <p>Agents call the CLI. Live progress, reconnect, and resume.</p>
+    <!-- ───────────────────────── Compare ───────────────────────── -->
+    <section id="compare">
+      <div class="section-head reveal">
+        <span class="eyebrow">Compare</span>
+        <h2>How Onyx fits next to the tools you know.</h2>
       </div>
-
-      <div class="agent-stage" aria-label="Agent to Onyx CLI to remote host">
-        <div class="agent-track" id="agent-track">
-          <div class="agent-line" aria-hidden="true"></div>
-          <article class="agent-card is-active">
-            <strong class="agent-card-title">Agent</strong>
-            <span class="agent-card-subtitle">local client</span>
-          </article>
-          <article class="agent-card">
-            <strong class="agent-card-title">Onyx CLI</strong>
-            <span class="agent-card-subtitle">--json</span>
-          </article>
-          <article class="agent-card">
-            <strong class="agent-card-title">Remote Host</strong>
-            <span class="agent-card-subtitle">hetzner-dev</span>
-          </article>
-          <div class="agent-pulse" aria-hidden="true"></div>
-        </div>
+      <div class="table-wrap reveal">
+        <table class="compare">
+          <thead>
+            <tr><th scope="col"></th><th scope="col" class="col-onyx">Onyx</th><th scope="col">SSH</th><th scope="col">mosh</th><th scope="col">SSH + tmux</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Shell survives network drops</th><td class="col-onyx yes">Yes, auto-resumes</td><td class="no">No</td><td class="yes">Yes</td><td class="part">Reattach by hand</td></tr>
+            <tr><th scope="row">Replays output you missed</th><td class="col-onyx yes">Yes</td><td class="no">No</td><td class="part">Screen only</td><td class="part">Screen only</td></tr>
+            <tr><th scope="row">Native scrollback &amp; copy</th><td class="col-onyx yes">Yes</td><td class="yes">Yes</td><td class="no">No</td><td class="no">No</td></tr>
+            <tr><th scope="row">Works when UDP is blocked</th><td class="col-onyx yes">Yes, SSH bridge</td><td class="yes">Yes</td><td class="no">No</td><td class="yes">Yes</td></tr>
+            <tr><th scope="row">Dev-server ports forwarded</th><td class="col-onyx yes">Automatically</td><td class="part">Manual <code>-L</code></td><td class="no">No</td><td class="part">Manual <code>-L</code></td></tr>
+            <tr><th scope="row">Remote links open locally</th><td class="col-onyx yes">Yes</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
+            <tr><th scope="row">Detachable jobs with logs</th><td class="col-onyx yes">Yes, <code>--json</code></td><td class="no">No</td><td class="no">No</td><td class="part">Via panes</td></tr>
+          </tbody>
+        </table>
       </div>
-
-      <div class="agent-tool-grid" aria-label="Onyx jobs commands">
-        <article class="agent-tool"><code>onyx exec</code></article>
-        <article class="agent-tool"><code>onyx jobs</code></article>
-        <article class="agent-tool"><code>onyx logs</code></article>
-        <article class="agent-tool"><code>onyx kill</code></article>
-      </div>
-
-      <pre class="agent-sample"><code>onyx exec hetzner-dev --json -- git status</code></pre>
     </section>
 
-    <section class="install" id="install">
-      <div class="section-head">
-        <h2>Install</h2>
+    <!-- ───────────────────────── Install ───────────────────────── -->
+    <section id="install" class="install">
+      <div class="section-head reveal">
+        <span class="eyebrow">Install</span>
+        <h2>Up and running in a minute.</h2>
+        <p>Install the client locally. The server half is uploaded and started over SSH on first connect.</p>
       </div>
-      <div class="install-grid">
-        <article class="install-card">
-          <span class="install-kicker">Install</span>
-          <div class="code-wrap">
-            <code id="brew-cmd">brew install shervin9/onyx/onyx --formula</code>
-            <button id="copy-brew-btn" type="button" data-copy-target="brew-cmd">Copy</button>
-          </div>
-        </article>
-        <article class="install-card">
-          <span class="install-kicker">Update</span>
-          <div class="code-wrap">
-            <code id="upgrade-cmd">brew upgrade shervin9/onyx/onyx --formula</code>
-            <button id="copy-upgrade-btn" type="button" data-copy-target="upgrade-cmd">Copy</button>
-          </div>
-        </article>
-      </div>
-      <article class="install-card connect-card">
-        <span class="install-kicker">Connect</span>
-        <div class="usage-line">
-          <code id="connect-cmd">onyx user@host</code>
+
+      <div class="install-box reveal">
+        <div class="tabs" role="tablist" aria-label="Install method">
+          <button class="tab is-active" role="tab" aria-selected="true" aria-controls="tab-brew" id="tab-btn-brew" type="button">Homebrew</button>
+          <button class="tab" role="tab" aria-selected="false" aria-controls="tab-script" id="tab-btn-script" type="button" tabindex="-1">Install script</button>
         </div>
-      </article>
-      <p class="install-support-copy">Remote server is provisioned automatically.</p>
+        <div class="tab-panel" id="tab-brew" role="tabpanel" aria-labelledby="tab-btn-brew">
+          <div class="code-row"><code id="cmd-brew">brew install shervin9/onyx/onyx --formula</code><button class="copy" type="button" data-copy-target="cmd-brew">Copy</button></div>
+          <div class="code-row code-row-dim"><code id="cmd-upgrade">brew upgrade shervin9/onyx/onyx --formula</code><button class="copy" type="button" data-copy-target="cmd-upgrade">Copy</button></div>
+        </div>
+        <div class="tab-panel" id="tab-script" role="tabpanel" aria-labelledby="tab-btn-script" hidden>
+          <div class="code-row"><code id="cmd-script">curl -fsSL https://useonyx.dev/install.sh | sh</code><button class="copy" type="button" data-copy-target="cmd-script">Copy</button></div>
+          <p class="tab-note">macOS (Apple Silicon) and Linux x86_64 / arm64.</p>
+        </div>
+        <div class="steps">
+          <div class="step"><span class="step-n">1</span><div><strong>Connect</strong><code>onyx user@host</code></div></div>
+          <div class="step"><span class="step-n">2</span><div><strong>Or use an alias</strong><code>onyx dev-box</code></div></div>
+          <div class="step"><span class="step-n">3</span><div><strong>Run a job</strong><code>onyx exec dev-box -- make test</code></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── CTA ───────────────────────── -->
+    <section class="cta reveal">
+      <h2>Stop babysitting your SSH sessions.</h2>
+      <p>Open source, MIT licensed, self-hosted. Nothing to sign up for.</p>
+      <div class="actions">
+        <a href="#install" class="btn btn-primary">Install Onyx</a>
+        <a href="./docs/" class="btn btn-ghost">Read the docs</a>
+      </div>
     </section>
   </main>
 
-  <footer>
-    <div class="footer-trust-strip">
-      <span>MIT licensed</span>
-      <span>Self-hostable</span>
-      <span>No lock-in</span>
+  <!-- ───────────────────────── Footer ───────────────────────── -->
+  <footer class="footer">
+    <div class="footer-top">
+      <div class="footer-brand">
+        <a href="./" class="brand"><span class="brand-mark" aria-hidden="true">◆</span>onyx</a>
+        <p>The remote shell that survives your network. Built in Rust on QUIC.</p>
+        <div class="footer-badges">
+          <span class="fbadge">MIT licensed</span>
+          <span class="fbadge">Self-hosted</span>
+          <span class="fbadge" id="footer-version" hidden></span>
+        </div>
+      </div>
+      <nav class="footer-cols" aria-label="Footer">
+        <div class="footer-col">
+          <h4>Product</h4>
+          <a href="#features">Features</a>
+          <a href="#ports">Ports &amp; links</a>
+          <a href="#exec">Resumable jobs</a>
+          <a href="#compare">Compare</a>
+          <a href="#install">Install</a>
+        </div>
+        <div class="footer-col">
+          <h4>Docs</h4>
+          <a href="./docs/">Overview</a>
+          <a href="./docs/shell.html">Shell</a>
+          <a href="./docs/exec.html">Exec &amp; JSON</a>
+          <a href="./docs/install.html">Install guide</a>
+        </div>
+        <div class="footer-col">
+          <h4>Project</h4>
+          <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a href="https://github.com/shervin9/onyx/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+          <a href="https://github.com/shervin9/onyx/blob/main/CHANGELOG.md" target="_blank" rel="noopener noreferrer">Changelog</a>
+          <a href="https://github.com/shervin9/onyx/issues" target="_blank" rel="noopener noreferrer">Report an issue</a>
+          <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a>
+        </div>
+      </nav>
     </div>
-    <div class="footer-meta">
-      <span class="logo">onyx</span>
-      <span><a href="./docs/">Docs</a> · <a href="https://github.com/shervin9/onyx" target="_blank" rel="noopener noreferrer">GitHub</a> · <a href="https://github.com/shervin9/onyx/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a></span>
-    </div>
-    <div class="footer-producthunt">
-      <a href="https://www.producthunt.com/products/onyx-cli?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-onyx-cli" target="_blank" rel="noopener noreferrer">
-        <img alt="Onyx CLI - Run remote jobs that survive disconnects. | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133623&amp;theme=dark&amp;t=1777377766251">
+    <div class="footer-bottom">
+      <span>© <span id="year">2026</span> Onyx contributors · <a href="https://github.com/shervin9/onyx/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></span>
+      <a class="ph" href="https://www.producthunt.com/products/onyx-cli?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-onyx-cli" target="_blank" rel="noopener noreferrer">
+        <img alt="Onyx CLI on Product Hunt" width="200" height="43" loading="lazy" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133623&amp;theme=dark">
       </a>
+      <a href="#top" class="to-top" id="to-top">Back to top ↑</a>
     </div>
   </footer>
 
