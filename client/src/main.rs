@@ -47,224 +47,6 @@ const ONYX_SERVER_BINARY_ENV: &str = "ONYX_SERVER_BINARY";
 const ONYX_DEV_REMOTE_BUILD_ENV: &str = "ONYX_DEV_REMOTE_BUILD";
 
 // ---------------------------------------------------------------------------
-// Remote config files — tmux setup + live status bar script.
-// Uploaded to CONF_DIR during bootstrap and versioned via config_hash().
-// ---------------------------------------------------------------------------
-
-/// tmux configuration: context-aware status bar, terminal title propagation
-/// for Warp and friends, and automatic window renaming based on the running
-/// foreground command (onyx:shell, onyx:claude, onyx:codex, ...).
-///
-/// Kept minimal on purpose — all dynamic pieces go through status.sh so
-/// there's exactly one shell invocation per refresh class.
-const ONYX_TMUX_CONF: &str = r##"# onyx — auto-generated, do not edit (overwritten on update)
-# Default to terminal-native selection, paste, clicks, and AI prompt editing.
-# tmux mouse mode is still available with prefix + m when wheel-scroll inside
-# tmux history is more important than native terminal selection.
-set -g mouse off
-bind-key m set -g mouse \; display-message 'mouse #{?#{==:#{mouse},on},off,on}'
-bind-key s copy-mode -e \; display-message 'scroll mode: q or Esc to exit'
-bind-key -n M-Up copy-mode -u
-bind-key -n M-PageUp copy-mode -u
-set -g history-limit 50000
-
-# Copy in copy-mode ('s' then select then Enter/y) goes to the *local*
-# system clipboard via OSC 52, relayed through tmux and the onyx transport
-# (QUIC or SSH fallback) unchanged. Works even when mouse mode is off, and
-# in any OSC-52-capable terminal (iTerm2, Warp, kitty, Alacritty, Windows
-# Terminal, VSCode's integrated terminal).
-set -g set-clipboard on
-
-# prefix + u — grab a URL off the current screen and copy it to your *local*
-# clipboard (OSC 52). Built to solve "I can't copy the auth link Claude Code
-# printed": it captures the visible pane with wrapped lines re-joined, so long
-# URLs survive intact, works inside full-screen TUIs, and needs no mouse and no
-# plugins. One URL → copied instantly; several → a built-in menu to pick.
-bind-key u run-shell "~/.config/onyx/url.sh '#{pane_id}'"
-
-# Terminal title → "claude · ~/workspace/meviq". Warp's sidebar / tab
-# detection reads this. set-titles fires on window/pane changes, not per
-# tick, so the shell cost is negligible.
-set -g set-titles on
-set -g set-titles-string '#(~/.config/onyx/status.sh title "#{pane_current_path}" "#{pane_current_command}")'
-
-# Auto-rename window to "onyx:shell" / "onyx:claude" / "onyx:codex" based
-# on the foreground command inside the pane.
-set -g automatic-rename on
-set -g automatic-rename-format '#(~/.config/onyx/status.sh window "#{pane_current_path}" "#{pane_current_command}")'
-
-# -- Status bar ---------------------------------------------------------------
-# Modern/minimal: no solid slab, no brackets, no debug identifiers by default.
-# `bg=default` lets the terminal theme show through so the bar feels native.
-set -g status-style    'bg=default,fg=colour244'
-set -g status-interval 5
-
-# Left: connection state dot + label + state text.
-# ONYX_STATE is written by onyx-server on every client connect/disconnect,
-# so this reflects the live QUIC session state, not just tmux attachment.
-#   green ●  Connected      = QUIC client actively attached
-#   amber ●  Reconnecting…  = QUIC client disconnected, still retrying (server still running)
-#   amber ●  SSH            = SSH fallback transport
-set -g status-left-length 40
-set -g status-left '#[bg=default] #{?#{==:#{E:ONYX_STATE},disconnected},#[fg=colour214]●  #[fg=colour246]onyx  #[fg=colour214]Reconnecting…,#{?#{==:#{E:ONYX_MODE},ssh},#[fg=colour178]●  #[fg=colour246]onyx  #[fg=colour178]SSH,#[fg=colour71]●  #[fg=colour246]onyx  #[fg=colour71]Connected}} '
-
-# Right: path · branch · cmd — dim secondary context, no session hash.
-set -g status-right-length 100
-set -g status-right '#[bg=default,fg=colour240]#(~/.config/onyx/status.sh right "#{pane_current_path}" "#{pane_current_command}") '
-
-# Window tabs — present but subdued; no highlight slab.
-set -g window-status-style         'fg=colour238,bg=default'
-set -g window-status-current-style 'fg=colour246,bg=default'
-set -g window-status-format         ' #W '
-set -g window-status-current-format ' #W '
-set -g window-status-separator      ''
-
-# Pane borders — reduced contrast; avoid a boxed-in remote terminal feel.
-set -g pane-border-style        'fg=colour238'
-set -g pane-active-border-style 'fg=colour238'
-
-# Command/message prompt — neutral
-set -g message-style 'bg=default,fg=colour246'
-"##;
-
-/// Context script called from tmux. Dispatch on $1:
-///   right  → "~/workspace/meviq · main · claude"   (status-right)
-///   title  → "claude · ~/workspace/meviq"          (terminal title)
-///   window → "onyx:claude"                         (window name)
-/// $2 is the pane's cwd, $3 is pane_current_command. Kept portable
-/// (POSIX sh only) and single-pass: no nested forks beyond one optional
-/// git call, and only when a .git is present in the cwd's ancestry.
-const ONYX_STATUS_SH: &str = r#"#!/bin/sh
-# onyx status — auto-generated
-mode=$1
-cwd=$2
-cmd=$3
-
-# cwd → ~/... for readability
-short_cwd=$cwd
-case "$cwd" in
-  "$HOME") short_cwd="~" ;;
-  "$HOME"/*) short_cwd="~${cwd#"$HOME"}" ;;
-esac
-
-# Normalize common shell names (bash/zsh/sh/fish/dash/ksh, with optional
-# leading dash for login shells) to the single label "shell". Anything
-# else — claude, codex, vim, python, etc. — passes through unchanged.
-case "$cmd" in
-  -bash|-zsh|-sh|bash|zsh|sh|fish|dash|ksh) cmd=shell ;;
-esac
-
-# Git branch — best-effort, silent if not a repo or git missing. Only
-# invoke git when we can cheaply see a .git marker on the cwd path, so
-# non-repo directories don't pay a subprocess cost.
-branch=
-if [ -n "$cwd" ] && [ -d "$cwd" ]; then
-  d=$cwd
-  while [ "$d" != / ] && [ -n "$d" ]; do
-    if [ -e "$d/.git" ]; then
-      branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null) \
-        || branch=$(git -C "$cwd" rev-parse --short HEAD 2>/dev/null) \
-        || branch=
-      break
-    fi
-    d=${d%/*}
-  done
-fi
-
-case "$mode" in
-  right)
-    out=$short_cwd
-    [ -n "$branch" ] && out="$out · $branch"
-    [ "$cmd" != shell ] && [ -n "$cmd" ] && out="$out · $cmd"
-    printf '%s' "$out"
-    ;;
-  title)
-    if [ "$cmd" = shell ] || [ -z "$cmd" ]; then
-      printf '%s' "$short_cwd"
-    else
-      printf '%s · %s' "$cmd" "$short_cwd"
-    fi
-    ;;
-  window)
-    [ -z "$cmd" ] && cmd=shell
-    printf 'onyx:%s' "$cmd"
-    ;;
-esac
-"#;
-
-/// URL picker invoked by `prefix + u`. Grabs URLs from the visible pane and
-/// copies the chosen one to the local system clipboard via OSC 52 (tmux
-/// `set-buffer -w`, honoring `set-clipboard on`). Dependency-free — pure tmux
-/// built-ins + POSIX sh, so it works on any remote without fzf/plugins.
-///
-/// Invoked two ways:
-///   url.sh <pane_id>          → capture, extract, then copy (1 URL) or menu (N)
-///   url.sh <pane_id> <index>  → copy the <index>-th URL from the stashed list
-/// The two-phase design lets the multi-URL menu re-select from a stable list
-/// (written to a temp file) rather than re-capturing a screen that may have
-/// redrawn, and keeps arbitrary URL text out of tmux command strings.
-const ONYX_URL_SH: &str = r##"#!/bin/sh
-# onyx url picker — auto-generated, do not edit (overwritten on update)
-self=$0
-pane=$1
-idx=$2
-# Per-pane stash of the extracted URL list; pane_id like "%3" → "3".
-tmp="${TMPDIR:-/tmp}/onyx-urls-$(printf '%s' "$pane" | tr -cd 'A-Za-z0-9')"
-
-# Phase 2: copy the idx-th URL from the stash (from a menu selection).
-if [ -n "$idx" ]; then
-  u=$(sed -n "${idx}p" "$tmp" 2>/dev/null)
-  if [ -z "$u" ]; then
-    tmux display-message "onyx: that URL is gone"
-    exit 0
-  fi
-  tmux set-buffer -w -- "$u"
-  tmux display-message "onyx: copied $u"
-  exit 0
-fi
-
-# Phase 1: capture the visible pane, -J re-joins wrapped lines so a long URL
-# (e.g. a Datadog auth link) is not split by the terminal's soft wrap.
-tmux capture-pane -p -J -t "$pane" -S -300 2>/dev/null \
-  | grep -oE 'https?://[^[:space:]]+' \
-  | sed 's/[].,;:)>"]*$//' \
-  | awk '!seen[$0]++' > "$tmp"
-
-n=$(grep -c . "$tmp" 2>/dev/null)
-[ -n "$n" ] || n=0
-
-if [ "$n" -eq 0 ]; then
-  tmux display-message "onyx: no URL on screen"
-  rm -f "$tmp"
-  exit 0
-fi
-
-if [ "$n" -eq 1 ]; then
-  u=$(sed -n '1p' "$tmp")
-  tmux set-buffer -w -- "$u"
-  tmux display-message "onyx: copied $u"
-  rm -f "$tmp"
-  exit 0
-fi
-
-# Multiple URLs → a built-in tmux menu (no external picker). Each item calls
-# back into this script with its 1-based index; only the pane id and integer
-# are interpolated into the tmux command, never the URL text itself.
-oldifs=$IFS
-IFS='
-'
-set -- -T "onyx: copy which URL?"
-i=1
-for u in $(cat "$tmp"); do
-  [ "$i" -gt 9 ] && break
-  set -- "$@" "$i  $u" "$i" "run-shell '$self $pane $i'"
-  i=$((i + 1))
-done
-IFS=$oldifs
-tmux display-menu "$@"
-"##;
-
-// ---------------------------------------------------------------------------
 // TLS — TOFU cert pinning (all connection modes)
 // ---------------------------------------------------------------------------
 
@@ -443,7 +225,6 @@ fn display_shell_path(path: &str) -> String {
 
 struct RemotePaths {
     remote_dir: String,
-    conf_dir: String,
 }
 
 fn normalize_remote_dir(candidate: &str, home: &str) -> String {
@@ -539,16 +320,7 @@ fn resolve_remote_paths(
         )
     })?;
 
-    let conf_default = format!("{home}/.config/onyx");
-    let conf_dir = match check_remote_dir_writable(target, identity, session, &conf_default) {
-        Ok(()) => conf_default,
-        Err(_) => format!("{remote_dir}/config"),
-    };
-
-    Ok(RemotePaths {
-        remote_dir,
-        conf_dir,
-    })
+    Ok(RemotePaths { remote_dir })
 }
 
 /// TOFU check run after every QUIC handshake, before any application data.
@@ -885,7 +657,7 @@ async fn tcp_proxy_fallback(target_host: &str, target_port: u16) -> Result<()> {
 const INTERACTIVE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Retry window after first successful session is dropped. Covers laptop
 /// sleep, VPN reconnect, multi-minute transitions, and flaky networks —
-/// the server-side tmux session outlives this by far (12h, see
+/// the server-side session outlives this by far (12h, see
 /// `DETACHED_SESSION_TTL` server-side), so this is purely how long the
 /// *client* keeps retrying before giving up and printing resume instructions.
 const INTERACTIVE_RECONNECT_WINDOW: Duration = Duration::from_secs(1800);
@@ -962,9 +734,6 @@ enum CliMode {
         workspace: Option<String>,
         /// Skip the resume picker and always start a fresh session.
         new_session: bool,
-        /// Run a plain login shell instead of tmux (native terminal
-        /// scrollback/selection; no tmux). Also settable via ONYX_NO_TMUX.
-        no_tmux: bool,
     },
     /// `onyx ls` — list known named workspaces.
     Ls,
@@ -1567,7 +1336,6 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
     let mut port_override: Option<u16> = None;
     let mut workspace: Option<String> = None;
     let mut new_session = false;
-    let mut no_tmux = false;
 
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1603,7 +1371,9 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 );
             }
             "--new" => new_session = true,
-            "--no-tmux" => no_tmux = true,
+            // Accepted and ignored: sessions are tmux-free now, so this is
+            // always the behavior. Kept so existing aliases keep working.
+            "--no-tmux" => {}
             // A leading `-` that isn't a known flag is almost always a
             // mistyped flag — reject it clearly rather than silently
             // treating it as a hostname and failing much later in
@@ -1628,7 +1398,6 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         port_override,
         workspace,
         new_session,
-        no_tmux,
     }))
 }
 
@@ -1722,10 +1491,6 @@ OPTIONS
   -i <file>                 SSH identity file for bootstrap
   -w, --workspace <name>    bind this session to a named workspace
   --new                     start a fresh session; skip the resume picker
-  --no-tmux                 run a plain login shell instead of tmux, so your
-                              local terminal's native scroll/selection/copy
-                              work (no tmux status bar or persistence). Also:
-                              ONYX_NO_TMUX=1 env var.
   -L, --forward L:R         tunnel localhost:L → remote:R (repeatable)
   --port <port>             QUIC port on the remote (default: 7272).
                               Also: ONYX_PORT=<port> env var (all modes).
@@ -1988,23 +1753,17 @@ mod parse_args_tests {
     fn new_flag_sets_new_session() {
         let out = parse_args_from(s(&["--new", "host"])).unwrap();
         match out {
-            ParseOutcome::Run(CliMode::Interactive { new_session, no_tmux, .. }) => {
+            ParseOutcome::Run(CliMode::Interactive { new_session, .. }) => {
                 assert!(new_session);
-                assert!(!no_tmux);
             }
             _ => panic!("expected Interactive"),
         }
     }
 
     #[test]
-    fn no_tmux_flag_sets_no_tmux() {
+    fn legacy_no_tmux_flag_is_accepted() {
         let out = parse_args_from(s(&["--no-tmux", "host"])).unwrap();
-        match out {
-            ParseOutcome::Run(CliMode::Interactive { no_tmux, .. }) => {
-                assert!(no_tmux);
-            }
-            _ => panic!("expected Interactive"),
-        }
+        assert!(matches!(out, ParseOutcome::Run(CliMode::Interactive { .. })));
     }
 
     #[test]
@@ -2616,33 +2375,21 @@ mod reliability_tests {
     }
 
     #[test]
-    fn remote_status_parser_detects_tmux_presence() {
+    fn remote_status_parser_reads_fields() {
         let parsed = parse_remote_status_output(
-            "h=abc r=yes own=yes ready=yes c=yes arch=x86_64 cv=def tmux=yes",
+            "h=abc r=yes own=yes ready=yes c=yes arch=x86_64",
             "abc",
-            "def",
         );
         assert!(parsed.hash_ok);
         assert!(parsed.healthy);
-        assert!(parsed.tmux_available);
-    }
-
-    #[test]
-    fn remote_status_parser_defaults_missing_tmux_to_basic_mode() {
-        let parsed = parse_remote_status_output(
-            "h=abc r=yes own=yes ready=yes c=yes arch=x86_64 cv=def",
-            "abc",
-            "def",
-        );
-        assert!(!parsed.tmux_available);
+        assert_eq!(parsed.arch, "x86_64");
     }
 
     #[test]
     fn post_install_status_forces_restart_after_owned_server_replace() {
         let mut status = parse_remote_status_output(
-            "h=old r=yes own=yes ready=yes c=yes arch=x86_64 cv=def tmux=yes",
+            "h=old r=yes own=yes ready=yes c=yes arch=x86_64",
             "new",
-            "def",
         );
         mark_replaced_owned_server_stopped(&mut status);
         assert!(!status.running);
@@ -2651,37 +2398,10 @@ mod reliability_tests {
     }
 
     #[test]
-    fn basic_mode_activation_requires_ssh_and_missing_tmux() {
-        assert!(should_activate_basic_mode(true, Some(false)));
-        assert!(!should_activate_basic_mode(true, Some(true)));
-        assert!(!should_activate_basic_mode(false, Some(false)));
-        assert!(!should_activate_basic_mode(true, None));
-    }
-
-    #[test]
-    fn tmux_messages_are_stable() {
+    fn exec_detach_hint_points_to_attach() {
         assert_eq!(
-            tmux_missing_warning_lines(),
-            [
-                "[onyx] tmux not found — running in basic mode (no persistent sessions)",
-                "[onyx] install tmux for full experience: sudo apt install tmux",
-            ]
-        );
-        assert_eq!(
-            tmux_feature_unavailable_message("attach"),
-            "[onyx] attach is not available without tmux"
-        );
-    }
-
-    #[test]
-    fn exec_detach_hint_switches_to_logs_and_kill_without_tmux() {
-        assert_eq!(
-            exec_detach_hint("job_123", Some(true)),
+            exec_detach_hint("job_123"),
             "[onyx] detached; reattach with: onyx attach <target> job_123"
-        );
-        assert_eq!(
-            exec_detach_hint("job_123", Some(false)),
-            "[onyx] detached; use logs/kill instead: onyx logs <target> job_123 | onyx kill <target> job_123"
         );
     }
 
@@ -3869,23 +3589,6 @@ fn source_hash() -> u64 {
     h
 }
 
-/// FNV-1a hash of the remote config files (tmux.conf + status.sh + url.sh).
-/// Separate from source_hash so config tweaks don't force a server rebuild.
-fn config_hash() -> u64 {
-    const OFFSET: u64 = 14695981039346656037;
-    const PRIME: u64 = 1099511628211;
-    let mut h = OFFSET;
-    for b in ONYX_TMUX_CONF
-        .bytes()
-        .chain(ONYX_STATUS_SH.bytes())
-        .chain(ONYX_URL_SH.bytes())
-    {
-        h ^= b as u64;
-        h = h.wrapping_mul(PRIME);
-    }
-    h
-}
-
 // ---------------------------------------------------------------------------
 // Remote status — one SSH call that returns everything we need to decide
 // whether to skip bootstrap entirely (fast path) or do work (slow path).
@@ -3897,18 +3600,15 @@ struct RemoteStatus {
     healthy: bool,   // onyx-server process is confirmed ready for QUIC
     own_pid: bool,   // server.pid still points to an onyx-server process
     has_cargo: bool, // ~/.cargo/bin/cargo exists and is executable
-    conf_ok: bool,   // tmux config + status script are current
-    tmux_available: bool,
     arch: String, // uname -m on the remote host
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BootstrapInfo {
-    tmux_available: bool,
     auth_token: String,
 }
 
-fn parse_remote_status_output(text: &str, expected_hash: &str, conf_hash: &str) -> RemoteStatus {
+fn parse_remote_status_output(text: &str, expected_hash: &str) -> RemoteStatus {
     let get = |key: &str| -> String {
         text.split_whitespace()
             .find(|kv| kv.starts_with(&format!("{key}=")))
@@ -3923,8 +3623,6 @@ fn parse_remote_status_output(text: &str, expected_hash: &str, conf_hash: &str) 
         healthy: get("ready") == "yes",
         own_pid: get("own") == "yes",
         has_cargo: get("c") == "yes",
-        conf_ok: get("cv") == conf_hash,
-        tmux_available: get("tmux") == "yes",
         arch: get("arch"),
     }
 }
@@ -3937,35 +3635,8 @@ fn mark_replaced_owned_server_stopped(status: &mut RemoteStatus) {
     }
 }
 
-fn tmux_missing_warning_lines() -> [&'static str; 2] {
-    [
-        "[onyx] tmux not found — running in basic mode (no persistent sessions)",
-        "[onyx] install tmux for full experience: sudo apt install tmux",
-    ]
-}
-
-fn emit_tmux_missing_warning() {
-    for line in tmux_missing_warning_lines() {
-        eprintln!("{line}");
-    }
-}
-
-fn tmux_feature_unavailable_message(feature: &str) -> String {
-    format!("[onyx] {feature} is not available without tmux")
-}
-
-fn should_activate_basic_mode(ssh_mode: bool, tmux_available: Option<bool>) -> bool {
-    ssh_mode && matches!(tmux_available, Some(false))
-}
-
-fn exec_detach_hint(job_id: &str, tmux_available: Option<bool>) -> String {
-    if matches!(tmux_available, Some(false)) {
-        format!(
-            "[onyx] detached; use logs/kill instead: onyx logs <target> {job_id} | onyx kill <target> {job_id}"
-        )
-    } else {
-        format!("[onyx] detached; reattach with: onyx attach <target> {job_id}")
-    }
+fn exec_detach_hint(job_id: &str) -> String {
+    format!("[onyx] detached; reattach with: onyx attach <target> {job_id}")
 }
 
 /// Single SSH round-trip: verifies auth and gathers all bootstrap pre-conditions.
@@ -3978,7 +3649,6 @@ fn remote_status(
     quic_port: u16,
     paths: &RemotePaths,
 ) -> Result<RemoteStatus> {
-    let conf_hash = format!("{:016x}", config_hash());
     // Everything in one shell snippet — one TCP+crypto handshake total.
     let script = format!(
         "h=$(cat {remote_dir}/.server-hash 2>/dev/null); \
@@ -3997,16 +3667,10 @@ fn remote_status(
          if [ -x ~/.cargo/bin/cargo ] && ~/.cargo/bin/cargo --version >/dev/null 2>&1; then \
            c=yes; \
          fi; \
-         tmux=no; \
-         if command -v tmux >/dev/null 2>&1; then \
-           tmux=yes; \
-         fi; \
          arch=$(uname -m 2>/dev/null || echo unknown); \
-         cv=$(cat {conf_dir}/.conf-hash 2>/dev/null); \
-         echo \"h=$h r=$r own=$own ready=$ready c=$c arch=$arch cv=$cv tmux=$tmux\"",
+         echo \"h=$h r=$r own=$own ready=$ready c=$c arch=$arch\"",
         server_log = shell_quote(&format!("{}/server.log", paths.remote_dir)),
         remote_dir = shell_quote(&paths.remote_dir),
-        conf_dir = shell_quote(&paths.conf_dir),
     );
 
     let out = ssh_cmd(target, identity, session)
@@ -4034,7 +3698,7 @@ fn remote_status(
     }
 
     let text = String::from_utf8_lossy(&out.stdout);
-    Ok(parse_remote_status_output(&text, expected_hash, &conf_hash))
+    Ok(parse_remote_status_output(&text, expected_hash))
 }
 
 fn read_server_auth_token(
@@ -4068,68 +3732,6 @@ fn auth_token_from_env() -> Result<String> {
         "ONYX_AUTH_TOKEN is invalid"
     );
     Ok(token)
-}
-
-// ---------------------------------------------------------------------------
-// Config file helpers — tmux.conf + status.sh
-// ---------------------------------------------------------------------------
-
-/// Upload tmux.conf and status.sh to CONF_DIR and record the config hash.
-/// Only called when config_hash() doesn't match the remote, so it's rare.
-fn ensure_config_files(
-    target: &str,
-    identity: Option<&str>,
-    session: Option<&SshSession>,
-    paths: &RemotePaths,
-) -> Result<()> {
-    let conf_hash = format!("{:016x}", config_hash());
-    ssh_capture(
-        target,
-        identity,
-        session,
-        &format!(
-            "mkdir -p {conf_dir} && chmod 700 {conf_dir}",
-            conf_dir = shell_quote(&paths.conf_dir)
-        ),
-    )
-    .context("preparing remote config directory")?;
-    ssh_upload(
-        target,
-        identity,
-        session,
-        &format!("{}/tmux.conf", paths.conf_dir),
-        ONYX_TMUX_CONF.as_bytes(),
-    )?;
-    ssh_upload(
-        target,
-        identity,
-        session,
-        &format!("{}/status.sh", paths.conf_dir),
-        ONYX_STATUS_SH.as_bytes(),
-    )?;
-    ssh_upload(
-        target,
-        identity,
-        session,
-        &format!("{}/url.sh", paths.conf_dir),
-        ONYX_URL_SH.as_bytes(),
-    )?;
-    let conf_hash_path = format!("{}/.conf-hash", paths.conf_dir);
-    ssh_capture(
-        target,
-        identity,
-        session,
-        &format!(
-            "chmod 700 {conf_dir} && chmod 600 {conf_dir}/tmux.conf && \
-                  chmod 700 {conf_dir}/status.sh && chmod 700 {conf_dir}/url.sh && \
-                  printf %s {conf_hash} > {conf_hash_path} && chmod 600 {conf_hash_path}",
-            conf_dir = shell_quote(&paths.conf_dir),
-            conf_hash = shell_quote(&conf_hash),
-            conf_hash_path = shell_quote(&conf_hash_path),
-        ),
-    )
-    .context("recording remote config version")?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4896,18 +4498,7 @@ async fn run_doctor_mode(raw_target: String, identity_file: Option<String>) -> R
                     "no"
                 }
             );
-            eprintln!(
-                "[onyx doctor] tmux:          {}",
-                if st.tmux_available {
-                    "installed"
-                } else {
-                    "missing (basic mode only)"
-                }
-            );
             eprintln!("[onyx doctor] remote arch:    {}", st.arch);
-            if !st.tmux_available {
-                eprintln!("[onyx doctor]   tip: install tmux for persistent interactive sessions");
-            }
             if !st.healthy {
                 eprintln!("[onyx doctor]   tip: run `onyx {raw_target}` to bootstrap");
             }
@@ -4992,29 +4583,12 @@ fn bootstrap(
     // Single SSH call: verify auth + get all state.
     let mut status = remote_status(ssh_target, identity, Some(&ssh), &hash, quic_port, &paths)
         .map_err(bootstrap_error_with_help)?;
-    let tmux_available = status.tmux_available;
-    let config_ready = !status.tmux_available || status.conf_ok;
 
     // ── Fast path ─────────────────────────────────────────────────────────────
-    if status.hash_ok && status.healthy && config_ready {
+    if status.hash_ok && status.healthy {
         let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
             .map_err(bootstrap_error_with_help)?;
-        return Ok(BootstrapInfo {
-            tmux_available,
-            auth_token,
-        });
-    }
-
-    // Config files stale but server is running — just push the new files.
-    if status.tmux_available && status.hash_ok && status.healthy && !status.conf_ok {
-        ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
-            .map_err(bootstrap_error_with_help)?;
-        let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
-            .map_err(bootstrap_error_with_help)?;
-        return Ok(BootstrapInfo {
-            tmux_available,
-            auth_token,
-        });
+        return Ok(BootstrapInfo { auth_token });
     }
 
     // ── Slow path ────────────────────────────────────────────────────────────
@@ -5057,20 +4631,13 @@ fn bootstrap(
         mark_replaced_owned_server_stopped(&mut status);
     }
 
-    if status.tmux_available {
-        ensure_config_files(ssh_target, identity, Some(&ssh), &paths)
-            .map_err(bootstrap_error_with_help)?;
-    }
     start_server(ssh_target, identity, Some(&ssh), quic_port, &status, &paths)
         .map_err(bootstrap_error_with_help)?;
     let auth_token = read_server_auth_token(ssh_target, identity, Some(&ssh), &paths)
         .map_err(bootstrap_error_with_help)?;
 
     eprintln!("[onyx] ready");
-    Ok(BootstrapInfo {
-        tmux_available,
-        auth_token,
-    })
+    Ok(BootstrapInfo { auth_token })
 }
 
 // ---------------------------------------------------------------------------
@@ -5547,7 +5114,6 @@ struct PreparedExecTarget {
     server_addr: SocketAddr,
     host_port: String,
     capture: FpCapture,
-    tmux_available: Option<bool>,
     auth_token: String,
 }
 
@@ -5558,7 +5124,6 @@ async fn prepare_exec_target(
 ) -> Result<PreparedExecTarget> {
     let target = build_target(&raw_target, identity_file, None)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
-    let mut tmux_available = None;
     let mut auth_token = None;
 
     if target.ssh_mode && !no_bootstrap {
@@ -5583,7 +5148,6 @@ async fn prepare_exec_target(
         .await
         .map_err(|e| anyhow::anyhow!("bootstrap task: {e}"))?
         .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
-        tmux_available = Some(info.tmux_available);
         auth_token = Some(info.auth_token);
     }
     let auth_token = match auth_token {
@@ -5609,7 +5173,6 @@ async fn prepare_exec_target(
         server_addr,
         host_port,
         capture,
-        tmux_available,
         auth_token,
     })
 }
@@ -6084,7 +5647,6 @@ async fn run_exec_mode(
         server_addr,
         host_port,
         capture,
-        tmux_available,
         auth_token,
     } = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
     let conn = connect_authenticated(
@@ -6129,10 +5691,7 @@ async fn run_exec_mode(
         emit_started_json(&job_id, started_at_unix, &command);
     } else if detach {
         println!("{job_id}");
-        if matches!(tmux_available, Some(false)) {
-            emit_tmux_missing_warning();
-        }
-        eprintln!("{}", exec_detach_hint(&job_id, tmux_available));
+        eprintln!("{}", exec_detach_hint(&job_id));
     }
 
     if detach {
@@ -6177,9 +5736,6 @@ async fn run_attach_mode(
     job_id: String,
 ) -> Result<()> {
     let prepared = prepare_exec_target(raw_target, identity_file, no_bootstrap).await?;
-    if matches!(prepared.tmux_available, Some(false)) {
-        anyhow::bail!("{}", tmux_feature_unavailable_message("attach"));
-    }
     let PreparedExecTarget {
         endpoint,
         server_addr,
@@ -6684,7 +6240,6 @@ async fn try_once(
     mode: BandwidthMode,
     raw_mode: &mut Option<RawMode>,
     allow_picker: bool,
-    no_tmux: bool,
     last_seq: &Arc<std::sync::atomic::AtomicU64>,
 ) -> Result<bool> {
     let first_connect = session.is_none();
@@ -6704,7 +6259,7 @@ async fn try_once(
     debug_log(&format!("QUIC handshake: {}ms", t_connect.elapsed().as_millis()));
 
     // On a genuinely fresh connect, ask the server for detached sessions and
-    // let the user resume one instead of always starting a new tmux session.
+    // let the user resume one instead of always starting a new session.
     // Runs once per process (only when session is still None); on any later
     // reconnect `first_connect` is false so this is skipped. Uses its own
     // short-lived stream on the already-open connection — no extra handshake.
@@ -6738,7 +6293,8 @@ async fn try_once(
                     term: Some(term),
                     cols: Some(cols),
                     rows: Some(rows),
-                    no_tmux,
+                    // Legacy field; the server no longer launches tmux.
+                    no_tmux: true,
                 },
             )
             .await?;
@@ -6794,7 +6350,7 @@ async fn try_once(
     *session = Some((session_id.clone(), resume_token));
     // Only print transport info on the initial connect.  On reconnects
     // raw mode is already active, so eprintln would corrupt the terminal
-    // display.  State is conveyed through the tmux status bar instead.
+    // display.  State is conveyed through the terminal title instead.
     if raw_mode.is_none() {
         if is_resume {
             eprintln!("[mode] QUIC  (resumed session {session_id})");
@@ -7139,7 +6695,6 @@ async fn main() -> Result<()> {
             port_override,
             workspace,
             new_session,
-            no_tmux,
         } => {
             let bandwidth_mode = if low_bandwidth {
                 BandwidthMode::low_bandwidth()
@@ -7157,7 +6712,6 @@ async fn main() -> Result<()> {
                 workspace,
                 None,
                 new_session,
-                no_tmux,
             )
             .await;
         }
@@ -7196,7 +6750,6 @@ async fn run_attach_workspace_mode(name: String, identity_file: Option<String>) 
         Some(name),
         initial_session,
         false,
-        false,
     )
     .await
 }
@@ -7217,19 +6770,12 @@ async fn run_interactive_session(
     workspace: Option<String>,
     initial_session: Option<(String, String)>,
     new_session: bool,
-    no_tmux: bool,
 ) -> Result<()> {
-    // --no-tmux via flag or ONYX_NO_TMUX env (set once, e.g. in your shell rc).
-    let no_tmux = no_tmux
-        || std::env::var("ONYX_NO_TMUX")
-            .map(|v| v != "0" && !v.is_empty())
-            .unwrap_or(false);
     // Resolve the target — runs `ssh -G <target>` for SSH aliases to get the
     // canonical hostname; the unresolved alias is kept only for SSH commands.
     let target = build_target(&raw_target, identity_file, port_override)
         .with_context(|| format!("resolving target '{raw_target}'"))?;
     let ssh_pool = target.ssh_mode.then(SshSessionPool::default);
-    let mut tmux_available = None;
     let mut auth_token = None;
 
     // SSH bootstrap (blocking, single SSH call on fast path).
@@ -7248,21 +6794,12 @@ async fn run_interactive_session(
             },
         )
         .map_err(|err| contextualize_bootstrap_error(err, "bootstrap failed"))?;
-        tmux_available = Some(info.tmux_available);
         auth_token = Some(info.auth_token);
     }
     let mut auth_token = match auth_token {
         Some(token) => token,
         None => auth_token_from_env()?,
     };
-
-    // With --no-tmux the user is deliberately running without tmux, so a
-    // missing remote tmux is not a reason to drop to plain SSH — keep QUIC and
-    // have the server run a plain login shell.
-    if !no_tmux && should_activate_basic_mode(target.ssh_mode, tmux_available) {
-        emit_tmux_missing_warning();
-        return exec_ssh_shell(&target.ssh_target, target.identity_file.as_deref());
-    }
 
     // Build QUIC SocketAddr from the resolved hostname (never the raw alias).
     let server_addr: SocketAddr = {
@@ -7363,7 +6900,6 @@ async fn run_interactive_session(
             bandwidth_mode,
             &mut raw_mode,
             allow_picker,
-            no_tmux,
             &last_seq,
         )
         .await
@@ -7476,7 +7012,7 @@ async fn run_interactive_session(
                 if session.is_some() {
                     eprintln!("[session] connection lost — reconnect window expired.");
                     eprintln!(
-                        "          the remote tmux session is retained on the server for up to 12h."
+                        "          the remote session is retained on the server for up to 12h."
                     );
                     if let Some(ws_name) = &workspace {
                         eprintln!(
