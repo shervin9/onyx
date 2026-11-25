@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0
 
 ### Added
 - **Automatic port forwarding.** When a program in your shell starts
