@@ -1,11 +1,16 @@
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 :root {
+  color-scheme: dark;
+  --ink: 255, 255, 255;
   --bg: #090909;
-  --surface: rgba(255, 255, 255, 0.028);
-  --surface-strong: rgba(255, 255, 255, 0.04);
-  --border: rgba(255, 255, 255, 0.07);
-  --border-strong: rgba(255, 255, 255, 0.12);
+  --bg-end: #080808;
+  --nav-bg: rgba(9, 9, 9, 0.82);
+  --footer-text: #4c4e57;
+  --surface: rgba(var(--ink), 0.028);
+  --surface-strong: rgba(var(--ink), 0.04);
+  --border: rgba(var(--ink), 0.07);
+  --border-strong: rgba(var(--ink), 0.12);
   --text: #ededef;
   --dim: #8f9097;
   --muted: #636368;
@@ -19,12 +24,34 @@
   --narrow: 760px;
 }
 
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --ink: 17, 20, 34;
+    --bg: #f8f8fa;
+    --bg-end: #f4f4f7;
+    --nav-bg: rgba(248, 248, 250, 0.82);
+    --footer-text: #7d7f88;
+    --surface: rgba(17, 20, 34, 0.025);
+    --surface-strong: rgba(17, 20, 34, 0.045);
+    --border: rgba(17, 20, 34, 0.09);
+    --border-strong: rgba(17, 20, 34, 0.15);
+    --text: #0e0f14;
+    --dim: #50525c;
+    --muted: #7d7f88;
+    --white: #0e0f14;
+    --glow: rgba(75, 95, 224, 0.1);
+    --glow-soft: rgba(75, 95, 224, 0.06);
+    --shadow: 0 24px 70px rgba(17, 20, 34, 0.12);
+  }
+}
+
 html { font-size: 16px; scroll-behavior: smooth; }
 
 body {
   background:
     radial-gradient(circle at top, rgba(92, 120, 214, 0.07), transparent 32%),
-    linear-gradient(180deg, #090909 0%, #080808 100%);
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-end) 100%);
   color: var(--text);
   font-family: var(--font);
   line-height: 1.6;
@@ -73,7 +100,7 @@ nav {
   justify-content: space-between;
   padding: 0 1.75rem;
   border-bottom: 1px solid var(--border);
-  background: rgba(9, 9, 9, 0.82);
+  background: var(--nav-bg);
   backdrop-filter: saturate(180%) blur(20px);
   -webkit-backdrop-filter: saturate(180%) blur(20px);
   z-index: 100;
@@ -127,7 +154,7 @@ section {
   padding: 0.25rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.015);
+  background: rgba(var(--ink), 0.015);
   color: var(--dim);
   font-size: 0.75rem;
   letter-spacing: 0.06em;
@@ -160,7 +187,7 @@ h1 {
   padding: 0.42rem 0.78rem;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.016);
+  background: rgba(var(--ink), 0.016);
   color: var(--dim);
   font-size: 0.8rem;
   text-decoration: none;
@@ -171,7 +198,7 @@ h1 {
 .docs-tab.is-active {
   color: var(--text);
   border-color: var(--border-strong);
-  background: rgba(255, 255, 255, 0.024);
+  background: rgba(var(--ink), 0.024);
 }
 
 .doc-section {
@@ -221,8 +248,8 @@ h1 {
   border: 1px solid var(--border);
   border-radius: 14px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.016)),
-    rgba(255, 255, 255, 0.014);
+    linear-gradient(180deg, rgba(var(--ink), 0.028), rgba(var(--ink), 0.016)),
+    rgba(var(--ink), 0.014);
 }
 
 .doc-card,
@@ -252,11 +279,11 @@ h1 {
   margin-top: 0.8rem;
   color: var(--text);
   text-decoration: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  border-bottom: 1px solid rgba(var(--ink), 0.14);
 }
 
 .doc-card a:hover {
-  border-color: rgba(255, 255, 255, 0.28);
+  border-color: rgba(var(--ink), 0.28);
 }
 
 .code-panel {
@@ -265,8 +292,8 @@ h1 {
 
 .panel-head {
   padding: 0.8rem 1rem;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  background: rgba(255, 255, 255, 0.018);
+  border-bottom: 1px solid rgba(var(--ink), 0.05);
+  background: rgba(var(--ink), 0.018);
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 500;
@@ -319,11 +346,11 @@ h1 {
 .inline-link {
   color: var(--text);
   text-decoration: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+  border-bottom: 1px solid rgba(var(--ink), 0.14);
 }
 
 .inline-link:hover {
-  border-color: rgba(255, 255, 255, 0.28);
+  border-color: rgba(var(--ink), 0.28);
 }
 
 footer {
@@ -336,7 +363,7 @@ footer {
   justify-content: space-between;
   gap: 1rem;
   font-size: 0.8125rem;
-  color: #4c4e57;
+  color: var(--footer-text);
 }
 
 footer a {

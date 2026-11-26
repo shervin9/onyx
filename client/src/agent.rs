@@ -97,6 +97,107 @@ fn build_claude(req: &AgentRequest) -> Vec<String> {
     c
 }
 
+// ── Onyx Guard ──────────────────────────────────────────────────────────────
+//
+// `--secret NAME[=host,...]` reads NAME from the *local* environment and
+// sends it to the server, which hands the agent a placeholder and injects
+// the real value only into request headers bound for those hosts.
+// `--allow host` and `--allow-port N` widen egress; `--guard` locks egress
+// down with no secrets at all. Any of them turns the guard on.
+
+/// Raw guard flags as typed on the command line.
+#[derive(Default, Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+pub struct GuardArgs {
+    pub enabled: bool,
+    pub secrets: Vec<String>,
+    pub allow: Vec<String>,
+    pub allow_ports: Vec<u16>,
+}
+
+impl GuardArgs {
+    pub fn is_on(&self) -> bool {
+        self.enabled || !self.secrets.is_empty() || !self.allow.is_empty() || !self.allow_ports.is_empty()
+    }
+}
+
+/// Hosts a well-known secret may go to when `--secret NAME` names no hosts.
+pub fn default_secret_hosts(name: &str) -> Option<&'static [&'static str]> {
+    Some(match name {
+        "ANTHROPIC_API_KEY" | "ANTHROPIC_AUTH_TOKEN" | "CLAUDE_CODE_OAUTH_TOKEN" => &["api.anthropic.com"],
+        "OPENAI_API_KEY" => &["api.openai.com"],
+        "GEMINI_API_KEY" | "GOOGLE_API_KEY" => &["generativelanguage.googleapis.com"],
+        "GITHUB_TOKEN" | "GH_TOKEN" => &["api.github.com", "github.com", "uploads.github.com"],
+        "GITLAB_TOKEN" => &["gitlab.com"],
+        "NPM_TOKEN" => &["registry.npmjs.org"],
+        "HF_TOKEN" => &["huggingface.co"],
+        "OPENROUTER_API_KEY" => &["openrouter.ai"],
+        "SLACK_BOT_TOKEN" => &["slack.com"],
+        _ => return None,
+    })
+}
+
+/// Hosts each agent needs to work at all (model API, sign-in refresh).
+pub fn agent_hosts(kind: AgentKind) -> &'static [&'static str] {
+    match kind {
+        AgentKind::Claude => &["api.anthropic.com", "*.anthropic.com", "claude.ai", "*.claude.ai", "*.claude.com"],
+        AgentKind::Codex => &["api.openai.com", "chatgpt.com", "auth.openai.com"],
+        AgentKind::Gemini => &[
+            "generativelanguage.googleapis.com",
+            "oauth2.googleapis.com",
+            "cloudcode-pa.googleapis.com",
+        ],
+        AgentKind::Aider => &[],
+    }
+}
+
+/// Turn the flags into a policy. `lookup` reads the local environment.
+pub fn build_guard(
+    kind: AgentKind,
+    args: &GuardArgs,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<shared::GuardSpec>, String> {
+    if !args.is_on() {
+        return Ok(None);
+    }
+    let mut spec = shared::GuardSpec::default();
+    for raw in &args.secrets {
+        let (name, hosts) = match raw.split_once('=') {
+            Some((n, h)) => (
+                n.trim().to_string(),
+                h.split(',').map(|x| x.trim().to_ascii_lowercase()).filter(|x| !x.is_empty()).collect::<Vec<_>>(),
+            ),
+            None => {
+                let n = raw.trim().to_string();
+                let hosts = default_secret_hosts(&n)
+                    .ok_or_else(|| {
+                        format!("--secret {n}: say where it may be sent, e.g. --secret {n}=api.example.com")
+                    })?
+                    .iter()
+                    .map(|h| h.to_string())
+                    .collect();
+                (n, hosts)
+            }
+        };
+        if hosts.is_empty() {
+            return Err(format!("--secret {name}: no hosts given"));
+        }
+        let value = lookup(&name)
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| format!("--secret {name}: {name} is not set in your local environment"))?;
+        if value.len() < 8 {
+            return Err(format!("--secret {name}: value is too short to protect (min 8 characters)"));
+        }
+        spec.secrets.push(shared::GuardSecret { name, value, hosts });
+    }
+    let mut allow: Vec<String> = agent_hosts(kind).iter().map(|h| h.to_string()).collect();
+    allow.extend(args.allow.iter().map(|h| h.trim().to_ascii_lowercase()));
+    allow.dedup();
+    spec.allow_hosts = allow;
+    spec.allow_ports = args.allow_ports.clone();
+    Ok(Some(spec))
+}
+
 // ── Best-effort adapters (unverified — see module docs) ─────────────────────
 
 fn build_codex(req: &AgentRequest) -> Vec<String> {
@@ -186,6 +287,51 @@ mod tests {
         assert!(cmd.windows(2).any(|w| w[0] == "--model" && w[1] == "opus"));
         assert!(cmd.windows(2).any(|w| w[0] == "--output-format" && w[1] == "stream-json"));
         assert!(cmd.iter().any(|a| a == "--dangerously-skip-permissions"));
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |k| map.get(k).cloned()
+    }
+
+    #[test]
+    fn guard_off_without_flags() {
+        assert!(build_guard(AgentKind::Claude, &GuardArgs::default(), env(&[])).unwrap().is_none());
+    }
+
+    #[test]
+    fn guard_known_secret_uses_default_hosts_and_local_value() {
+        let args = GuardArgs { secrets: vec!["GITHUB_TOKEN".into()], ..Default::default() };
+        let spec = build_guard(AgentKind::Claude, &args, env(&[("GITHUB_TOKEN", "ghp_0123456789abcdef")]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.secrets[0].value, "ghp_0123456789abcdef");
+        assert!(spec.secrets[0].hosts.contains(&"api.github.com".to_string()));
+        assert!(spec.allow_hosts.contains(&"api.anthropic.com".to_string()));
+    }
+
+    #[test]
+    fn guard_custom_hosts_and_errors() {
+        let args = GuardArgs {
+            secrets: vec!["DEPLOY_KEY=API.example.com, cdn.example.com".into()],
+            allow: vec!["pypi.org".into()],
+            allow_ports: vec![5432],
+            ..Default::default()
+        };
+        let spec = build_guard(AgentKind::Aider, &args, env(&[("DEPLOY_KEY", "abcdefgh1234")]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(spec.secrets[0].hosts, vec!["api.example.com", "cdn.example.com"]);
+        assert_eq!(spec.allow_hosts, vec!["pypi.org"]);
+        assert_eq!(spec.allow_ports, vec![5432]);
+
+        let unknown = GuardArgs { secrets: vec!["MY_KEY".into()], ..Default::default() };
+        assert!(build_guard(AgentKind::Claude, &unknown, env(&[("MY_KEY", "abcdefgh1234")]))
+            .unwrap_err()
+            .contains("say where"));
+        let missing = GuardArgs { secrets: vec!["OPENAI_API_KEY".into()], ..Default::default() };
+        assert!(build_guard(AgentKind::Codex, &missing, env(&[])).unwrap_err().contains("not set"));
     }
 
     #[test]

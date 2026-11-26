@@ -134,9 +134,47 @@ onyx agent run gpu-box --agent claude -- "fix the failing test"
 ```
 
 Only the `claude` adapter is verified; `codex`/`aider`/`gemini` are
-best-effort. The agent must already be installed and authenticated on the
-remote — Onyx does not inject credentials. Add `--yolo` to skip permission
-prompts (dangerous: the agent can then run arbitrary commands unattended).
+best-effort. The agent must already be installed on the remote. Add
+`--yolo` to skip permission prompts (dangerous: the agent can then run
+arbitrary commands unattended).
+
+### Agent Guard: agents use your keys without seeing them
+
+```bash
+export ANTHROPIC_API_KEY=… GITHUB_TOKEN=…        # on your machine
+onyx agent run dev-box --secret ANTHROPIC_API_KEY --secret GITHUB_TOKEN \
+  -- "fix the flaky test and open a PR"
+```
+
+```text
+[onyx guard] on · secrets: ANTHROPIC_API_KEY → api.anthropic.com; GITHUB_TOKEN → api.github.com,… · egress locked by Landlock
+[onyx guard] allowed api.anthropic.com · injecting ANTHROPIC_API_KEY
+[onyx guard] BLOCKED paste.example.net:443
+```
+
+- `--secret NAME` reads `NAME` from your **local** environment and sends it
+  over the authenticated QUIC channel. It is kept in onyx-server's memory
+  only (never on disk) and the server process is non-dumpable.
+- The agent gets a **same-length placeholder** in `NAME`. A small proxy in
+  onyx-server swaps the real value in **request headers only**, and only for
+  that secret's hosts. Bodies are never rewritten, so an agent cannot leak the
+  real key by posting its placeholder somewhere. Responses are scrubbed the
+  other way, so an echoed header never reveals it.
+- Well-known names have default hosts (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `GEMINI_API_KEY`, `GITHUB_TOKEN`/`GH_TOKEN`, `GITLAB_TOKEN`, `NPM_TOKEN`,
+  `HF_TOKEN`, `OPENROUTER_API_KEY`, `SLACK_BOT_TOKEN`); anything else needs
+  `--secret NAME=host1,host2`.
+- **Egress allowlist.** With any guard flag the agent can reach only its model
+  API, the secrets' hosts and `--allow <host>` (`*.example.com` for
+  subdomains). Plain HTTP is refused. `--allow-port <n>` permits direct TCP to
+  a port such as a local database. `--guard` turns this on without secrets.
+- **Can't be bypassed (Linux 6.7+).** The job is confined with Landlock so it
+  can open TCP connections only to the proxy and allowed ports, without root.
+  On older kernels the proxy still works but is advisory, and the job output
+  says so.
+- HTTPS to hosts with a secret is intercepted with a per-job CA that the job
+  trusts through `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `REQUESTS_CA_BUNDLE`
+  and friends; other allowed hosts are tunnelled untouched.
 
 Durable job history, independent of the in-memory job registry, survives
 `onyx-server` restarts:
@@ -192,6 +230,9 @@ onyx logs hetzner-dev job_xxx --json
   `~/.local/share/onyx/server.auth_token` with `0600` permissions.
 - Onyx runs commands on your remote machines. Use least-privilege accounts and
   review commands before execution.
+- Agent Guard secrets live only in onyx-server memory for the job's lifetime.
+  Other processes of the same user cannot read them (the server is
+  non-dumpable); root on the server can.
 
 See [SECURITY.md](SECURITY.md) for the full trust model and reporting policy.
 

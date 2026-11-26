@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Onyx Docs - Exec</title>
   <meta name="description" content="Run resumable remote jobs with Onyx exec.">
-  <meta name="theme-color" content="#090909">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#090909" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◆</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -76,6 +78,25 @@
         <article class="code-panel">
           <div class="panel-head">timeout</div>
           <pre><code>onyx exec prod --timeout 60s -- cargo test</code></pre>
+        </article>
+      </div>
+    </section>
+
+    <section class="doc-section">
+      <h2>Agent Guard</h2>
+      <p><span class="inline-code">onyx agent run</span> runs Claude Code, Codex or Gemini as a job. With <span class="inline-code">--secret NAME</span> the agent only sees a same-length placeholder. onyx-server puts the real value (read from your local environment, kept in server memory only) into request headers for that secret's hosts, and blocks every other destination. On Linux 6.7+ Landlock keeps the agent from bypassing the proxy.</p>
+      <div class="mini-grid">
+        <article class="code-panel">
+          <div class="panel-head">known key</div>
+          <pre><code>onyx agent run dev --secret ANTHROPIC_API_KEY -- "fix the test"</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">your own key</div>
+          <pre><code>onyx agent run dev --secret DEPLOY_TOKEN=api.example.com -- "ship it"</code></pre>
+        </article>
+        <article class="code-panel">
+          <div class="panel-head">widen egress</div>
+          <pre><code>onyx agent run dev --allow pypi.org --allow-port 5432 -- "add tests"</code></pre>
         </article>
       </div>
     </section>

@@ -40,6 +40,8 @@ const SERVER_CARGO_TOML: &str = include_str!("../../server/Cargo.toml");
 const SERVER_MAIN_RS: &str = include_str!("../../server/src/main.rs");
 const SERVER_DB_RS: &str = include_str!("../../server/src/db.rs");
 const SERVER_REPLAY_RS: &str = include_str!("../../server/src/replay.rs");
+const SERVER_PORTS_RS: &str = include_str!("../../server/src/ports.rs");
+const SERVER_GUARD_RS: &str = include_str!("../../server/src/guard.rs");
 
 const REMOTE_DIR: &str = "~/.local/share/onyx";
 const ONYX_SERVER_BINARY_ENV: &str = "ONYX_SERVER_BINARY";
@@ -772,6 +774,7 @@ enum CliMode {
         cwd: Option<String>,
         timeout_secs: Option<u64>,
         yolo: bool,
+        guard: agent::GuardArgs,
     },
 }
 
@@ -937,6 +940,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
         let mut prompt_parts: Vec<String> = Vec::new();
         let mut seen_dashdash = false;
         let mut in_prompt_tail = false;
+        let mut guard = agent::GuardArgs::default();
 
         while let Some(a) = it.next() {
             if seen_dashdash || in_prompt_tail {
@@ -949,6 +953,26 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
                 "--detach" => detach = true,
                 "--no-bootstrap" => no_bootstrap = true,
                 "--yolo" => yolo = true,
+                "--guard" => guard.enabled = true,
+                "--secret" => guard.secrets.push(
+                    it.next()
+                        .ok_or_else(|| "--secret requires NAME or NAME=host,...".to_string())?,
+                ),
+                "--allow" => guard.allow.push(
+                    it.next()
+                        .ok_or_else(|| "--allow requires a host".to_string())?,
+                ),
+                "--allow-port" => {
+                    let raw = it
+                        .next()
+                        .ok_or_else(|| "--allow-port requires a port".to_string())?;
+                    guard.allow_ports.push(
+                        raw.parse::<u16>()
+                            .ok()
+                            .filter(|p| *p > 0)
+                            .ok_or_else(|| format!("--allow-port: invalid port '{raw}'"))?,
+                    );
+                }
                 "-i" => {
                     identity = Some(
                         it.next()
@@ -1017,6 +1041,7 @@ fn parse_args_from(args: Vec<String>) -> Result<ParseOutcome, String> {
             cwd,
             timeout_secs,
             yolo,
+            guard,
         }));
     }
 
@@ -1286,7 +1311,8 @@ USAGE
   onyx kill   <target> <job-id> [--json]          stop a job
   onyx audit  <target> [--limit N] [--json]       job history (survives restart)
   onyx agent run <target> [--agent <kind>] [--model <m>] [--yolo] [--detach]
-                 [--cwd <dir>] [--timeout <dur>] [--json] -- <prompt...>
+                 [--secret NAME[=host,..]] [--allow <host>] [--allow-port <n>]
+                 [--guard] [--cwd <dir>] [--timeout <dur>] [--json] -- <prompt...>
   onyx proxy  <host> <port>                       transport for SSH ProxyCommand
   onyx doctor <target>                            diagnose connectivity
   onyx --help | --version
@@ -1317,6 +1343,17 @@ JOBS
   `onyx agent run` runs a coding agent CLI (claude; codex/aider/gemini are
   best-effort) as a job. The agent must already be installed and signed in
   on the remote. --yolo lets it act without approval.
+
+AGENT GUARD
+  --secret NAME reads NAME from your local environment. The agent only sees
+  a same-length placeholder; onyx-server swaps in the real value, in request
+  headers only, for that secret's hosts (known names such as
+  ANTHROPIC_API_KEY or GITHUB_TOKEN have defaults; otherwise NAME=host,...).
+  The real value is never written to the server's disk.
+  With any of --secret, --allow, --allow-port or --guard, the agent can only
+  reach its model API plus the hosts you allow; other connections are
+  blocked and shown in the job output. On Linux 6.7+ this is enforced by
+  Landlock, so the agent cannot bypass it (no root needed).
 
 OPTIONS
   -i <file>                 SSH identity file for bootstrap
@@ -1429,6 +1466,26 @@ mod parse_args_tests {
             }
             other => panic!("expected AgentRun, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_run_parses_guard_flags() {
+        let out = parse_args_from(s(&[
+            "agent", "run", "host", "--secret", "GITHUB_TOKEN", "--secret", "K=a.example.com",
+            "--allow", "pypi.org", "--allow-port", "5432", "--", "do", "it",
+        ]))
+        .unwrap();
+        match out {
+            ParseOutcome::Run(CliMode::AgentRun { guard, prompt, .. }) => {
+                assert_eq!(guard.secrets, vec!["GITHUB_TOKEN", "K=a.example.com"]);
+                assert_eq!(guard.allow, vec!["pypi.org"]);
+                assert_eq!(guard.allow_ports, vec![5432]);
+                assert!(guard.is_on());
+                assert_eq!(prompt, "do it");
+            }
+            other => panic!("expected AgentRun, got {other:?}"),
+        }
+        assert!(parse_args_from(s(&["agent", "run", "h", "--allow-port", "0", "--", "x"])).is_err());
     }
 
     #[test]
@@ -3345,6 +3402,8 @@ fn source_hash() -> u64 {
         .bytes()
         .chain(SERVER_DB_RS.bytes())
         .chain(SERVER_REPLAY_RS.bytes())
+        .chain(SERVER_PORTS_RS.bytes())
+        .chain(SERVER_GUARD_RS.bytes())
         .chain(SHARED_LIB_RS.bytes())
         .chain(SERVER_CARGO_TOML.bytes())
         .chain(SHARED_CARGO_TOML.bytes())
@@ -3841,7 +3900,12 @@ fn upload_and_build(
         &format!("{}/server/src/main.rs", paths.remote_dir),
         SERVER_MAIN_RS.as_bytes(),
     )?;
-    for (name, src) in [("db.rs", SERVER_DB_RS), ("replay.rs", SERVER_REPLAY_RS)] {
+    for (name, src) in [
+        ("db.rs", SERVER_DB_RS),
+        ("replay.rs", SERVER_REPLAY_RS),
+        ("ports.rs", SERVER_PORTS_RS),
+        ("guard.rs", SERVER_GUARD_RS),
+    ] {
         ssh_upload(
             target,
             identity,
@@ -5325,7 +5389,10 @@ async fn run_agent_run_mode(
     cwd: Option<String>,
     timeout_secs: Option<u64>,
     yolo: bool,
+    guard_args: agent::GuardArgs,
 ) -> Result<()> {
+    let guard = agent::build_guard(agent_kind, &guard_args, |k| std::env::var(k).ok())
+        .map_err(|e| anyhow::anyhow!("agent run: {e}"))?;
     let command = agent::build_command(&agent::AgentRequest {
         kind: agent_kind,
         prompt: &prompt,
@@ -5355,8 +5422,9 @@ async fn run_agent_run_mode(
         }
     }
 
-    // The agent reads its own credentials on the remote host (e.g. the
-    // remote's configured Claude/Codex auth). Onyx does not inject secrets.
+    // Without --secret the agent uses its own credentials on the remote.
+    // With it, real values stay in onyx-server memory and the agent only
+    // ever sees placeholders (see server/src/guard.rs).
     run_exec_mode(
         raw_target,
         identity_file,
@@ -5367,10 +5435,12 @@ async fn run_agent_run_mode(
         cwd,
         Vec::new(),
         timeout_secs,
+        guard,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_exec_mode(
     raw_target: String,
     identity_file: Option<String>,
@@ -5381,6 +5451,7 @@ async fn run_exec_mode(
     cwd: Option<String>,
     env: Vec<(String, String)>,
     timeout_secs: Option<u64>,
+    guard: Option<shared::GuardSpec>,
 ) -> Result<()> {
     let PreparedExecTarget {
         endpoint,
@@ -5407,6 +5478,7 @@ async fn run_exec_mode(
             cwd,
             env,
             timeout_secs,
+            guard,
         },
     )
     .await?;
@@ -6718,6 +6790,7 @@ async fn main() -> Result<()> {
                 cwd,
                 env,
                 timeout_secs,
+                None,
             )
             .await
         }
@@ -6771,6 +6844,7 @@ async fn main() -> Result<()> {
             cwd,
             timeout_secs,
             yolo,
+            guard,
         } => {
             return run_agent_run_mode(
                 raw_target,
@@ -6784,6 +6858,7 @@ async fn main() -> Result<()> {
                 cwd,
                 timeout_secs,
                 yolo,
+                guard,
             )
             .await
         }

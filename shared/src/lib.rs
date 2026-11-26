@@ -13,6 +13,53 @@ pub const CLOSE_TAKEN_OVER: &str = "session taken over by another client";
 pub const FEATURE_PORTS: u32 = 1 << 0;
 pub const FEATURE_OPEN_URL: u32 = 1 << 1;
 
+/// Onyx Guard: secrets and egress policy for one agent job.
+///
+/// The client sends real secret values over the authenticated QUIC channel;
+/// the server keeps them in memory only, hands the job same-length
+/// placeholders, and swaps them back in request headers bound for the
+/// secret's own hosts. Every other destination is refused.
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuardSpec {
+    pub secrets: Vec<GuardSecret>,
+    /// Extra hosts the job may reach (no secret is ever sent to them).
+    /// `*.example.com` matches subdomains of example.com.
+    pub allow_hosts: Vec<String>,
+    /// TCP ports the job may connect to directly, bypassing the proxy
+    /// (for example a local database or dev server).
+    pub allow_ports: Vec<u16>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuardSecret {
+    /// Environment variable name the job sees (holding the placeholder).
+    pub name: String,
+    pub value: String,
+    /// Hosts this secret may be sent to.
+    pub hosts: Vec<String>,
+}
+
+// Never print secret values, even in debug logs.
+impl std::fmt::Debug for GuardSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardSecret")
+            .field("name", &self.name)
+            .field("value", &"<redacted>")
+            .field("hosts", &self.hosts)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for GuardSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GuardSpec")
+            .field("secrets", &self.secrets)
+            .field("allow_hosts", &self.allow_hosts)
+            .field("allow_ports", &self.allow_ports)
+            .finish()
+    }
+}
+
 /// Which standard stream an exec output chunk came from.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum StdStream {
@@ -193,6 +240,9 @@ pub enum Message {
         env: Vec<(String, String)>,
         /// Kill the job after this many seconds (None = no limit).
         timeout_secs: Option<u64>,
+        /// Run the job under Onyx Guard (secrets broker + egress allowlist).
+        #[serde(default)]
+        guard: Option<GuardSpec>,
     },
     /// Client → Server: attach to an existing job. Server replays any
     /// buffered output with seq > last_seq, then streams new chunks.
@@ -469,11 +519,36 @@ mod tests {
             cwd: Some("/home/user".into()),
             env: vec![("RUST_LOG".into(), "info".into())],
             timeout_secs: Some(60),
+            guard: None,
         };
         assert!(matches!(
             round_trip(msg),
             Message::ExecStart { timeout_secs: Some(60), cwd: Some(c), .. } if c == "/home/user"
         ));
+    }
+
+    #[test]
+    fn exec_start_carries_guard_and_debug_redacts_secrets() {
+        let spec = GuardSpec {
+            secrets: vec![GuardSecret {
+                name: "GITHUB_TOKEN".into(),
+                value: "ghp_supersecretvalue123".into(),
+                hosts: vec!["api.github.com".into()],
+            }],
+            allow_hosts: vec!["*.npmjs.org".into()],
+            allow_ports: vec![5432],
+        };
+        assert!(!format!("{spec:?}").contains("supersecret"));
+        let msg = Message::ExecStart {
+            auth_token: String::new(),
+            command: vec!["claude".into()],
+            cwd: None,
+            env: vec![],
+            timeout_secs: None,
+            guard: Some(spec.clone()),
+        };
+        assert!(!format!("{msg:?}").contains("supersecret"));
+        assert!(matches!(round_trip(msg), Message::ExecStart { guard: Some(g), .. } if g == spec));
     }
 
     #[test]

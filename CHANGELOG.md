@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.5.0
+
+### Added
+- **Agent Guard.** `onyx agent run --secret NAME` gives the agent a
+  same-length placeholder instead of the real key. onyx-server swaps the real
+  value into request headers (never bodies) only for that secret's hosts, and
+  scrubs it from responses. The real value comes from your local environment
+  and is kept only in server memory. With `--secret`, `--allow <host>`,
+  `--allow-port <n>` or `--guard`, the agent can reach only its model API and
+  the hosts you allow; blocked attempts appear in the job output. On Linux
+  6.7+ Landlock confines the job to the proxy, so it cannot be bypassed.
+- Landing page and docs follow the browser's light or dark setting.
+
+### Fixed
+- The source-build fallback for onyx-server now uploads every server module
+  (`ports.rs` was missing, so that path failed to compile).
+- Restored the original Onyx wordmark on the site.
+
 ## v0.4.0
 
 ### Added

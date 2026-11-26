@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Onyx — The remote shell that survives your network</title>
   <meta name="description" content="A remote shell that keeps going through Wi-Fi, VPN and laptop disconnects. Replays exactly the output you missed, forwards dev-server ports automatically, opens links in your local browser, and works even when UDP is blocked. No tmux.">
-  <meta name="theme-color" content="#08080a">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#08080a" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
   <meta property="og:title" content="Onyx — The remote shell that survives your network">
   <meta property="og:description" content="Exact output replay after drops, automatic port forwarding, links that open locally, and an SSH bridge when UDP is blocked. No tmux.">
   <meta property="og:type" content="website">
@@ -15,7 +17,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=0.5.0">
 </head>
 <body id="top">
   <div class="backdrop" aria-hidden="true">
@@ -25,11 +27,12 @@
   </div>
 
   <nav class="nav" id="nav">
-    <a href="./" class="brand" aria-label="Onyx home"><span class="brand-mark" aria-hidden="true">◆</span>onyx</a>
+    <a href="./" class="logo" aria-label="Onyx home">onyx</a>
     <div class="nav-links">
       <a href="#features" class="nav-link">Features</a>
       <a href="#ports" class="nav-link">Ports</a>
       <a href="#exec" class="nav-link">Jobs</a>
+      <a href="#agents" class="nav-link">Agents</a>
       <a href="#compare" class="nav-link">Compare</a>
       <a href="./docs/" class="nav-link">Docs</a>
     </div>
@@ -47,7 +50,7 @@
     <section class="hero">
       <a class="release-pill" id="release-pill" href="https://github.com/shervin9/onyx/releases" target="_blank" rel="noopener noreferrer">
         <span class="release-dot" aria-hidden="true"></span>
-        <span id="release-pill-text">New: ports &amp; links open on your machine</span>
+        <span id="release-pill-text">New: Agent Guard, your agents never see your keys</span>
         <span aria-hidden="true">→</span>
       </a>
       <h1 class="reveal">The remote shell that<br class="br-wide"> <span class="h1-accent">survives your network.</span></h1>
@@ -161,6 +164,16 @@
           <h3>Jobs that outlive your laptop</h3>
           <p><code>onyx exec</code> runs commands owned by the server. Detach, close the lid, then reattach, read logs, or stop them later, with <code>--json</code> output for scripts and agents.</p>
         </article>
+
+        <article class="card card-agent reveal">
+          <div class="card-viz viz-guard" aria-hidden="true">
+            <span class="vg-key"><span class="vg-name">API_KEY=</span><span class="vg-val"><span class="vg-fake">sk-•••Xq9f</span><span class="vg-real">sk-•••7Lm2</span></span></span>
+            <span class="vg-dest vg-ok">api.anthropic.com ✓</span>
+            <span class="vg-dest vg-no">paste.example ✗</span>
+          </div>
+          <h3>Agents never see your keys</h3>
+          <p>Agents get placeholders. Onyx swaps in the real key only for its own API, and blocks everywhere else.</p>
+        </article>
       </div>
     </section>
 
@@ -241,6 +254,31 @@
     </section>
 
     <!-- ───────────────────────── Compare ───────────────────────── -->
+    <!-- ───────────────────────── Agent Guard ───────────────────────── -->
+    <section id="agents" class="split split-rev">
+      <div class="split-copy">
+        <span class="eyebrow reveal">New · Agent Guard</span>
+        <h2 class="reveal">Agents use your keys. They never see them.</h2>
+        <p class="reveal">Run Claude Code, Codex or Gemini on your server with <code>--secret</code>. The agent only gets a look-alike placeholder. Onyx puts the real key back on the way out, and only for that key's own hosts.</p>
+        <ul class="checks reveal">
+          <li>Real keys stay in onyx-server memory, never on disk</li>
+          <li>Swapped into request headers only, so they can't be posted anywhere</li>
+          <li>Every other destination is blocked and shown in the job log</li>
+          <li>Locked by Linux Landlock: no root, no way around the proxy</li>
+        </ul>
+      </div>
+      <div class="split-visual reveal">
+        <div class="term agent-term" id="agent-term">
+          <div class="term-top">
+            <div class="term-dots" aria-hidden="true"><span></span><span></span><span></span></div>
+            <span class="term-title">onyx agent run</span>
+            <span class="badge" id="agent-badge" data-tone="neutral">guarded</span>
+          </div>
+          <div class="term-body" id="agent-body"></div>
+        </div>
+      </div>
+    </section>
+
     <section id="compare">
       <div class="section-head reveal">
         <span class="eyebrow">Compare</span>
@@ -259,6 +297,7 @@
             <tr><th scope="row">Dev-server ports forwarded</th><td class="col-onyx yes">Automatically</td><td class="part">Manual <code>-L</code></td><td class="no">No</td><td class="part">Manual <code>-L</code></td></tr>
             <tr><th scope="row">Remote links open locally</th><td class="col-onyx yes">Yes</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
             <tr><th scope="row">Detachable jobs with logs</th><td class="col-onyx yes">Yes, <code>--json</code></td><td class="no">No</td><td class="no">No</td><td class="part">Via panes</td></tr>
+            <tr><th scope="row">Agents can't see or leak your keys</th><td class="col-onyx yes">Agent Guard</td><td class="no">No</td><td class="no">No</td><td class="no">No</td></tr>
           </tbody>
         </table>
       </div>
@@ -308,7 +347,7 @@
   <footer class="footer">
     <div class="footer-top">
       <div class="footer-brand">
-        <a href="./" class="brand"><span class="brand-mark" aria-hidden="true">◆</span>onyx</a>
+        <a href="./" class="logo">onyx</a>
         <p>The remote shell that survives your network. Built in Rust on QUIC.</p>
         <div class="footer-badges">
           <span class="fbadge">MIT licensed</span>
@@ -322,6 +361,7 @@
           <a href="#features">Features</a>
           <a href="#ports">Ports &amp; links</a>
           <a href="#exec">Resumable jobs</a>
+          <a href="#agents">Agent Guard</a>
           <a href="#compare">Compare</a>
           <a href="#install">Install</a>
         </div>
@@ -345,12 +385,15 @@
     <div class="footer-bottom">
       <span>© <span id="year">2026</span> Onyx contributors · <a href="https://github.com/shervin9/onyx/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT License</a></span>
       <a class="ph" href="https://www.producthunt.com/products/onyx-cli?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-onyx-cli" target="_blank" rel="noopener noreferrer">
-        <img alt="Onyx CLI on Product Hunt" width="200" height="43" loading="lazy" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133623&amp;theme=dark">
+        <picture>
+          <source media="(prefers-color-scheme: light)" srcset="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133623&amp;theme=light">
+          <img alt="Onyx CLI on Product Hunt" width="200" height="43" loading="lazy" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1133623&amp;theme=dark">
+        </picture>
       </a>
       <a href="#top" class="to-top" id="to-top">Back to top ↑</a>
     </div>
   </footer>
 
-  <script src="script.js"></script>
+  <script src="script.js?v=0.5.0"></script>
 </body>
 </html>

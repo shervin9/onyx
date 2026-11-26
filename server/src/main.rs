@@ -1,4 +1,5 @@
 mod db;
+mod guard;
 mod ports;
 mod replay;
 
@@ -1130,6 +1131,7 @@ fn evict_oldest_finished(jobs: &mut HashMap<String, JobMeta>) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_exec_start(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
@@ -1138,6 +1140,7 @@ async fn handle_exec_start(
     cwd: Option<String>,
     env: Vec<(String, String)>,
     timeout_secs: Option<u64>,
+    guard_spec: Option<shared::GuardSpec>,
 ) -> Result<()> {
     if command.is_empty() {
         send_msg(
@@ -1168,6 +1171,28 @@ async fn handle_exec_start(
     let job_id = new_job_id()?;
     let command_display = command.join(" ");
 
+    // Onyx Guard: start the per-job secrets proxy before spawning the job.
+    let (guard_tx, mut guard_rx) = mpsc::unbounded_channel::<String>();
+    let guard = match guard_spec {
+        Some(spec) => {
+            let dir = onyx_data_dir().join("guard").join(&job_id);
+            match guard::Guard::start(spec, &dir, guard_tx).await {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    let reason = format!("exec: {e:#}");
+                    send_msg(&mut send, &Message::ExecError { reason: reason.clone() })
+                        .await
+                        .ok();
+                    anyhow::bail!(reason);
+                }
+            }
+        }
+        None => {
+            drop(guard_tx);
+            None
+        }
+    };
+
     // Spawn the child. We run argv directly (no shell) for predictability —
     // users who need pipes or redirects pass `sh -c '<pipeline>'` as argv
     // explicitly. Matches kubectl / docker exec semantics.
@@ -1178,6 +1203,11 @@ async fn handle_exec_start(
     }
     for (k, v) in &env {
         cmd.env(k, v);
+    }
+    if let Some(g) = &guard {
+        for (k, v) in &g.env {
+            cmd.env(k, v);
+        }
     }
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -1191,6 +1221,9 @@ async fn handle_exec_start(
             reset_signal_state();
             Ok(())
         });
+    }
+    if let Some(g) = &guard {
+        g.confine(&mut cmd);
     }
 
     let mut child = match cmd.spawn() {
@@ -1264,6 +1297,24 @@ async fn handle_exec_start(
     db::record_started(&job_id, &command, &command_display, started_at_unix);
     println!("[job {job_id}] started: {command_display}");
 
+    if let Some(g) = &guard {
+        println!("[job {job_id}] {}", g.banner);
+        if let Some(meta) = jobs.lock().unwrap().get_mut(&job_id) {
+            job_push_chunk(meta, StdStream::Stderr, format!("{}\n", g.banner).into_bytes());
+        }
+        let jobs_ev = jobs.clone();
+        let job_id_ev = job_id.clone();
+        tokio::spawn(async move {
+            while let Some(line) = guard_rx.recv().await {
+                if let Some(meta) = jobs_ev.lock().unwrap().get_mut(&job_id_ev) {
+                    if matches!(meta.status, JobStatus::Running | JobStatus::Detached) {
+                        job_push_chunk(meta, StdStream::Stderr, line.into_bytes());
+                    }
+                }
+            }
+        });
+    }
+
     // Ack so the client gets the id immediately (important for --detach).
     send_msg(
         &mut send,
@@ -1289,6 +1340,8 @@ async fn handle_exec_start(
             timeout_secs,
         )
         .await;
+        // The proxy (and the real secrets it holds) dies with the job.
+        drop(guard);
     });
 
     // Stream live output until either the client drops or the job finishes.
@@ -1716,8 +1769,9 @@ async fn handle_stream(
             cwd,
             env,
             timeout_secs,
+            guard,
             ..
-        } => handle_exec_start(send, recv, jobs, command, cwd, env, timeout_secs).await,
+        } => handle_exec_start(send, recv, jobs, command, cwd, env, timeout_secs, guard).await,
         Message::Kill { job_id, .. } => handle_kill(send, jobs, job_id).await,
         Message::ExecAttach {
             job_id, last_seq, ..

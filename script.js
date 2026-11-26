@@ -262,6 +262,44 @@
     }
   });
 
+  // ── Agent Guard: placeholders in, real keys only where allowed ────
+  var agentBadge = document.getElementById("agent-badge");
+  var guardCount = { ok: 0, blocked: 0 };
+  function setGuard(tone) {
+    if (!agentBadge) return;
+    var label = guardCount.ok + " allowed · " + guardCount.blocked + " blocked";
+    agentBadge.textContent = guardCount.ok || guardCount.blocked ? label : "guarded";
+    agentBadge.setAttribute("data-tone", tone);
+  }
+  function allow() { guardCount.ok += 1; setGuard("running"); }
+  function block() { guardCount.blocked += 1; setGuard("lost"); }
+
+  var agentScene = new Scene(document.getElementById("agent-term"), document.getElementById("agent-body"), [
+    typed("onyx agent run dev-box --secret ANTHROPIC_API_KEY --secret GITHUB_TOKEN -- \"fix the flaky test, open a PR\"", 250),
+    out("[onyx guard] on · 2 secrets · egress locked by Landlock", "ln-guard", 700),
+    act(allow),
+    out("[onyx guard] allowed api.anthropic.com · injecting ANTHROPIC_API_KEY", "ln-guard", 800),
+    out("● Reading tests/payments.spec.ts", "", 600),
+    out("● Fixed a race in retryWithBackoff()", "", 700),
+    act(allow),
+    out("[onyx guard] allowed api.github.com · injecting GITHUB_TOKEN", "ln-guard", 700),
+    out("● Opened pull request #482", "ln-ok", 800),
+    act(block),
+    out("[onyx guard] BLOCKED paste.example.net:443", "ln-block", 900),
+    act(function () { setGuard("done"); }),
+    out("[job] finished  exit=0", "ln-ok", 600)
+  ], {
+    loopDelay: 3600,
+    reset: function () { guardCount.ok = 0; guardCount.blocked = 0; setGuard("neutral"); },
+    staticRender: function (s) {
+      guardCount.ok = 2; guardCount.blocked = 1; setGuard("done");
+      s.line("onyx agent run dev-box --secret ANTHROPIC_API_KEY -- \"fix the flaky test\"", "ln-prompt");
+      s.line("[onyx guard] allowed api.anthropic.com · injecting ANTHROPIC_API_KEY", "ln-guard");
+      s.line("● Opened pull request #482", "ln-ok");
+      s.line("[onyx guard] BLOCKED paste.example.net:443", "ln-block");
+    }
+  });
+
   // ── Exec: detach, reattach, drop, resume ──────────────────────────
   var badge = document.getElementById("exec-badge");
   function setBadge(label, tone) {
@@ -299,7 +337,7 @@
     }
   });
 
-  var scenes = [heroScene, portsScene, execScene];
+  var scenes = [heroScene, portsScene, agentScene, execScene];
   scenes.forEach(mountScene);
 
   // ── Install tabs (click + arrow keys) ─────────────────────────────
