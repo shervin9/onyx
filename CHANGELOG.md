@@ -14,6 +14,8 @@
 - Landing page and docs follow the browser's light or dark setting.
 
 ### Fixed
+- Jobs and agents now find tools in per-user bin dirs such as `~/.local/bin`
+  (where Claude Code installs itself), even when the server's PATH lacks them.
 - The source-build fallback for onyx-server now uploads every server module
   (`ports.rs` was missing, so that path failed to compile).
 - Restored the original Onyx wordmark on the site.

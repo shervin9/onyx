@@ -1131,6 +1131,28 @@ fn evict_oldest_finished(jobs: &mut HashMap<String, JobMeta>) -> bool {
     }
 }
 
+/// PATH for exec jobs: the onyx shim dir, then existing per-user bin dirs
+/// that are missing from the server's PATH, then the server's PATH.
+fn job_path() -> String {
+    let base = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+    let have: std::collections::HashSet<&str> = base.split(':').collect();
+    let mut parts: Vec<String> = Vec::new();
+    let mut push = |d: std::path::PathBuf| {
+        let s = d.to_string_lossy().into_owned();
+        if d.is_dir() && !have.contains(s.as_str()) && !parts.contains(&s) {
+            parts.push(s);
+        }
+    };
+    push(onyx_data_dir().join("bin"));
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        for sub in [".local/bin", "bin", ".cargo/bin", ".bun/bin", ".npm-global/bin", ".deno/bin"] {
+            push(home.join(sub));
+        }
+    }
+    parts.push(base);
+    parts.join(":")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_exec_start(
     mut send: quinn::SendStream,
@@ -1201,6 +1223,10 @@ async fn handle_exec_start(
     if let Some(dir) = &cwd {
         cmd.current_dir(dir);
     }
+    // The server is started from a non-login SSH shell, so its PATH usually
+    // lacks per-user bin dirs where agents install themselves (Claude Code
+    // lives in ~/.local/bin). The child's PATH is also used to find argv[0].
+    cmd.env("PATH", job_path());
     for (k, v) in &env {
         cmd.env(k, v);
     }
